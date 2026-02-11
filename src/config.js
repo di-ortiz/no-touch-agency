@@ -6,11 +6,11 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1),
   OPENAI_API_KEY: z.string().optional().default(''),
 
-  // WhatsApp (Twilio)
-  TWILIO_ACCOUNT_SID: z.string().min(1),
-  TWILIO_AUTH_TOKEN: z.string().min(1),
-  TWILIO_WHATSAPP_FROM: z.string().min(1),
-  OWNER_WHATSAPP_NUMBER: z.string().min(1),
+  // WhatsApp Cloud API (Meta)
+  WHATSAPP_ACCESS_TOKEN: z.string().min(1),
+  WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
+  WHATSAPP_OWNER_PHONE: z.string().min(1),
+  WHATSAPP_VERIFY_TOKEN: z.string().optional().default(''),
 
   // ClickUp
   CLICKUP_API_TOKEN: z.string().min(1),
@@ -83,10 +83,10 @@ try {
     // In test mode, use defaults for everything
     config = envSchema.parse({
       ANTHROPIC_API_KEY: 'test-key',
-      TWILIO_ACCOUNT_SID: 'test-sid',
-      TWILIO_AUTH_TOKEN: 'test-token',
-      TWILIO_WHATSAPP_FROM: 'whatsapp:+10000000000',
-      OWNER_WHATSAPP_NUMBER: 'whatsapp:+10000000001',
+      WHATSAPP_ACCESS_TOKEN: 'test-token',
+      WHATSAPP_PHONE_NUMBER_ID: '000000000000',
+      WHATSAPP_OWNER_PHONE: '10000000001',
+      WHATSAPP_VERIFY_TOKEN: 'test-verify',
       CLICKUP_API_TOKEN: 'test-clickup',
       CLICKUP_TEAM_ID: 'test-team',
       NODE_ENV: 'test',

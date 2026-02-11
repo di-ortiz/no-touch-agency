@@ -1,4 +1,4 @@
-import twilio from 'twilio';
+import axios from 'axios';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
@@ -7,15 +7,15 @@ import { retry } from '../utils/retry.js';
 
 const log = logger.child({ platform: 'whatsapp' });
 
-const client = twilio(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN);
+const GRAPH_API_BASE = 'https://graph.facebook.com/v21.0';
 
 /**
- * Send a WhatsApp message to the agency owner.
+ * Send a WhatsApp text message via Meta Cloud API.
  * @param {string} message - Message text (supports WhatsApp formatting: *bold*, _italic_, ```code```)
- * @param {string} [to] - Recipient number (defaults to OWNER)
+ * @param {string} [to] - Recipient number (defaults to OWNER). Use raw number without 'whatsapp:' prefix.
  */
 export async function sendWhatsApp(message, to) {
-  const recipient = to || config.OWNER_WHATSAPP_NUMBER;
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
 
   // WhatsApp has a 4096 char limit per message. Split if needed.
   const chunks = splitMessage(message, 4000);
@@ -23,20 +23,31 @@ export async function sendWhatsApp(message, to) {
   for (const chunk of chunks) {
     await rateLimited('whatsapp', async () => {
       return retry(async () => {
-        const result = await client.messages.create({
-          body: chunk,
-          from: config.TWILIO_WHATSAPP_FROM,
-          to: recipient,
-        });
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'text',
+            text: { body: chunk },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
 
         recordCost({
-          platform: 'twilio',
+          platform: 'whatsapp-cloud',
           workflow: 'whatsapp',
-          costCentsOverride: 0.5, // ~$0.005 per message
+          costCentsOverride: 0.5, // ~$0.005 per message (varies by country)
         });
 
-        log.debug('WhatsApp sent', { sid: result.sid, to: recipient });
-        return result;
+        log.debug('WhatsApp sent', { messageId: result.data?.messages?.[0]?.id, to: recipient });
+        return result.data;
       }, {
         retries: 3,
         label: 'WhatsApp send',

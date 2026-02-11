@@ -39,25 +39,44 @@ app.use('/webhook', rateLimit({
 // Pending approval actions
 const pendingApprovals = new Map();
 
-// --- Twilio Webhook ---
-app.post('/webhook/whatsapp', async (req, res) => {
-  // Respond immediately to Twilio
-  res.status(200).send('<Response></Response>');
+// --- WhatsApp Cloud API Webhook Verification (GET) ---
+app.get('/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-  const from = req.body.From;
-  const body = req.body.Body?.trim();
-
-  if (!body) return;
-
-  log.info('WhatsApp message received', { from, body: body.substring(0, 100) });
-
-  // Only accept messages from the owner
-  if (from !== config.OWNER_WHATSAPP_NUMBER) {
-    log.warn('Message from unauthorized number', { from });
-    return;
+  if (mode === 'subscribe' && token === config.WHATSAPP_VERIFY_TOKEN) {
+    log.info('Webhook verified');
+    return res.status(200).send(challenge);
   }
+  res.sendStatus(403);
+});
+
+// --- WhatsApp Cloud API Webhook (POST) ---
+app.post('/webhook/whatsapp', async (req, res) => {
+  // Respond immediately to Meta
+  res.sendStatus(200);
 
   try {
+    const entry = req.body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const message = changes?.value?.messages?.[0];
+
+    if (!message || message.type !== 'text') return;
+
+    const from = message.from; // e.g. "1234567890"
+    const body = message.text?.body?.trim();
+
+    if (!body) return;
+
+    log.info('WhatsApp message received', { from, body: body.substring(0, 100) });
+
+    // Only accept messages from the owner
+    if (from !== config.WHATSAPP_OWNER_PHONE) {
+      log.warn('Message from unauthorized number', { from });
+      return;
+    }
+
     await handleCommand(body);
   } catch (error) {
     log.error('Command handling failed', { error: error.message });
