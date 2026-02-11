@@ -56,7 +56,9 @@ Possible intents:
 - "briefing": Get morning briefing. Params: none
 - "competitor": Run competitor analysis. Params: clientName
 - "budget": Check budget pacing. Params: clientName
-- "create_campaign": Start new campaign. Params: clientName, objective
+- "create_campaign": Start new campaign brief. Params: clientName, objective
+- "generate_creatives": Generate ad creatives. Params: clientName, platform
+- "standup": Get daily standup. Params: none
 - "cost": Get AI cost report. Params: period (today/week/month)
 - "audit": Get audit log. Params: clientName, limit
 - "client_info": Get client profile. Params: clientName

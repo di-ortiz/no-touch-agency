@@ -4,6 +4,14 @@ import { initializeSchedule } from './services/scheduler.js';
 import { runMorningBriefing } from './workflows/morning-briefing.js';
 import { runDailyMonitor } from './workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from './workflows/clickup-monitor.js';
+import { runBudgetPacing } from './workflows/budget-pacing.js';
+import { runCreativeFatigueCheck } from './workflows/creative-fatigue.js';
+import { runWeeklyReports } from './workflows/weekly-report.js';
+import { runMonthlyReview } from './workflows/monthly-review.js';
+import { runCompetitorMonitor } from './workflows/competitor-monitor.js';
+import { runCrossDepartmentDetection } from './workflows/cross-department.js';
+import { runLandingPageAnalysis } from './workflows/landing-page-analysis.js';
+import { runTestManager } from './workflows/ab-test-manager.js';
 import { sendAlert } from './api/whatsapp.js';
 import config from './config.js';
 import fs from 'fs';
@@ -20,32 +28,17 @@ async function main() {
   // 1. Start WhatsApp webhook server
   startServer();
 
-  // 2. Initialize scheduled workflows
+  // 2. Initialize all scheduled workflows
   initializeSchedule({
     morningBriefing: runMorningBriefing,
     dailyMonitor: runDailyMonitor,
-    budgetPacing: async () => {
-      // Reuse daily monitor with budget focus
-      await runDailyMonitor();
-    },
-    creativeFatigue: async () => {
-      log.info('Creative fatigue check - Phase 4 feature');
-    },
-    weeklyReport: async () => {
-      log.info('Weekly report generation - Phase 5 feature');
-    },
-    monthlyReview: async () => {
-      log.info('Monthly review - Phase 5 feature');
-    },
-    competitorMonitor: async () => {
-      log.info('Competitor monitoring - Phase 3 feature');
-    },
-    crossDepartment: async () => {
-      log.info('Cross-department detection - Phase 6 feature');
-    },
-    landingPageAnalysis: async () => {
-      log.info('Landing page analysis - Phase 6 feature');
-    },
+    budgetPacing: runBudgetPacing,
+    creativeFatigue: runCreativeFatigueCheck,
+    weeklyReport: runWeeklyReports,
+    monthlyReview: runMonthlyReview,
+    competitorMonitor: runCompetitorMonitor,
+    crossDepartment: runCrossDepartmentDetection,
+    landingPageAnalysis: runLandingPageAnalysis,
   });
 
   // 3. Run ClickUp monitor at startup and schedule it

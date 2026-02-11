@@ -6,6 +6,13 @@ import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from '../workflows/clickup-monitor.js';
+import { onboardNewClient } from '../workflows/client-onboarding.js';
+import { generateCampaignBrief } from '../workflows/campaign-brief.js';
+import { generateCreatives } from '../workflows/creative-generation.js';
+import { generateWeeklyReport } from '../workflows/weekly-report.js';
+import { generateMonthlyReview } from '../workflows/monthly-review.js';
+import { analyzeCompetitors } from '../workflows/competitor-monitor.js';
+import { runBudgetPacing } from '../workflows/budget-pacing.js';
 import { getJobs, runJob } from '../services/scheduler.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as googleAds from '../api/google-ads.js';
@@ -114,6 +121,12 @@ async function handleCommand(message) {
       return handleAuditLog(parsed.params);
     case 'client_info':
       return handleClientInfo(parsed.params);
+    case 'create_campaign':
+      return handleCreateCampaign(parsed.params);
+    case 'standup':
+      return handleStandup();
+    case 'generate_creatives':
+      return handleGenerateCreatives(parsed.params);
     case 'help':
       return handleHelp();
     default:
@@ -210,7 +223,19 @@ async function handleReport(params) {
   if (!clientName) {
     return sendWhatsApp('❌ Please specify a client name.\nExample: "Generate weekly report for Acme Corp"');
   }
-  return sendWhatsApp(`📝 Report generation for ${clientName} has been queued. I'll send it when ready.`);
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`📝 Generating ${type || 'weekly'} report for ${client.name}...`);
+  try {
+    if (type === 'monthly') {
+      await generateMonthlyReview(client.id);
+    } else {
+      await generateWeeklyReport(client.id);
+    }
+  } catch (e) {
+    await sendWhatsApp(`❌ Report generation failed: ${e.message}`);
+  }
 }
 
 async function handleOverdue() {
@@ -228,7 +253,62 @@ async function handleBriefing() {
 
 async function handleCompetitor(params) {
   const { clientName } = params || {};
-  return sendWhatsApp(`🔍 Competitor analysis for ${clientName || 'all clients'} has been queued. Results will be ready shortly.`);
+  if (!clientName) {
+    return sendWhatsApp('❌ Please specify a client name.\nExample: "Competitor analysis for Acme Corp"');
+  }
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`🔍 Running competitor analysis for ${client.name}...`);
+  try {
+    const result = await analyzeCompetitors(client);
+    const summary = result.highlights.map(h => `• ${h}`).join('\n');
+    await sendWhatsApp(`🔍 *Competitor Analysis: ${client.name}*\n\n${summary}\n\n_Full report saved to Google Drive_`);
+  } catch (e) {
+    await sendWhatsApp(`❌ Competitor analysis failed: ${e.message}`);
+  }
+}
+
+async function handleCreateCampaign(params) {
+  const { clientName, objective } = params || {};
+  if (!clientName) return sendWhatsApp('❌ Please specify a client.\nExample: "Create campaign for Acme Corp conversions"');
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`📝 Generating campaign brief for ${client.name}...`);
+  try {
+    const result = await generateCampaignBrief({
+      clientId: client.id,
+      campaignObjective: objective || 'conversions',
+      platform: client.meta_ad_account_id ? 'meta' : 'google',
+    });
+    await sendWhatsApp(`📝 *Brief Generated: ${client.name}*\nCompleteness: ${result.completeness.score}/10\nSimilar past campaigns referenced: ${result.similarCampaigns}\n\n_Full brief posted to ClickUp_`);
+  } catch (e) {
+    await sendWhatsApp(`❌ Brief generation failed: ${e.message}`);
+  }
+}
+
+async function handleStandup() {
+  await sendWhatsApp('📋 Generating daily standup...');
+  await generateDailyStandup();
+}
+
+async function handleGenerateCreatives(params) {
+  const { clientName, platform } = params || {};
+  if (!clientName) return sendWhatsApp('❌ Specify a client.\nExample: "Generate creatives for Acme Corp on Meta"');
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`🎨 Generating creatives for ${client.name}...`);
+  try {
+    const result = await generateCreatives({
+      clientId: client.id,
+      platform: platform || 'meta',
+    });
+    await sendWhatsApp(`🎨 *Creatives Ready: ${client.name}*\nSent for approval. Check ClickUp/Google Drive for full creative package.`);
+  } catch (e) {
+    await sendWhatsApp(`❌ Creative generation failed: ${e.message}`);
+  }
 }
 
 async function handleBudget(params) {
@@ -309,6 +389,8 @@ async function handleHelp() {
 ⏸️ *Campaign Management:*
 • "Pause campaign [ID] on [platform]"
 • "Resume campaign [ID]"
+• "Create campaign for [client]"
+• "Generate creatives for [client]"
 
 📋 *Tasks:*
 • "Overdue tasks"
@@ -330,7 +412,10 @@ async function handleHelp() {
 • "Client info for [client]"
 • "Audit log"
 
-All commands use natural language - just type what you need!`;
+🔐 *Approvals:*
+• "APPROVE [id]" / "DENY [id]" / "DETAILS [id]"
+
+All commands use natural language!`;
 
   return sendWhatsApp(msg);
 }
