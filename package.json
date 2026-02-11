@@ -1,0 +1,45 @@
+{
+  "name": "ppc-agency-automation",
+  "version": "1.0.0",
+  "description": "AI-powered PPC agency automation system",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test tests/**/*.test.js",
+    "test:unit": "node --test tests/unit/**/*.test.js",
+    "test:integration": "node --test tests/integration/**/*.test.js",
+    "whatsapp": "node src/commands/whatsapp-server.js",
+    "morning-briefing": "node src/workflows/morning-briefing.js",
+    "monitor": "node src/workflows/daily-monitor.js",
+    "scheduler": "node src/services/scheduler.js",
+    "setup:check": "node scripts/check-setup.js",
+    "lint": "eslint src/",
+    "cost-report": "node src/services/cost-tracker.js --report"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3",
+    "winston": "^3.11.0",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.2",
+    "googleapis": "^128.0.0",
+    "openai": "^4.20.0",
+    "twilio": "^4.19.0",
+    "p-queue": "^8.0.1",
+    "p-retry": "^6.1.0",
+    "zod": "^3.22.4",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.4",
+    "better-sqlite3": "^11.0.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.55.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
