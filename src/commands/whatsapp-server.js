@@ -71,13 +71,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     log.info('WhatsApp message received', { from, body: body.substring(0, 100) });
 
-    // Only accept messages from the owner
-    if (from !== config.WHATSAPP_OWNER_PHONE) {
-      log.warn('Message from unauthorized number', { from });
-      return;
-    }
+    // Normalize phone numbers for comparison (strip + and leading zeros)
+    const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
+    const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
 
-    await handleCommand(body);
+    if (isOwner) {
+      // Owner gets full command access
+      await handleCommand(body);
+    } else {
+      // Client messages get AI-powered responses
+      await handleClientMessage(from, body);
+    }
   } catch (error) {
     log.error('Command handling failed', { error: error.message });
     await sendWhatsApp(`❌ Error: ${error.message}`);
@@ -450,6 +454,35 @@ async function handleUnknown(message) {
   });
 
   return sendWhatsApp(`🤔 I didn't quite understand that.\n\n${response.text}\n\nType *help* for all commands.`);
+}
+
+// --- Client Message Handler (non-owner contacts) ---
+async function handleClientMessage(from, message) {
+  try {
+    const clients = getAllClients();
+    const response = await askClaude({
+      systemPrompt: `You are an AI assistant for a professional PPC/digital marketing agency. You're chatting with a client via WhatsApp.
+
+Your role:
+- Answer questions about their campaigns, performance, and strategy
+- Be professional, friendly, and concise
+- If they ask about specific metrics you don't have, offer to have the account manager follow up
+- Never share other clients' data
+- Keep responses under 500 words
+- Use WhatsApp formatting: *bold*, _italic_
+
+Current clients on file: ${clients.map(c => c.name).join(', ')}`,
+      userMessage: `Client phone: ${from}\nMessage: ${message}`,
+      model: 'claude-sonnet-4-5-20250514',
+      maxTokens: 1024,
+      workflow: 'client-chat',
+    });
+
+    await sendWhatsApp(response.text, from);
+  } catch (error) {
+    log.error('Client message handling failed', { from, error: error.message });
+    await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+  }
 }
 
 async function handleApproval(action, approvalId) {
