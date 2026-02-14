@@ -28,8 +28,24 @@ async function request(method, path, params = {}, data) {
 // --- Account & Campaign Data ---
 
 export async function getAdAccounts() {
+  // Use Business ID if available to get all ad accounts under the business
+  if (config.META_BUSINESS_ID) {
+    return request('get', `/${config.META_BUSINESS_ID}/owned_ad_accounts`, {
+      fields: 'name,account_id,account_status,currency,timezone_name,amount_spent',
+    });
+  }
   return request('get', `/me/adaccounts`, {
     fields: 'name,account_id,account_status,currency,timezone_name,amount_spent',
+  });
+}
+
+export async function getBusinessInfo() {
+  if (!config.META_BUSINESS_ID) {
+    log.warn('META_BUSINESS_ID not configured');
+    return null;
+  }
+  return request('get', `/${config.META_BUSINESS_ID}`, {
+    fields: 'name,id,primary_page,timezone_id,vertical',
   });
 }
 
@@ -139,7 +155,7 @@ export function extractConversions(insights) {
 }
 
 export default {
-  getAdAccounts, getCampaigns, getAdSets, getAds,
+  getAdAccounts, getBusinessInfo, getCampaigns, getAdSets, getAds,
   getInsights, getAccountInsights, getCampaignInsights,
   updateCampaign, updateAdSet, updateAd,
   pauseCampaign, enableCampaign,
