@@ -12,6 +12,8 @@ import { generateCreatives } from '../workflows/creative-generation.js';
 import { generateWeeklyReport } from '../workflows/weekly-report.js';
 import { generateMonthlyReview } from '../workflows/monthly-review.js';
 import { analyzeCompetitors } from '../workflows/competitor-monitor.js';
+import { pullCompetitorCreatives } from '../workflows/competitor-creatives.js';
+import { generateMediaPlan } from '../workflows/media-plan.js';
 import { runBudgetPacing } from '../workflows/budget-pacing.js';
 import { getJobs, runJob } from '../services/scheduler.js';
 import * as metaAds from '../api/meta-ads.js';
@@ -150,6 +152,10 @@ async function handleCommand(message) {
       return handleStandup();
     case 'generate_creatives':
       return handleGenerateCreatives(parsed.params);
+    case 'competitor_ads':
+      return handleCompetitorAds(parsed.params);
+    case 'media_plan':
+      return handleMediaPlan(parsed.params);
     case 'help':
       return handleHelp();
     default:
@@ -334,6 +340,56 @@ async function handleGenerateCreatives(params) {
   }
 }
 
+async function handleCompetitorAds(params) {
+  const { clientName, competitorName } = params || {};
+  if (!clientName) {
+    return sendWhatsApp('❌ Specify a client.\nExample: "Show competitor ads for Acme Corp" or "Show Nike ads for Acme Corp"');
+  }
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`🔍 Pulling competitor ads for ${client.name}${competitorName ? ` (${competitorName})` : ''}...`);
+  try {
+    const result = await pullCompetitorCreatives({
+      clientId: client.id,
+      competitorName: competitorName || undefined,
+    });
+    const totalAds = result.results?.reduce((sum, r) => sum + r.adsFound, 0) || 0;
+    if (totalAds === 0) {
+      await sendWhatsApp(`🔍 No active competitor ads found. Try specifying a competitor name.`);
+    }
+  } catch (e) {
+    await sendWhatsApp(`❌ Failed to pull competitor ads: ${e.message}`);
+  }
+}
+
+async function handleMediaPlan(params) {
+  const { clientName, goals, pains, audience, budget, platforms, offer, timeline } = params || {};
+  if (!clientName) {
+    return sendWhatsApp('❌ Specify a client.\nExample: "Create media plan for Acme Corp" or "Media plan for Acme Corp with $5000 budget focused on lead gen"');
+  }
+  const client = getClient(clientName);
+  if (!client) return sendWhatsApp(`❌ Client "${clientName}" not found.`);
+
+  await sendWhatsApp(`📋 Generating media plan for ${client.name}...\nThis includes creative mockup recommendations. Please wait.`);
+  try {
+    await generateMediaPlan({
+      clientId: client.id,
+      brief: {
+        goals: goals || undefined,
+        pains: pains || undefined,
+        audience: audience || undefined,
+        budget: budget || undefined,
+        platforms: platforms || undefined,
+        offer: offer || undefined,
+        timeline: timeline || undefined,
+      },
+    });
+  } catch (e) {
+    await sendWhatsApp(`❌ Media plan generation failed: ${e.message}`);
+  }
+}
+
 async function handleBudget(params) {
   const { clientName } = params || {};
   if (clientName) {
@@ -432,8 +488,14 @@ async function handleHelp() {
 
 🔍 *Intelligence:*
 • "Competitor analysis for [client]"
+• "Competitor ads for [client]"
+• "Show [competitor] ads for [client]"
 • "Client info for [client]"
 • "Audit log"
+
+📋 *Planning:*
+• "Media plan for [client]"
+• "Media plan for [client] with $5000 budget for lead gen"
 
 🔐 *Approvals:*
 • "APPROVE [id]" / "DENY [id]" / "DETAILS [id]"

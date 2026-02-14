@@ -28,6 +28,9 @@ describe('Prompt Templates', () => {
         'commandParser',
         'anomalyDetection',
         'testRecommendation',
+        'competitorCreativeAnalysis',
+        'mediaPlanGenerator',
+        'creativeRecommendations',
       ];
       for (const key of expectedKeys) {
         assert.ok(key in SYSTEM_PROMPTS, `Missing system prompt key: ${key}`);
@@ -48,7 +51,7 @@ describe('Prompt Templates', () => {
 
     it('commandParser prompt lists expected intents', () => {
       const prompt = SYSTEM_PROMPTS.commandParser;
-      const expectedIntents = ['stats', 'pause', 'resume', 'report', 'briefing', 'budget', 'help'];
+      const expectedIntents = ['stats', 'pause', 'resume', 'report', 'briefing', 'budget', 'help', 'competitor_ads', 'media_plan'];
       for (const intent of expectedIntents) {
         assert.ok(prompt.includes(`"${intent}"`), `commandParser should list intent "${intent}"`);
       }
@@ -190,6 +193,108 @@ describe('Prompt Templates', () => {
       assert.ok(output.includes('headline variations'), 'Should request headline variations');
       assert.ok(output.includes('body copy variations'), 'Should request body copy variations');
       assert.ok(output.includes('CTA variations'), 'Should request CTA variations');
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // USER_PROMPTS.analyzeCompetitorCreatives
+  // ------------------------------------------------------------------
+  describe('USER_PROMPTS.analyzeCompetitorCreatives', () => {
+    it('is a function', () => {
+      assert.equal(typeof USER_PROMPTS.analyzeCompetitorCreatives, 'function');
+    });
+
+    it('generates output with all provided fields', () => {
+      const data = {
+        clientName: 'Acme Corp',
+        clientIndustry: 'ecommerce',
+        clientBrandVoice: 'Bold and energetic',
+        competitorName: 'Nike',
+        adSummaries: 'Ad 1:\n  Headline: Just Do It\n  Body: Shop now',
+        adCount: 1,
+      };
+
+      const output = USER_PROMPTS.analyzeCompetitorCreatives(data);
+      assert.ok(output.includes('Acme Corp'));
+      assert.ok(output.includes('Nike'));
+      assert.ok(output.includes('ecommerce'));
+      assert.ok(output.includes('Bold and energetic'));
+      assert.ok(output.includes('Just Do It'));
+      assert.ok(output.includes('Gaps & Opportunities'));
+      assert.ok(output.includes('Actionable Takeaways'));
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // USER_PROMPTS.generateMediaPlan
+  // ------------------------------------------------------------------
+  describe('USER_PROMPTS.generateMediaPlan', () => {
+    it('is a function', () => {
+      assert.equal(typeof USER_PROMPTS.generateMediaPlan, 'function');
+    });
+
+    it('generates a comprehensive prompt with all brief fields', () => {
+      const data = {
+        clientName: 'Acme Corp',
+        clientContext: 'Client Profile: Acme Corp, ecommerce',
+        brief: {
+          goals: 'Increase online sales by 30%',
+          pains: 'High CPA on Google',
+          audience: 'Women 25-45',
+          competitors: 'Nike, Adidas',
+          budget: '$10,000/month',
+          timeline: 'Q1 2025',
+          platforms: 'Meta, Google Ads',
+          offer: 'Free shipping over $50',
+          brandVoice: 'Fun and energetic',
+          industry: 'ecommerce',
+          primaryKpi: 'ROAS',
+          targetRoas: 4.0,
+          targetCpa: '$25.00',
+        },
+        historySummary: 'Summer Sale: ROAS 3.5, CPA $22',
+        creativeSummary: '"Shop Now" - CTR 4.2%',
+      };
+
+      const output = USER_PROMPTS.generateMediaPlan(data);
+      assert.ok(output.includes('Acme Corp'));
+      assert.ok(output.includes('Increase online sales'));
+      assert.ok(output.includes('High CPA on Google'));
+      assert.ok(output.includes('Women 25-45'));
+      assert.ok(output.includes('$10,000/month'));
+      assert.ok(output.includes('Executive Summary'));
+      assert.ok(output.includes('Campaign Strategy'));
+      assert.ok(output.includes('Budget Allocation'));
+      assert.ok(output.includes('Content Calendar'));
+      assert.ok(output.includes('KPIs & Success Metrics'));
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // USER_PROMPTS.generateCreativeRecommendations
+  // ------------------------------------------------------------------
+  describe('USER_PROMPTS.generateCreativeRecommendations', () => {
+    it('is a function', () => {
+      assert.equal(typeof USER_PROMPTS.generateCreativeRecommendations, 'function');
+    });
+
+    it('includes platform character limits', () => {
+      const data = {
+        clientName: 'Test',
+        brandVoice: 'Professional',
+        audience: 'Everyone',
+        platforms: 'Meta, Google',
+        offer: null,
+        mediaPlanSummary: 'Run Meta and Google campaigns',
+        topCreatives: 'No data',
+        industry: 'saas',
+      };
+
+      const output = USER_PROMPTS.generateCreativeRecommendations(data);
+      assert.ok(output.includes('Meta: Headlines 40 chars'));
+      assert.ok(output.includes('Google: Headlines 30 chars'));
+      assert.ok(output.includes('A/B Test Plan'));
+      assert.ok(output.includes('Creative Production Checklist'));
     });
   });
 });
