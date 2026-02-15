@@ -95,7 +95,7 @@ export async function quickAnalysis({ prompt, workflow, clientId }) {
   return askClaude({
     systemPrompt: 'You are a PPC advertising analyst. Be concise and data-driven.',
     userMessage: prompt,
-    model: 'claude-haiku-3-5-20241022',
+    model: 'claude-3-5-haiku-20241022',
     maxTokens: 1024,
     workflow,
     clientId,
