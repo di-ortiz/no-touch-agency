@@ -580,6 +580,20 @@ function createTextBox(slideId, boxId, opts) {
   return requests;
 }
 
+/**
+ * Get the default slide ID from a newly created presentation.
+ */
+export async function getDefaultSlideId(presentationId) {
+  const s = getSlides();
+  if (!s) return null;
+  try {
+    const pres = await s.presentations.get({ presentationId });
+    return pres.data.slides?.[0]?.objectId || null;
+  } catch {
+    return null;
+  }
+}
+
 export default {
-  createPresentation, batchUpdate, buildCreativeDeck,
+  createPresentation, batchUpdate, buildCreativeDeck, getDefaultSlideId,
 };

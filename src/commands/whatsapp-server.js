@@ -30,6 +30,10 @@ import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
 import * as googleDrive from '../api/google-drive.js';
+import * as googleAnalytics from '../api/google-analytics.js';
+import * as googleTransparency from '../api/google-transparency.js';
+import * as presentationBuilder from '../services/presentation-builder.js';
+import * as reportBuilder from '../services/report-builder.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -350,6 +354,76 @@ const CSA_TOOLS = [
     name: 'list_client_files',
     description: 'List files in a client\'s Google Drive folder. Shows brand assets, reports, creatives, and other uploaded files.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, folder: { type: 'string', enum: ['all', 'brand_assets', 'reports', 'creatives', 'strategic_plans', 'audits', 'competitor_research'], description: 'Which folder to list (default: all)' } }, required: ['clientName'] },
+  },
+  // --- Google Analytics ---
+  {
+    name: 'get_analytics_metrics',
+    description: 'Get Google Analytics (GA4) website metrics: sessions, users, page views, bounce rate, engagement rate, conversions. Use this to understand website traffic and behavior for a client.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (must have GA4 property configured)' }, startDate: { type: 'string', description: 'Start date (YYYY-MM-DD or "7daysAgo", "30daysAgo")' }, endDate: { type: 'string', description: 'End date (YYYY-MM-DD or "today")' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_analytics_top_pages',
+    description: 'Get the top performing pages from Google Analytics (GA4) by page views. Shows path, title, views, duration, bounce rate, and conversions.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' }, limit: { type: 'number', description: 'Max results (default: 20)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_analytics_traffic_sources',
+    description: 'Get traffic source breakdown from Google Analytics (GA4). Shows which channels (organic, paid, direct, social, etc.) drive the most sessions and conversions.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_analytics_audience',
+    description: 'Get audience demographics from Google Analytics (GA4): device breakdown, top countries, and gender distribution.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_analytics_daily_trend',
+    description: 'Get daily metrics trend from Google Analytics (GA4). Returns sessions, users, conversions, and page views per day. Great for spotting trends and building projections.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
+  // --- Google Ads Transparency Center ---
+  {
+    name: 'search_google_ads_transparency',
+    description: 'Search the Google Ads Transparency Center for an advertiser. Shows what Google Ads a company is running, including ad formats, date ranges, and preview links. Great for researching competitor Google Ads activity.',
+    input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Advertiser name or domain to search' }, region: { type: 'string', description: 'Region filter (default: "anywhere")' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['query'] },
+  },
+  // --- Google Keyword Planner (via Google Ads API) ---
+  {
+    name: 'get_keyword_planner_ideas',
+    description: 'Get keyword ideas from Google Keyword Planner (via Google Ads API). Returns search volume, competition, and estimated CPC. Use seed keywords OR a URL to generate ideas. More authoritative than DataForSEO for Google Ads planning.',
+    input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'Seed keywords to get ideas for' }, url: { type: 'string', description: 'URL to extract keyword ideas from (alternative to keywords)' }, limit: { type: 'number', description: 'Max results (default: 20)' } }, required: [] },
+  },
+  {
+    name: 'get_keyword_planner_volume',
+    description: 'Get historical search volume data from Google Keyword Planner for specific keywords. Returns monthly trends, competition index, and bid estimates. Best for Google Ads campaign planning.',
+    input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to get volume for' } }, required: ['keywords'] },
+  },
+  // --- Presentation Builders ---
+  {
+    name: 'build_media_plan_deck',
+    description: 'Build a professional Google Slides media plan presentation. Includes executive summary, objectives, target audiences, channel strategy, budget allocation, projections, creative mockups, and timeline. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, campaignName: { type: 'string' }, mediaPlan: { type: 'object', description: 'Media plan data: { summary, objective, budget, timeline, kpis[], audiences[], channels[], budgetBreakdown[], projections: {impressions, clicks, conversions, cpa, roas, reach, notes}, nextSteps }' }, creatives: { type: 'array', description: 'Creative mockup refs: [{ label, url, concept }]' } }, required: ['clientName', 'mediaPlan'] },
+  },
+  {
+    name: 'build_competitor_deck',
+    description: 'Build a professional Google Slides competitor research presentation. Includes competitor landscape, domain overview, keyword gap analysis, SERP analysis, and competitor ad examples. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array', description: 'Competitor data: [{ name, domain, traffic, keywords, avgPosition, strengths, weaknesses }]' }, keywordGap: { type: 'array', description: 'Keyword gap data: [{ keyword, volume, competition, competitorPosition, yourPosition }]' }, competitorAds: { type: 'array', description: 'Competitor ads: [{ pageName, headline, body, cta, platforms }]' }, serpAnalysis: { type: 'object', description: '{ keyword, organicResults, paidResults }' }, domainOverview: { type: 'object', description: '{ organicTraffic, paidTraffic, organicKeywords, backlinks }' }, summary: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'build_performance_deck',
+    description: 'Build a professional Google Slides performance report presentation. Includes KPI metrics, campaign breakdown, website analytics, traffic sources, top pages, keyword performance, audience insights, and recommendations. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string', description: 'Date range label (e.g. "Feb 1-7, 2026")' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas, cpc }' }, analytics: { type: 'object', description: 'GA4 data: { sessions, totalUsers, pageViews, bounceRate, engagementRate, conversions, trafficSources[], topPages[] }' }, campaigns: { type: 'array', description: 'Campaign data: [{ name, spend, clicks, conversions, cpa, roas }]' }, topKeywords: { type: 'array', description: '[{ keyword, impressions, clicks, ctr, conversions, cpa }]' }, audienceData: { type: 'object', description: '{ devices[], countries[], gender[] }' }, analysis: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+  },
+  // --- PDF Reports ---
+  {
+    name: 'generate_performance_pdf',
+    description: 'Generate a performance report as a Google Doc with PDF download link. Includes all metrics, campaign data, analytics, keywords, and AI analysis. Returns both editable Doc URL and PDF download link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas }' }, analytics: { type: 'object', description: 'GA4 data' }, campaigns: { type: 'array' }, topKeywords: { type: 'array' }, audienceData: { type: 'object' }, analysis: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_competitor_pdf',
+    description: 'Generate a competitor analysis report as a Google Doc with PDF download link. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array' }, keywordGap: { type: 'array' }, competitorAds: { type: 'array' }, summary: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
   },
 ];
 
@@ -950,6 +1024,155 @@ Return ONLY the JSON array, no other text.`;
         })),
         totalFiles: files?.length || 0,
       };
+    }
+
+    // --- Google Analytics ---
+    case 'get_analytics_metrics': {
+      const client = getClient(toolInput.clientName);
+      const propertyId = client?.ga4_property_id || config.GA4_PROPERTY_ID;
+      if (!propertyId) return { error: 'No GA4 property ID configured for this client. Set ga4_property_id in client config or GA4_PROPERTY_ID env var.' };
+      const metrics = await googleAnalytics.getPropertyMetrics(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, ...metrics };
+    }
+    case 'get_analytics_top_pages': {
+      const client = getClient(toolInput.clientName);
+      const propertyId = client?.ga4_property_id || config.GA4_PROPERTY_ID;
+      if (!propertyId) return { error: 'No GA4 property ID configured.' };
+      const pages = await googleAnalytics.getTopPages(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate, limit: toolInput.limit });
+      return { clientName: toolInput.clientName, topPages: pages };
+    }
+    case 'get_analytics_traffic_sources': {
+      const client = getClient(toolInput.clientName);
+      const propertyId = client?.ga4_property_id || config.GA4_PROPERTY_ID;
+      if (!propertyId) return { error: 'No GA4 property ID configured.' };
+      const sources = await googleAnalytics.getTrafficSources(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, trafficSources: sources };
+    }
+    case 'get_analytics_audience': {
+      const client = getClient(toolInput.clientName);
+      const propertyId = client?.ga4_property_id || config.GA4_PROPERTY_ID;
+      if (!propertyId) return { error: 'No GA4 property ID configured.' };
+      const audience = await googleAnalytics.getAudienceDemographics(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, ...audience };
+    }
+    case 'get_analytics_daily_trend': {
+      const client = getClient(toolInput.clientName);
+      const propertyId = client?.ga4_property_id || config.GA4_PROPERTY_ID;
+      if (!propertyId) return { error: 'No GA4 property ID configured.' };
+      const trend = await googleAnalytics.getDailyTrend(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, dailyTrend: trend };
+    }
+
+    // --- Google Ads Transparency Center ---
+    case 'search_google_ads_transparency': {
+      const result = await googleTransparency.searchAndGetCreatives({
+        query: toolInput.query,
+        region: toolInput.region,
+        limit: toolInput.limit,
+      });
+      return result;
+    }
+
+    // --- Google Keyword Planner ---
+    case 'get_keyword_planner_ideas': {
+      const ideas = await keywordPlanner.getKeywordIdeas({
+        keywords: toolInput.keywords,
+        url: toolInput.url,
+        limit: toolInput.limit,
+      });
+      return { keywords: toolInput.keywords, url: toolInput.url, ideas };
+    }
+    case 'get_keyword_planner_volume': {
+      const volume = await keywordPlanner.getSearchVolume({ keywords: toolInput.keywords });
+      return { keywords: toolInput.keywords, data: volume };
+    }
+
+    // --- Presentation Builders ---
+    case 'build_media_plan_deck': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_strategic_plans_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await presentationBuilder.buildMediaPlanDeck({
+        clientName: toolInput.clientName,
+        campaignName: toolInput.campaignName,
+        mediaPlan: toolInput.mediaPlan,
+        creatives: toolInput.creatives,
+        folderId,
+      });
+      if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
+      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Media plan deck ready: ${result.url}` };
+    }
+    case 'build_competitor_deck': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await presentationBuilder.buildCompetitorDeck({
+        clientName: toolInput.clientName,
+        competitors: toolInput.competitors,
+        keywordGap: toolInput.keywordGap,
+        competitorAds: toolInput.competitorAds,
+        serpAnalysis: toolInput.serpAnalysis,
+        domainOverview: toolInput.domainOverview,
+        summary: toolInput.summary,
+        recommendations: toolInput.recommendations,
+        folderId,
+      });
+      if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
+      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Competitor research deck ready: ${result.url}` };
+    }
+    case 'build_performance_deck': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await presentationBuilder.buildPerformanceDeck({
+        clientName: toolInput.clientName,
+        reportType: toolInput.reportType,
+        dateRange: toolInput.dateRange,
+        metrics: toolInput.metrics,
+        analytics: toolInput.analytics,
+        campaigns: toolInput.campaigns,
+        topKeywords: toolInput.topKeywords,
+        audienceData: toolInput.audienceData,
+        analysis: toolInput.analysis,
+        recommendations: toolInput.recommendations,
+        folderId,
+      });
+      if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
+      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Performance report deck ready: ${result.url}` };
+    }
+
+    // --- PDF Reports ---
+    case 'generate_performance_pdf': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await reportBuilder.generatePerformanceReport({
+        clientName: toolInput.clientName,
+        reportType: toolInput.reportType,
+        dateRange: toolInput.dateRange,
+        metrics: toolInput.metrics,
+        analytics: toolInput.analytics,
+        campaigns: toolInput.campaigns,
+        topKeywords: toolInput.topKeywords,
+        audienceData: toolInput.audienceData,
+        analysis: toolInput.analysis,
+        recommendations: toolInput.recommendations,
+        folderId,
+        clientId: client?.id,
+      });
+      if (!result) return { error: 'Failed to generate report. Check Google credentials.' };
+      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+    }
+    case 'generate_competitor_pdf': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await reportBuilder.generateCompetitorReport({
+        clientName: toolInput.clientName,
+        competitors: toolInput.competitors,
+        keywordGap: toolInput.keywordGap,
+        competitorAds: toolInput.competitorAds,
+        summary: toolInput.summary,
+        recommendations: toolInput.recommendations,
+        folderId,
+      });
+      if (!result) return { error: 'Failed to generate competitor report. Check Google credentials.' };
+      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
     }
 
     default:
