@@ -43,6 +43,40 @@ app.use('/webhook', rateLimit({
 // Pending approval actions
 const pendingApprovals = new Map();
 
+// Conversation history for memory (keyed by chatId/phone)
+const conversationHistory = new Map();
+const MAX_HISTORY_MESSAGES = 20; // keep last 20 exchanges per user
+const HISTORY_TTL_MS = 60 * 60 * 1000; // clear after 1 hour of inactivity
+
+function getHistory(chatId) {
+  const entry = conversationHistory.get(chatId);
+  if (!entry) return [];
+  // Clear stale history
+  if (Date.now() - entry.lastActive > HISTORY_TTL_MS) {
+    conversationHistory.delete(chatId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function addToHistory(chatId, role, content) {
+  let entry = conversationHistory.get(chatId);
+  if (!entry) {
+    entry = { messages: [], lastActive: Date.now() };
+    conversationHistory.set(chatId, entry);
+  }
+  entry.lastActive = Date.now();
+  entry.messages.push({ role, content });
+  // Trim to max size (keep pairs so context makes sense)
+  while (entry.messages.length > MAX_HISTORY_MESSAGES * 2) {
+    entry.messages.shift();
+  }
+}
+
+function clearHistory(chatId) {
+  conversationHistory.delete(chatId);
+}
+
 // --- WhatsApp Conversational CSA Agent ---
 const WHATSAPP_CSA_PROMPT = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You chat via WhatsApp with the agency owner.
 
@@ -477,13 +511,22 @@ async function handleTelegramCommand(message, chatId) {
     return handleTelegramApproval(approvalMatch[1].toUpperCase(), approvalMatch[2], chatId);
   }
 
+  // Handle "clear" / "reset" to wipe memory
+  if (/^(clear|reset|new chat|forget)$/i.test(message.trim())) {
+    clearHistory(chatId);
+    return reply('Memory cleared! Starting fresh.');
+  }
+
   // Build context
   const clients = getAllClients();
   const clientContext = clients.length > 0
     ? `\n\nCurrent clients: ${clients.map(c => c.name).join(', ')}`
     : '\n\nNo clients onboarded yet.';
 
-  const messages = [{ role: 'user', content: message }];
+  // Load conversation history and append the new message
+  const history = getHistory(chatId);
+  addToHistory(chatId, 'user', message);
+  const messages = [...history, { role: 'user', content: message }];
 
   // Conversational loop with tool use (using shared CSA_TOOLS)
   let response = await askClaude({
@@ -532,8 +575,9 @@ async function handleTelegramCommand(message, chatId) {
     });
   }
 
-  // Send final response
+  // Send final response and save assistant reply to history
   if (response.text) {
+    addToHistory(chatId, 'assistant', response.text);
     await reply(response.text);
   }
 }
@@ -589,10 +633,18 @@ app.get('/health', (req, res) => {
 
 // --- WhatsApp Conversational Command Handler ---
 async function handleCommand(message) {
+  const ownerChatId = 'whatsapp-owner';
+
   // Check for approval responses first (exact format, bypass AI)
   const approvalMatch = message.match(/^(APPROVE|DENY|DETAILS)\s+([a-f0-9-]+)/i);
   if (approvalMatch) {
     return handleApproval(approvalMatch[1].toUpperCase(), approvalMatch[2]);
+  }
+
+  // Handle "clear" / "reset" to wipe memory
+  if (/^(clear|reset|new chat|forget)$/i.test(message.trim())) {
+    clearHistory(ownerChatId);
+    return sendWhatsApp('Memory cleared! Starting fresh.');
   }
 
   // Build context
@@ -601,7 +653,10 @@ async function handleCommand(message) {
     ? `\n\nCurrent managed clients: ${clients.map(c => c.name).join(', ')}`
     : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
 
-  const messages = [{ role: 'user', content: message }];
+  // Load conversation history and append the new message
+  const history = getHistory(ownerChatId);
+  addToHistory(ownerChatId, 'user', message);
+  const messages = [...history, { role: 'user', content: message }];
 
   // Conversational tool-use loop (same architecture as Telegram)
   let response = await askClaude({
@@ -650,8 +705,9 @@ async function handleCommand(message) {
     });
   }
 
-  // Send final response
+  // Send final response and save to history
   if (response.text) {
+    addToHistory(ownerChatId, 'assistant', response.text);
     await sendWhatsApp(response.text);
   }
 }
