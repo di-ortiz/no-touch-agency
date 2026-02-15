@@ -6,8 +6,21 @@ import { retry, isRetryableHttpError } from '../utils/retry.js';
 import { recordCost } from '../services/cost-tracker.js';
 
 const log = logger.child({ platform: 'meta-ad-library' });
-const API_VERSION = 'v21.0';
+const API_VERSION = 'v22.0';
 const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
+
+// Fields available for ALL ad types (commercial ads)
+const BASE_FIELDS = 'id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_creative_bodies,ad_creative_link_captions,ad_creative_link_descriptions,ad_creative_link_titles,ad_snapshot_url,page_id,page_name,publisher_platforms,languages';
+
+// Additional fields only available for POLITICAL_AND_ISSUE_ADS or EU/UK ads
+const POLITICAL_FIELDS = ',estimated_audience_size,impressions,spend,currency,demographic_distribution,delivery_by_region,funding_entity,bylines';
+
+// EU/UK country codes where spend/impressions data is available for all ads
+const EU_UK_COUNTRIES = new Set([
+  'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
+  'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
+  'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'GB',
+]);
 
 /**
  * Search the Meta Ad Library for competitor ads.
@@ -19,9 +32,8 @@ const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
  * @param {string} opts.adType - ALL, POLITICAL_AND_ISSUE_ADS (default: 'ALL')
  * @param {string} opts.adActiveStatus - ACTIVE, INACTIVE, ALL (default: 'ACTIVE')
  * @param {number} opts.limit - Max results (default: 10)
- * @param {string} opts.fields - Fields to return
+ * @param {string} opts.fields - Fields to return (auto-selected based on adType and country if not provided)
  * @param {string} opts.searchPageIds - Comma-separated Page IDs to search
- * @param {string} opts.adReachedCountries - Country codes for targeting
  */
 export async function searchAds(opts = {}) {
   const {
@@ -31,19 +43,24 @@ export async function searchAds(opts = {}) {
     adActiveStatus = 'ACTIVE',
     limit = 10,
     searchPageIds,
-    fields = 'id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_creative_bodies,ad_creative_link_captions,ad_creative_link_descriptions,ad_creative_link_titles,ad_snapshot_url,page_id,page_name,publisher_platforms,estimated_audience_size,impressions,spend,currency',
+    fields,
   } = opts;
 
   if (!searchTerms && !searchPageIds) {
     throw new Error('Either searchTerms or searchPageIds is required');
   }
 
+  // Auto-select fields: include spend/impressions only for political ads or EU/UK countries
+  const isPolitical = adType === 'POLITICAL_AND_ISSUE_ADS';
+  const isEU = EU_UK_COUNTRIES.has(country);
+  const selectedFields = fields || (isPolitical || isEU ? BASE_FIELDS + POLITICAL_FIELDS : BASE_FIELDS);
+
   const params = {
     access_token: config.META_ACCESS_TOKEN,
     ad_type: adType,
     ad_active_status: adActiveStatus,
     ad_reached_countries: JSON.stringify([country]),
-    fields,
+    fields: selectedFields,
     limit,
   };
 
@@ -52,14 +69,25 @@ export async function searchAds(opts = {}) {
 
   return rateLimited('meta', () =>
     retry(async () => {
-      const res = await axios.get(`${BASE_URL}/ads_archive`, {
-        params,
-        timeout: 30000,
-      });
+      try {
+        const res = await axios.get(`${BASE_URL}/ads_archive`, {
+          params,
+          timeout: 30000,
+        });
 
-      recordCost({ platform: 'meta', workflow: 'ad-library', costCentsOverride: 0 });
-      log.info('Ad Library search', { terms: searchTerms, results: res.data?.data?.length || 0 });
-      return res.data;
+        recordCost({ platform: 'meta', workflow: 'ad-library', costCentsOverride: 0 });
+        log.info('Ad Library search', { terms: searchTerms, results: res.data?.data?.length || 0 });
+        return res.data;
+      } catch (error) {
+        // Surface the actual Meta API error message for better debugging
+        const metaError = error.response?.data?.error;
+        if (metaError) {
+          const msg = `Meta Ad Library API error (${metaError.code || error.response?.status}): ${metaError.message || 'Unknown error'}`;
+          log.error(msg, { type: metaError.type, fbtraceId: metaError.fbtrace_id });
+          throw new Error(msg);
+        }
+        throw error;
+      }
     }, { retries: 3, label: 'Meta Ad Library search', shouldRetry: isRetryableHttpError })
   );
 }
@@ -78,23 +106,55 @@ export async function getPageAds(pageId, opts = {}) {
 
 /**
  * Search for a Facebook Page by name to get its ID.
+ * Falls back to Ad Library search if the Pages Search API is unavailable.
  */
 export async function searchPages(query) {
-  return rateLimited('meta', () =>
-    retry(async () => {
-      const res = await axios.get(`${BASE_URL}/pages/search`, {
-        params: {
-          access_token: config.META_ACCESS_TOKEN,
-          q: query,
-          fields: 'id,name,category,fan_count,verification_status,link',
-        },
-        timeout: 15000,
-      });
+  // Try the Pages Search API first
+  try {
+    const result = await rateLimited('meta', () =>
+      retry(async () => {
+        try {
+          const res = await axios.get(`${BASE_URL}/pages/search`, {
+            params: {
+              access_token: config.META_ACCESS_TOKEN,
+              q: query,
+              fields: 'id,name,category,fan_count,verification_status,link',
+            },
+            timeout: 15000,
+          });
 
-      recordCost({ platform: 'meta', workflow: 'ad-library', costCentsOverride: 0 });
-      return res.data;
-    }, { retries: 2, label: 'Meta Page search', shouldRetry: isRetryableHttpError })
-  );
+          recordCost({ platform: 'meta', workflow: 'ad-library', costCentsOverride: 0 });
+          return res.data;
+        } catch (error) {
+          const metaError = error.response?.data?.error;
+          if (metaError) {
+            throw new Error(`Meta Pages API error (${metaError.code || error.response?.status}): ${metaError.message}`);
+          }
+          throw error;
+        }
+      }, { retries: 1, label: 'Meta Page search', shouldRetry: isRetryableHttpError })
+    );
+    return result;
+  } catch (e) {
+    log.warn('Pages Search API failed, falling back to Ad Library search', { error: e.message });
+
+    // Fallback: search the Ad Library by keyword and extract unique page info
+    const adResults = await searchAds({ searchTerms: query, limit: 10 });
+    const pagesMap = new Map();
+    for (const ad of adResults?.data || []) {
+      if (ad.page_id && !pagesMap.has(ad.page_id)) {
+        pagesMap.set(ad.page_id, {
+          id: ad.page_id,
+          name: ad.page_name || 'Unknown',
+          category: null,
+          fan_count: null,
+          verification_status: null,
+          link: null,
+        });
+      }
+    }
+    return { data: Array.from(pagesMap.values()) };
+  }
 }
 
 /**
