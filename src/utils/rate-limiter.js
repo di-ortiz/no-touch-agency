@@ -13,6 +13,7 @@ const limiters = {
   clickup: new PQueue({ concurrency: 5, interval: 1000, intervalCap: 5 }),
   hubspot: new PQueue({ concurrency: 5, interval: 1000, intervalCap: 5 }),
   whatsapp: new PQueue({ concurrency: 1, interval: 1000, intervalCap: 1 }),
+  telegram: new PQueue({ concurrency: 1, interval: 1000, intervalCap: 1 }),
   google: new PQueue({ concurrency: 5, interval: 1000, intervalCap: 5 }),
 };
 

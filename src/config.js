@@ -12,6 +12,10 @@ const envSchema = z.object({
   WHATSAPP_OWNER_PHONE: z.string().min(1),
   WHATSAPP_VERIFY_TOKEN: z.string().optional().default(''),
 
+  // Telegram Bot
+  TELEGRAM_BOT_TOKEN: z.string().optional().default(''),
+  TELEGRAM_OWNER_CHAT_ID: z.string().optional().default(''),
+
   // ClickUp
   CLICKUP_API_TOKEN: z.string().min(1),
   CLICKUP_TEAM_ID: z.string().min(1),

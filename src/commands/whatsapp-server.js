@@ -1,6 +1,7 @@
 import express from 'express';
 import { askClaude } from '../api/anthropic.js';
 import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
+import { sendTelegram, sendAlert as sendTelegramAlert } from '../api/telegram.js';
 import { getAllClients, getClient, buildClientContext } from '../services/knowledge-base.js';
 import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
@@ -89,6 +90,284 @@ app.post('/webhook/whatsapp', async (req, res) => {
     await sendWhatsApp(`❌ Error: ${error.message}`);
   }
 });
+
+// --- Telegram Bot Webhook (POST) ---
+app.post('/webhook/telegram', async (req, res) => {
+  // Respond immediately to Telegram
+  res.sendStatus(200);
+
+  try {
+    const message = req.body?.message;
+    if (!message || !message.text) return;
+
+    const chatId = String(message.chat?.id);
+    const body = message.text.trim();
+
+    if (!body) return;
+
+    log.info('Telegram message received', { chatId, body: body.substring(0, 100) });
+
+    const isOwner = chatId === config.TELEGRAM_OWNER_CHAT_ID;
+
+    if (isOwner) {
+      // Owner gets full command access — reuse existing command handler, send via Telegram
+      await handleTelegramCommand(body, chatId);
+    } else {
+      // Non-owner messages get AI-powered responses via Telegram
+      await handleTelegramClientMessage(chatId, body);
+    }
+  } catch (error) {
+    log.error('Telegram command handling failed', { error: error.message });
+    await sendTelegram(`❌ Error: ${error.message}`);
+  }
+});
+
+// --- Telegram Command Handler (mirrors WhatsApp commands but sends via Telegram) ---
+async function handleTelegramCommand(message, chatId) {
+  // Check for approval responses first
+  const approvalMatch = message.match(/^(APPROVE|DENY|DETAILS)\s+([a-f0-9-]+)/i);
+  if (approvalMatch) {
+    return handleTelegramApproval(approvalMatch[1].toUpperCase(), approvalMatch[2], chatId);
+  }
+
+  // Use Claude to parse intent (same as WhatsApp)
+  const parseResponse = await askClaude({
+    systemPrompt: SYSTEM_PROMPTS.commandParser,
+    userMessage: message,
+    model: 'claude-haiku-3-5-20241022',
+    maxTokens: 512,
+    workflow: 'command-parser',
+  });
+
+  let parsed;
+  try {
+    const jsonMatch = parseResponse.text.match(/\{[\s\S]*\}/);
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { intent: 'unknown' };
+  } catch {
+    parsed = { intent: 'unknown', params: { originalMessage: message } };
+  }
+
+  log.info('Telegram parsed command', { intent: parsed.intent, params: parsed.params });
+
+  // Route to handlers, passing sendTelegram as the reply function
+  const reply = (msg) => sendTelegram(msg, chatId);
+  switch (parsed.intent) {
+    case 'stats':
+      return handleTelegramStats(parsed.params, reply);
+    case 'pause':
+      return handleTelegramPause(parsed.params, reply);
+    case 'report':
+      return handleTelegramReport(parsed.params, reply);
+    case 'overdue':
+      return handleTelegramOverdue(reply);
+    case 'briefing':
+      return handleTelegramBriefing(reply);
+    case 'budget':
+      return handleTelegramBudget(parsed.params, reply);
+    case 'cost':
+      return handleTelegramCostReport(parsed.params, reply);
+    case 'help':
+      return handleTelegramHelp(reply);
+    default:
+      return handleTelegramUnknown(message, reply);
+  }
+}
+
+async function handleTelegramStats(params, reply) {
+  const { clientName, platform } = params || {};
+  if (!clientName) {
+    const clients = getAllClients();
+    let msg = `📊 <b>All Clients Summary</b>\n\n`;
+    for (const c of clients) {
+      msg += `• <b>${c.name}</b>: `;
+      const platforms = [];
+      if (c.meta_ad_account_id) platforms.push('Meta');
+      if (c.google_ads_customer_id) platforms.push('Google');
+      if (c.tiktok_advertiser_id) platforms.push('TikTok');
+      msg += platforms.join(', ') || 'No accounts linked';
+      msg += '\n';
+    }
+    return reply(msg);
+  }
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found. Type "clients" to see all clients.`);
+
+  let msg = `📊 <b>${client.name} - Performance</b>\n\n`;
+  if (client.meta_ad_account_id && (!platform || platform === 'meta')) {
+    try {
+      const insights = await metaAds.getAccountInsights(client.meta_ad_account_id, { datePreset: 'last_7d' });
+      const data = metaAds.extractConversions(insights);
+      if (data) {
+        msg += `<b>Meta (Last 7 Days):</b>\nSpend: $${data.spend.toFixed(2)}\nROAS: ${data.roas.toFixed(2)}\nCPA: $${data.cpa.toFixed(2)}\nConversions: ${data.conversions}\nCTR: ${data.ctr.toFixed(2)}%\n\n`;
+      }
+    } catch { msg += `Meta: <i>Error fetching data</i>\n\n`; }
+  }
+  if (client.google_ads_customer_id && (!platform || platform === 'google')) {
+    try {
+      const perf = await googleAds.getAccountPerformance(client.google_ads_customer_id);
+      if (perf.length > 0) {
+        const data = googleAds.formatGoogleAdsMetrics(perf[0]);
+        msg += `<b>Google Ads (Last 7 Days):</b>\nSpend: $${data.cost}\nROAS: ${data.roas.toFixed(2)}\nCPA: $${data.cpa.toFixed(2)}\nConversions: ${data.conversions}\nCTR: ${data.ctr.toFixed(2)}%\n\n`;
+      }
+    } catch { msg += `Google Ads: <i>Error fetching data</i>\n\n`; }
+  }
+  return reply(msg);
+}
+
+async function handleTelegramPause(params, reply) {
+  const { campaignId, platform, reason } = params || {};
+  if (!campaignId || !platform) {
+    return reply('❌ Please specify campaign ID and platform.\nExample: "Pause campaign 12345 on Meta because low ROAS"');
+  }
+  const approvalId = `pause-${Date.now()}`;
+  pendingApprovals.set(approvalId, { type: 'pause', campaignId, platform, reason });
+  return reply(
+    `🔐 <b>Confirm Pause</b>\n\nCampaign: ${campaignId}\nPlatform: ${platform}\nReason: ${reason || 'Not specified'}\n\nReply: <b>APPROVE ${approvalId}</b> or <b>DENY ${approvalId}</b>`
+  );
+}
+
+async function handleTelegramReport(params, reply) {
+  const { clientName, type } = params || {};
+  if (!clientName) return reply('❌ Please specify a client name.\nExample: "Generate weekly report for Acme Corp"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`📝 Generating ${type || 'weekly'} report for ${client.name}...`);
+  try {
+    if (type === 'monthly') await generateMonthlyReview(client.id);
+    else await generateWeeklyReport(client.id);
+  } catch (e) { await reply(`❌ Report generation failed: ${e.message}`); }
+}
+
+async function handleTelegramOverdue(reply) {
+  const result = await runTaskMonitor();
+  if (result.overdue === 0) return reply('✅ No overdue tasks! All on track.');
+}
+
+async function handleTelegramBriefing(reply) {
+  await reply('📊 Generating morning briefing now...');
+  await runMorningBriefing();
+}
+
+async function handleTelegramBudget(params, reply) {
+  const { clientName } = params || {};
+  if (clientName) {
+    const client = getClient(clientName);
+    if (!client) return reply(`❌ Client "${clientName}" not found.`);
+    return reply(`💰 <b>${client.name} Budget</b>\nMonthly: $${((client.monthly_budget_cents || 0) / 100).toFixed(0)}\nTarget ROAS: ${client.target_roas || 'N/A'}\nTarget CPA: $${((client.target_cpa_cents || 0) / 100).toFixed(2)}`);
+  }
+  const clients = getAllClients();
+  let msg = '💰 <b>Budget Overview</b>\n\n';
+  let totalBudget = 0;
+  for (const c of clients) {
+    const budget = (c.monthly_budget_cents || 0) / 100;
+    totalBudget += budget;
+    msg += `• ${c.name}: $${budget.toFixed(0)}/mo\n`;
+  }
+  msg += `\n<b>Total: $${totalBudget.toFixed(0)}/mo</b>`;
+  return reply(msg);
+}
+
+async function handleTelegramCostReport(params, reply) {
+  const period = params?.period || 'month';
+  const summary = getCostSummary(period);
+  let msg = `🤖 <b>AI Cost Report (${period})</b>\n\nTotal: <b>$${summary.totalDollars}</b>\nBudget Used: ${summary.budgetUsedPct}%\n\n`;
+  if (summary.byPlatform.length > 0) {
+    msg += `<b>By Platform:</b>\n`;
+    for (const p of summary.byPlatform) msg += `• ${p.platform}: $${(p.total / 100).toFixed(2)}\n`;
+  }
+  if (summary.byWorkflow.length > 0) {
+    msg += `\n<b>By Workflow:</b>\n`;
+    for (const w of summary.byWorkflow) msg += `• ${w.workflow}: $${(w.total / 100).toFixed(2)}\n`;
+  }
+  return reply(msg);
+}
+
+async function handleTelegramHelp(reply) {
+  const msg = `🤖 <b>PPC Agency Bot Commands (Telegram)</b>
+
+📊 <b>Performance:</b>
+• "Stats for [client]"
+• "How is [client] performing?"
+• "Show me all clients"
+
+⏸️ <b>Campaign Management:</b>
+• "Pause campaign [ID] on [platform]"
+• "Create campaign for [client]"
+
+📋 <b>Tasks:</b>
+• "Overdue tasks"
+• "Daily standup"
+
+📝 <b>Reports:</b>
+• "Weekly report for [client]"
+• "Monthly report for [client]"
+• "Morning briefing"
+
+💰 <b>Budget &amp; Costs:</b>
+• "Budget for [client]"
+• "AI cost report"
+
+🔐 <b>Approvals:</b>
+• "APPROVE [id]" / "DENY [id]" / "DETAILS [id]"
+
+All commands use natural language!`;
+  return reply(msg);
+}
+
+async function handleTelegramUnknown(message, reply) {
+  const response = await askClaude({
+    systemPrompt: 'You are a PPC agency assistant. The user sent a command that was not recognized. Help them by suggesting the right command format. Be brief.',
+    userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, report, overdue, briefing, budget, cost, help.`,
+    model: 'claude-haiku-3-5-20241022',
+    maxTokens: 256,
+    workflow: 'command-unknown',
+  });
+  return reply(`🤔 I didn't quite understand that.\n\n${response.text}\n\nType <b>help</b> for all commands.`);
+}
+
+async function handleTelegramApproval(action, approvalId, chatId) {
+  const reply = (msg) => sendTelegram(msg, chatId);
+  const pending = pendingApprovals.get(approvalId);
+  if (!pending) return reply(`❌ Approval "${approvalId}" not found or expired.`);
+  if (action === 'DENY') { pendingApprovals.delete(approvalId); return reply(`❌ Action denied and cancelled.`); }
+  if (action === 'DETAILS') return reply(`📋 <b>Action Details:</b>\n${JSON.stringify(pending, null, 2)}`);
+  try {
+    if (pending.type === 'pause' && pending.platform === 'meta') {
+      await metaAds.pauseCampaign(pending.campaignId);
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Campaign ${pending.campaignId} paused on Meta.`);
+    }
+    pendingApprovals.delete(approvalId);
+    return reply(`✅ Action approved and executed.`);
+  } catch (error) { return reply(`❌ Action failed: ${error.message}`); }
+}
+
+async function handleTelegramClientMessage(chatId, message) {
+  try {
+    const clients = getAllClients();
+    const response = await askClaude({
+      systemPrompt: `You are an AI assistant for a professional PPC/digital marketing agency. You're chatting with a client via Telegram.
+
+Your role:
+- Answer questions about their campaigns, performance, and strategy
+- Be professional, friendly, and concise
+- If they ask about specific metrics you don't have, offer to have the account manager follow up
+- Never share other clients' data
+- Keep responses under 500 words
+- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
+
+Current clients on file: ${clients.map(c => c.name).join(', ')}`,
+      userMessage: `Client chat ID: ${chatId}\nMessage: ${message}`,
+      model: 'claude-sonnet-4-5-20250514',
+      maxTokens: 1024,
+      workflow: 'client-chat',
+    });
+    await sendTelegram(response.text, chatId);
+  } catch (error) {
+    log.error('Telegram client message handling failed', { chatId, error: error.message });
+    await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
+  }
+}
 
 // --- Health Check ---
 app.get('/health', (req, res) => {
@@ -582,8 +861,9 @@ export function startServer(port) {
   const p = port || config.PORT || 3000;
   app.listen(p, () => {
     log.info(`WhatsApp server listening on port ${p}`);
-    console.log(`WhatsApp webhook server running on port ${p}`);
-    console.log(`Webhook URL: http://your-server:${p}/webhook/whatsapp`);
+    console.log(`Webhook server running on port ${p}`);
+    console.log(`WhatsApp webhook: http://your-server:${p}/webhook/whatsapp`);
+    console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
     console.log(`Health check: http://your-server:${p}/health`);
   });
   return app;
