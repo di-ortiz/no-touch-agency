@@ -1,0 +1,13 @@
+node_modules
+.env
+.git
+.gitignore
+*.md
+tests/
+coverage/
+.DS_Store
+logs/
+data/*.db
+data/*.db-journal
+tmp/
+config/google-service-account.json
