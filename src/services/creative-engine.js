@@ -202,7 +202,7 @@ export async function generateImagePrompt(opts = {}) {
   const response = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.imagePromptEngineer,
     userMessage: `Write a DALL-E 3 prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). Remember to end with "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind".`,
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 1500,
     workflow: 'image-prompt-engineering',
     clientId: client?.id,
