@@ -159,7 +159,7 @@ export async function buildCreativeDeck(opts = {}) {
   // Title text
   const titleBoxId = `title_main_${Date.now()}`;
   requests.push(
-    createTextBox(titleSlideId, titleBoxId, {
+    ...createTextBox(titleSlideId, titleBoxId, {
       x: 50, y: 120, width: 620, height: 80,
       text: opts.clientName,
       fontSize: 36, bold: true, color: COLORS.primary,
@@ -169,7 +169,7 @@ export async function buildCreativeDeck(opts = {}) {
   // Subtitle
   const subtitleBoxId = `title_sub_${Date.now()}`;
   requests.push(
-    createTextBox(titleSlideId, subtitleBoxId, {
+    ...createTextBox(titleSlideId, subtitleBoxId, {
       x: 50, y: 210, width: 620, height: 50,
       text: `${opts.campaignName || 'Campaign'} Creative Presentation`,
       fontSize: 20, color: COLORS.secondary,
@@ -179,7 +179,7 @@ export async function buildCreativeDeck(opts = {}) {
   // Date + platform
   const dateBoxId = `title_date_${Date.now()}`;
   requests.push(
-    createTextBox(titleSlideId, dateBoxId, {
+    ...createTextBox(titleSlideId, dateBoxId, {
       x: 50, y: 280, width: 620, height: 30,
       text: `${date} • ${(opts.platform || 'Multi-platform').toUpperCase()} • FOR APPROVAL`,
       fontSize: 12, color: COLORS.mutedText,
@@ -464,21 +464,21 @@ export async function buildCreativeDeck(opts = {}) {
     },
   });
   requests.push(
-    createTextBox(approvalSlideId, `approval_title_${Date.now()}`, {
+    ...createTextBox(approvalSlideId, `approval_title_${Date.now()}`, {
       x: 50, y: 130, width: 620, height: 60,
       text: 'Ready for Approval',
       fontSize: 32, bold: true, color: COLORS.primary,
     }),
   );
   requests.push(
-    createTextBox(approvalSlideId, `approval_body_${Date.now()}`, {
+    ...createTextBox(approvalSlideId, `approval_body_${Date.now()}`, {
       x: 50, y: 200, width: 620, height: 80,
       text: 'Review the creatives above and reply with your feedback.\nApproved creatives will be prepared for launch.',
       fontSize: 16, color: COLORS.darkText,
     }),
   );
   requests.push(
-    createTextBox(approvalSlideId, `approval_stats_${Date.now()}`, {
+    ...createTextBox(approvalSlideId, `approval_stats_${Date.now()}`, {
       x: 50, y: 300, width: 620, height: 50,
       text: [
         opts.textAds?.length ? `${opts.textAds.length} text ads` : null,
