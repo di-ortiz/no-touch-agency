@@ -115,6 +115,33 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 
+CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
+When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+
+1. *Gather the Creative Brief* — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
+   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
+   - Who is the target audience? (demographics, interests, pain points)
+   - What's the offer or value proposition? (discount, free trial, unique benefit?)
+   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
+   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
+   - What platforms? (Meta, Google, TikTok, Instagram?)
+   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
+   - Any competitors to reference or differentiate from?
+   - Specific products/services to feature?
+   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+
+2. *Research First* — Before generating, use your tools:
+   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
+   - Search competitor ads (search_ad_library) to see what's working in the space
+   - Check brand files if they have a Drive folder (list_client_files)
+
+3. *Generate with Full Context* — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
+
+4. *Present & Iterate* — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
+
+EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
+EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
+
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
 If a tool returns an error, explain it simply and suggest alternatives. Never show raw error objects.
@@ -283,8 +310,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using DALL-E 3 in platform-specific dimensions (feed, square, story formats). Creates professional advertising visuals tailored to the brand and concept.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'What the image should show or convey' }, product: { type: 'string', description: 'Product or service being advertised' }, mood: { type: 'string', description: 'Mood/tone (e.g. professional, fun, luxury)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' } }, required: ['clientName', 'platform', 'concept'] },
+    description: 'Generate ad creative images using DALL-E 3 in platform-specific dimensions. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
     name: 'generate_ad_video',
@@ -293,8 +320,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_creative_package',
-    description: 'Generate a FULL creative package: text ads + ad images + optional video, all assembled into a beautiful Google Slides presentation deck for client approval. This is the all-in-one creative tool — use it when the user wants a complete set of creatives ready for review.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Primary platform' }, campaignName: { type: 'string', description: 'Campaign name for the deck' }, objective: { type: 'string', description: 'Campaign objective' }, audience: { type: 'string', description: 'Target audience' }, offer: { type: 'string', description: 'Offer/promotion' }, concept: { type: 'string', description: 'Creative concept/theme' }, textVariations: { type: 'number', description: 'Number of text ad variations (default: 5)' }, generateImages: { type: 'boolean', description: 'Generate images with DALL-E 3 (default: true)' }, generateVideo: { type: 'boolean', description: 'Generate video with Sora 2 (default: false)' } }, required: ['clientName', 'platform'] },
+    description: 'Generate a FULL creative package: text ads + ad images + optional video, all assembled into a Google Slides presentation deck for client approval. IMPORTANT: Gather a complete creative brief before calling this tool — the more context you provide (audience, offer, style, mood, brand colors, competitor insights, website insights), the better the output.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Primary platform' }, campaignName: { type: 'string', description: 'Campaign name for the deck' }, objective: { type: 'string', description: 'Campaign objective (awareness, leads, conversions, traffic)' }, audience: { type: 'string', description: 'Detailed target audience (demographics, interests, pain points)' }, offer: { type: 'string', description: 'Offer/promotion/value proposition' }, concept: { type: 'string', description: 'Detailed creative concept — visual direction, mood, style, what the ads should convey' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle, minimalist, editorial, cinematic, bold/vibrant' }, mood: { type: 'string', description: 'Emotion to evoke: urgency, trust, excitement, aspiration, exclusivity' }, brandColors: { type: 'string', description: 'Brand color palette' }, references: { type: 'string', description: 'Visual references or inspiration' }, websiteInsights: { type: 'string', description: 'Key insights from browsing client website' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research' }, textVariations: { type: 'number', description: 'Number of text ad variations (default: 5)' }, generateImages: { type: 'boolean', description: 'Generate images with DALL-E 3 (default: true)' }, generateVideo: { type: 'boolean', description: 'Generate video with Sora 2 (default: false)' } }, required: ['clientName', 'platform'] },
   },
   // --- Web Browsing ---
   {
@@ -708,14 +735,19 @@ Return ONLY the JSON array, no other text.`;
       if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable image generation.' };
       const client = getClient(toolInput.clientName);
 
-      // Generate the image prompt using AI
+      // Generate the image prompt using AI with full context
       const imagePrompt = await creativeEngine.generateImagePrompt({
         clientName: toolInput.clientName,
         platform: toolInput.platform,
         product: toolInput.product,
         concept: toolInput.concept,
-        audience: client?.target_audience,
+        audience: toolInput.audience || client?.target_audience,
         mood: toolInput.mood,
+        style: toolInput.style,
+        brandColors: toolInput.brandColors || client?.brand_colors,
+        references: toolInput.references,
+        websiteInsights: toolInput.websiteInsights,
+        competitorInsights: toolInput.competitorInsights,
       });
 
       // Parse custom formats if provided
@@ -778,6 +810,12 @@ Return ONLY the JSON array, no other text.`;
         audience: toolInput.audience,
         offer: toolInput.offer,
         concept: toolInput.concept,
+        style: toolInput.style,
+        mood: toolInput.mood,
+        brandColors: toolInput.brandColors,
+        references: toolInput.references,
+        websiteInsights: toolInput.websiteInsights,
+        competitorInsights: toolInput.competitorInsights,
         textVariations: toolInput.textVariations,
         generateImages: toolInput.generateImages !== false,
         generateVideo: toolInput.generateVideo || false,
@@ -1052,6 +1090,33 @@ CRITICAL RULES:
 - For ad-hoc research and competitor intelligence, use the direct search tools.
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
+
+CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
+When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+
+1. <b>Gather the Creative Brief</b> — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
+   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
+   - Who is the target audience? (demographics, interests, pain points)
+   - What's the offer or value proposition? (discount, free trial, unique benefit?)
+   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
+   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
+   - What platforms? (Meta, Google, TikTok, Instagram?)
+   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
+   - Any competitors to reference or differentiate from?
+   - Specific products/services to feature?
+   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+
+2. <b>Research First</b> — Before generating, use your tools:
+   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
+   - Search competitor ads (search_ad_library) to see what's working in the space
+   - Check brand files if they have a Drive folder (list_client_files)
+
+3. <b>Generate with Full Context</b> — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
+
+4. <b>Present & Iterate</b> — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
+
+EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
+EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 

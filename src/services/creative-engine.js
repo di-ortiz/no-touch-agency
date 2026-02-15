@@ -148,34 +148,62 @@ IMPORTANT: Stay STRICTLY within character limits. Return ONLY the JSON array.`;
 
 /**
  * Generate an image prompt optimized for ad creatives.
+ *
+ * @param {object} opts
+ * @param {string} opts.clientName
+ * @param {string} opts.platform - Target platform
+ * @param {string} opts.product - Product/service to feature
+ * @param {string} opts.offer - Offer/promotion
+ * @param {string} opts.concept - Creative concept/angle
+ * @param {string} opts.audience - Target audience
+ * @param {string} opts.mood - Desired mood/emotion
+ * @param {string} opts.style - Creative style (photorealistic, minimalist, lifestyle, etc.)
+ * @param {string} opts.brandColors - Brand color palette
+ * @param {string} opts.references - Visual references or inspiration
+ * @param {string} opts.websiteInsights - Insights from browsing client website
+ * @param {string} opts.competitorInsights - Insights from competitor ad research
  */
 export async function generateImagePrompt(opts = {}) {
   const client = typeof opts.clientName === 'string' ? getClient(opts.clientName) : null;
 
+  const { SYSTEM_PROMPTS } = await import('../prompts/templates.js');
+
+  const briefSections = [
+    `CLIENT: ${opts.clientName || 'Brand'}`,
+    `PLATFORM: ${opts.platform || 'social media'} ad creative`,
+  ];
+
+  if (client?.industry || opts.industry) briefSections.push(`INDUSTRY: ${client?.industry || opts.industry}`);
+  if (opts.brandColors || client?.brand_colors) briefSections.push(`BRAND COLORS: ${opts.brandColors || client?.brand_colors}`);
+  if (opts.product || opts.offer) briefSections.push(`PRODUCT/SERVICE: ${opts.product || opts.offer}`);
+  if (opts.audience || client?.target_audience) briefSections.push(`TARGET AUDIENCE: ${opts.audience || client?.target_audience}`);
+  if (opts.concept) briefSections.push(`CREATIVE CONCEPT: ${opts.concept}`);
+  if (opts.mood) briefSections.push(`MOOD/EMOTION: ${opts.mood}`);
+  if (opts.style) briefSections.push(`CREATIVE STYLE: ${opts.style}`);
+  if (opts.references) briefSections.push(`VISUAL REFERENCES/INSPIRATION: ${opts.references}`);
+  if (opts.websiteInsights) briefSections.push(`INSIGHTS FROM CLIENT WEBSITE:\n${opts.websiteInsights}`);
+  if (opts.competitorInsights) briefSections.push(`COMPETITOR AD LANDSCAPE:\n${opts.competitorInsights}`);
+  if (client?.brand_voice) briefSections.push(`BRAND VOICE: ${client.brand_voice}`);
+
+  // Add platform-specific guidance
+  const platformGuide = {
+    meta: 'Design for Meta Feed — landscape/square, needs to stop the scroll in a busy feed. Leave clean space on the right or bottom third for headline overlay.',
+    instagram: 'Design for Instagram — visually stunning, aspirational. Square or vertical format. Must feel native to the platform, not overly "ad-like".',
+    google: 'Design for Google Display Network — needs to work at small sizes. Bold, simple composition with one clear focal point. High contrast.',
+    tiktok: 'Design for TikTok — vertical format, energetic and authentic feel. Should look native to the platform, not overly polished/corporate.',
+  };
+  if (platformGuide[opts.platform]) briefSections.push(`PLATFORM GUIDANCE: ${platformGuide[opts.platform]}`);
+
+  // Fallback defaults if minimal info provided
+  if (!opts.concept && !opts.style && !opts.mood) {
+    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, premium advertising visual. Choose an appropriate style based on the industry and brand. Avoid stock photo cliches.`);
+  }
+
   const response = await askClaude({
-    systemPrompt: `You are an expert advertising creative director who writes DALL-E 3 image generation prompts for ad creatives.
-
-Your prompts should:
-- Describe professional, high-quality advertising visuals
-- Be specific about composition, lighting, colors, mood
-- NEVER include text in the image (text is overlaid separately)
-- Specify "no text, no words, no letters, no writing" explicitly
-- Consider the brand colors and visual identity when provided
-- Create aspirational, engaging visuals that stop the scroll
-- Be tailored to the specific platform and format`,
-    userMessage: `Write a DALL-E 3 prompt for a ${opts.platform || 'social media'} ad creative.
-
-CLIENT: ${opts.clientName || 'Brand'}
-${client?.industry ? `INDUSTRY: ${client.industry}` : ''}
-${client?.brand_colors ? `BRAND COLORS: ${client.brand_colors}` : ''}
-PRODUCT/SERVICE: ${opts.product || opts.offer || 'Not specified'}
-CREATIVE CONCEPT: ${opts.concept || 'Eye-catching ad that conveys quality and trust'}
-TARGET AUDIENCE: ${opts.audience || client?.target_audience || 'General'}
-MOOD: ${opts.mood || 'Professional, aspirational'}
-
-Return ONLY the image prompt text, nothing else. Make it detailed (150-300 words).`,
+    systemPrompt: SYSTEM_PROMPTS.imagePromptEngineer,
+    userMessage: `Write a DALL-E 3 prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). Remember to end with "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind".`,
     model: 'claude-sonnet-4-5-20250929',
-    maxTokens: 1024,
+    maxTokens: 1500,
     workflow: 'image-prompt-engineering',
     clientId: client?.id,
   });
@@ -238,13 +266,19 @@ export async function generateCreativePackage(opts = {}) {
   if (opts.generateImages !== false && config.OPENAI_API_KEY) {
     log.info('Step 2: Generating ad images...');
     try {
-      // Generate an image prompt based on the concept
+      // Generate an image prompt based on the creative brief
       const imagePrompt = await generateImagePrompt({
         clientName: opts.clientName,
         platform,
         product: opts.offer,
         concept: opts.concept || result.textAds[0]?.angle,
         audience: opts.audience,
+        mood: opts.mood,
+        style: opts.style,
+        brandColors: opts.brandColors || client?.brand_colors,
+        references: opts.references,
+        websiteInsights: opts.websiteInsights,
+        competitorInsights: opts.competitorInsights,
       });
 
       // Generate images for platform-specific formats
