@@ -24,6 +24,9 @@ import * as pagespeed from '../api/pagespeed.js';
 import * as googleSheets from '../api/google-sheets.js';
 import * as keywordPlanner from '../api/google-keyword-planner.js';
 import * as dataforseo from '../api/dataforseo.js';
+import * as openaiMedia from '../api/openai-media.js';
+import * as googleSlides from '../api/google-slides.js';
+import * as creativeEngine from '../services/creative-engine.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import config from '../config.js';
 import logger from '../utils/logger.js';
@@ -267,6 +270,27 @@ const CSA_TOOLS = [
     name: 'export_report_to_sheet',
     description: 'Export a performance report to a formatted Google Sheet with data tables. Returns a shareable link.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, reportType: { type: 'string', enum: ['weekly', 'monthly', 'custom'], description: 'Report type' }, data: { type: 'string', description: 'Report data description or metrics to include' } }, required: ['clientName', 'reportType'] },
+  },
+  // --- Creative Generation ---
+  {
+    name: 'generate_text_ads',
+    description: 'Generate platform-specific text ad variations (headlines, descriptions, body copy, CTAs) with proper character limits for each platform. Returns structured ad objects ready for launch.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Ad platform' }, objective: { type: 'string', description: 'Campaign objective (e.g. conversions, awareness, leads)' }, audience: { type: 'string', description: 'Target audience description' }, offer: { type: 'string', description: 'Offer or promotion (optional)' }, concept: { type: 'string', description: 'Creative angle or theme (optional)' }, variations: { type: 'number', description: 'Number of variations (default: 5, max: 10)' } }, required: ['clientName', 'platform'] },
+  },
+  {
+    name: 'generate_ad_images',
+    description: 'Generate ad creative images using DALL-E 3 in platform-specific dimensions (feed, square, story formats). Creates professional advertising visuals tailored to the brand and concept.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'What the image should show or convey' }, product: { type: 'string', description: 'Product or service being advertised' }, mood: { type: 'string', description: 'Mood/tone (e.g. professional, fun, luxury)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' } }, required: ['clientName', 'platform', 'concept'] },
+  },
+  {
+    name: 'generate_ad_video',
+    description: 'Generate a short ad video using Sora 2 AI. Creates a professional advertising video clip (4-12 seconds) in the right aspect ratio for the platform.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, concept: { type: 'string', description: 'Video concept — what should happen in the video' }, platform: { type: 'string', enum: ['meta_feed', 'meta_story', 'instagram_feed', 'instagram_story', 'tiktok', 'youtube', 'google_display'], description: 'Platform/format for aspect ratio' }, duration: { type: 'number', description: 'Duration in seconds (4, 8, or 12)' }, offer: { type: 'string', description: 'Product/offer to feature (optional)' } }, required: ['clientName', 'concept'] },
+  },
+  {
+    name: 'generate_creative_package',
+    description: 'Generate a FULL creative package: text ads + ad images + optional video, all assembled into a beautiful Google Slides presentation deck for client approval. This is the all-in-one creative tool — use it when the user wants a complete set of creatives ready for review.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Primary platform' }, campaignName: { type: 'string', description: 'Campaign name for the deck' }, objective: { type: 'string', description: 'Campaign objective' }, audience: { type: 'string', description: 'Target audience' }, offer: { type: 'string', description: 'Offer/promotion' }, concept: { type: 'string', description: 'Creative concept/theme' }, textVariations: { type: 'number', description: 'Number of text ad variations (default: 5)' }, generateImages: { type: 'boolean', description: 'Generate images with DALL-E 3 (default: true)' }, generateVideo: { type: 'boolean', description: 'Generate video with Sora 2 (default: false)' } }, required: ['clientName', 'platform'] },
   },
 ];
 
@@ -634,6 +658,116 @@ Return ONLY the JSON array, no other text.`;
 
       if (!result) return { error: 'Google Sheets not configured. Set GOOGLE_APPLICATION_CREDENTIALS in .env' };
       return { clientName: toolInput.clientName, reportType: toolInput.reportType, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
+    }
+    // --- Creative Generation ---
+    case 'generate_text_ads': {
+      const ads = await creativeEngine.generateTextAds({
+        clientName: toolInput.clientName,
+        platform: toolInput.platform,
+        objective: toolInput.objective,
+        audience: toolInput.audience,
+        offer: toolInput.offer,
+        angle: toolInput.concept,
+        variations: Math.min(toolInput.variations || 5, 10),
+      });
+      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length };
+    }
+    case 'generate_ad_images': {
+      if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable image generation.' };
+      const client = getClient(toolInput.clientName);
+
+      // Generate the image prompt using AI
+      const imagePrompt = await creativeEngine.generateImagePrompt({
+        clientName: toolInput.clientName,
+        platform: toolInput.platform,
+        product: toolInput.product,
+        concept: toolInput.concept,
+        audience: client?.target_audience,
+        mood: toolInput.mood,
+      });
+
+      // Parse custom formats if provided
+      const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
+
+      const images = await openaiMedia.generateAdImages({
+        prompt: imagePrompt,
+        platform: toolInput.platform,
+        formats,
+        quality: 'hd',
+        style: 'natural',
+        workflow: 'ad-image-generation',
+        clientId: client?.id,
+      });
+
+      return {
+        clientName: toolInput.clientName,
+        platform: toolInput.platform,
+        concept: toolInput.concept,
+        imagePrompt,
+        images: images.map(img => ({
+          format: img.format,
+          label: img.dimensions?.label || img.format,
+          url: img.url,
+          error: img.error,
+        })),
+        totalGenerated: images.filter(i => !i.error).length,
+      };
+    }
+    case 'generate_ad_video': {
+      if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable video generation.' };
+      const client = getClient(toolInput.clientName);
+
+      const videoPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting. No text overlays.`;
+
+      const video = await openaiMedia.generateAdVideo({
+        prompt: videoPrompt,
+        format: toolInput.platform || 'meta_feed',
+        duration: toolInput.duration || 8,
+        workflow: 'ad-video-generation',
+        clientId: client?.id,
+      });
+
+      return {
+        clientName: toolInput.clientName,
+        concept: toolInput.concept,
+        videoUrl: video.videoUrl,
+        duration: video.duration,
+        resolution: video.resolution,
+        aspectRatio: video.aspectRatio,
+        status: video.status,
+      };
+    }
+    case 'generate_creative_package': {
+      const pkg = await creativeEngine.generateCreativePackage({
+        clientName: toolInput.clientName,
+        platform: toolInput.platform,
+        campaignName: toolInput.campaignName,
+        objective: toolInput.objective,
+        audience: toolInput.audience,
+        offer: toolInput.offer,
+        concept: toolInput.concept,
+        textVariations: toolInput.textVariations,
+        generateImages: toolInput.generateImages !== false,
+        generateVideo: toolInput.generateVideo || false,
+        buildDeck: true,
+      });
+
+      return {
+        clientName: pkg.clientName,
+        platform: pkg.platform,
+        campaignName: pkg.campaignName,
+        summary: pkg.summary,
+        textAdsCount: pkg.textAds.length,
+        textAdPreview: pkg.textAds.slice(0, 3).map(a => ({ headline: a.headline, cta: a.cta, angle: a.angle })),
+        imagesCount: pkg.images.filter(i => !i.error).length,
+        imageUrls: pkg.images.filter(i => !i.error).map(i => i.url),
+        videosCount: pkg.videos.filter(v => !v.error).length,
+        presentationUrl: pkg.presentation?.url || null,
+        status: 'awaiting_approval',
+        message: pkg.presentation?.url
+          ? `Creative deck ready for review: ${pkg.presentation.url}`
+          : 'Creative package generated (Google Slides not configured for deck)',
+      };
     }
     default:
       return { error: `Unknown tool: ${toolName}` };
