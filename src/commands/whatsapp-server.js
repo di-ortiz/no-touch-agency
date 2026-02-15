@@ -1085,44 +1085,9 @@ async function handleTelegramCommand(message, chatId) {
   addToHistory(chatId, 'user', message);
   const messages = [...history, { role: 'user', content: message }];
 
-  // Conversational loop with tool use (using shared CSA_TOOLS)
-  let response = await askClaude({
-    systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
-    messages,
-    tools: CSA_TOOLS,
-    model: 'claude-sonnet-4-5-20250929',
-    maxTokens: 4096,
-    workflow: 'telegram-csa',
-  });
-
-  // Handle tool use loop (max 10 rounds to allow multi-step tasks)
-  let rounds = 0;
-  while (response.stopReason === 'tool_use' && rounds < 10) {
-    rounds++;
-
-    // Send a natural "working on it" message on first tool call
-    if (rounds === 1 && response.text) {
-      await reply(response.text);
-    }
-
-    // Execute all tool calls
-    const toolResults = [];
-    for (const tool of response.toolUse) {
-      log.info('Executing tool', { tool: tool.name, input: tool.input });
-      try {
-        const result = await executeCSATool(tool.name, tool.input);
-        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
-      } catch (e) {
-        log.error('Tool execution failed', { tool: tool.name, error: e.message });
-        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
-      }
-    }
-
-    // Continue conversation with tool results
-    messages.push({ role: 'assistant', content: response.raw.content });
-    messages.push({ role: 'user', content: toolResults });
-
-    response = await askClaude({
+  try {
+    // Conversational loop with tool use (using shared CSA_TOOLS)
+    let response = await askClaude({
       systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
       messages,
       tools: CSA_TOOLS,
@@ -1130,12 +1095,60 @@ async function handleTelegramCommand(message, chatId) {
       maxTokens: 4096,
       workflow: 'telegram-csa',
     });
-  }
 
-  // Send final response and save assistant reply to history
-  if (response.text) {
-    addToHistory(chatId, 'assistant', response.text);
-    await reply(response.text);
+    // Handle tool use loop (max 10 rounds to allow multi-step tasks)
+    let rounds = 0;
+    const toolsSummary = [];
+    while (response.stopReason === 'tool_use' && rounds < 10) {
+      rounds++;
+
+      // Send a natural "working on it" message on first tool call
+      if (rounds === 1 && response.text) {
+        await reply(response.text);
+      }
+
+      // Execute all tool calls
+      const toolResults = [];
+      for (const tool of response.toolUse) {
+        log.info('Executing tool', { tool: tool.name, round: rounds });
+        toolsSummary.push(tool.name);
+        try {
+          const result = await executeCSATool(tool.name, tool.input);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+        } catch (e) {
+          log.error('Tool execution failed', { tool: tool.name, error: e.message });
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
+        }
+      }
+
+      // Continue conversation with tool results
+      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await askClaude({
+        systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
+        messages,
+        tools: CSA_TOOLS,
+        model: 'claude-sonnet-4-5-20250929',
+        maxTokens: 4096,
+        workflow: 'telegram-csa',
+      });
+    }
+
+    // Send final response and save assistant reply to history
+    if (response.text) {
+      addToHistory(chatId, 'assistant', response.text);
+      await reply(response.text);
+    } else {
+      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+      addToHistory(chatId, 'assistant', msg);
+      await reply(msg);
+    }
+  } catch (error) {
+    log.error('Telegram command loop failed', { error: error.message, stack: error.stack });
+    const errorMsg = `Something went wrong while processing your request: ${error.message}. Please try again.`;
+    addToHistory(chatId, 'assistant', errorMsg);
+    await reply(errorMsg);
   }
 }
 
@@ -1215,44 +1228,9 @@ async function handleCommand(message) {
   addToHistory(ownerChatId, 'user', message);
   const messages = [...history, { role: 'user', content: message }];
 
-  // Conversational tool-use loop (same architecture as Telegram)
-  let response = await askClaude({
-    systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
-    messages,
-    tools: CSA_TOOLS,
-    model: 'claude-sonnet-4-5-20250929',
-    maxTokens: 4096,
-    workflow: 'whatsapp-csa',
-  });
-
-  // Handle tool use loop (max 10 rounds to allow multi-step tasks)
-  let rounds = 0;
-  while (response.stopReason === 'tool_use' && rounds < 10) {
-    rounds++;
-
-    // Send a natural "working on it" message on first tool call
-    if (rounds === 1 && response.text) {
-      await sendWhatsApp(response.text);
-    }
-
-    // Execute all tool calls
-    const toolResults = [];
-    for (const tool of response.toolUse) {
-      log.info('Executing tool', { tool: tool.name, input: tool.input });
-      try {
-        const result = await executeCSATool(tool.name, tool.input);
-        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
-      } catch (e) {
-        log.error('Tool execution failed', { tool: tool.name, error: e.message });
-        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
-      }
-    }
-
-    // Continue conversation with tool results
-    messages.push({ role: 'assistant', content: response.raw.content });
-    messages.push({ role: 'user', content: toolResults });
-
-    response = await askClaude({
+  try {
+    // Conversational tool-use loop (same architecture as Telegram)
+    let response = await askClaude({
       systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
       messages,
       tools: CSA_TOOLS,
@@ -1260,12 +1238,61 @@ async function handleCommand(message) {
       maxTokens: 4096,
       workflow: 'whatsapp-csa',
     });
-  }
 
-  // Send final response and save to history
-  if (response.text) {
-    addToHistory(ownerChatId, 'assistant', response.text);
-    await sendWhatsApp(response.text);
+    // Handle tool use loop (max 10 rounds to allow multi-step tasks)
+    let rounds = 0;
+    const toolsSummary = []; // track what tools ran for history context
+    while (response.stopReason === 'tool_use' && rounds < 10) {
+      rounds++;
+
+      // Send a natural "working on it" message on first tool call
+      if (rounds === 1 && response.text) {
+        await sendWhatsApp(response.text);
+      }
+
+      // Execute all tool calls
+      const toolResults = [];
+      for (const tool of response.toolUse) {
+        log.info('Executing tool', { tool: tool.name, round: rounds });
+        toolsSummary.push(tool.name);
+        try {
+          const result = await executeCSATool(tool.name, tool.input);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+        } catch (e) {
+          log.error('Tool execution failed', { tool: tool.name, error: e.message });
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
+        }
+      }
+
+      // Continue conversation with tool results
+      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await askClaude({
+        systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
+        messages,
+        tools: CSA_TOOLS,
+        model: 'claude-sonnet-4-5-20250929',
+        maxTokens: 4096,
+        workflow: 'whatsapp-csa',
+      });
+    }
+
+    // Send final response and save to history
+    if (response.text) {
+      addToHistory(ownerChatId, 'assistant', response.text);
+      await sendWhatsApp(response.text);
+    } else {
+      // If no final text (e.g. hit max rounds), let user know
+      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+      addToHistory(ownerChatId, 'assistant', msg);
+      await sendWhatsApp(msg);
+    }
+  } catch (error) {
+    log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
+    const errorMsg = `Something went wrong while processing your request: ${error.message}. Please try again.`;
+    addToHistory(ownerChatId, 'assistant', errorMsg);
+    await sendWhatsApp(errorMsg);
   }
 }
 
