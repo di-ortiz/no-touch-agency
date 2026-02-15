@@ -33,6 +33,7 @@ const envSchema = z.object({
   META_APP_ID: z.string().optional().default(''),
   META_APP_SECRET: z.string().optional().default(''),
   META_ACCESS_TOKEN: z.string().optional().default(''),
+  META_USER_ACCESS_TOKEN: z.string().optional().default(''),
   META_BUSINESS_ID: z.string().optional().default(''),
 
   // Google Ads

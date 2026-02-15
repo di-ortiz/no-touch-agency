@@ -4,7 +4,7 @@ import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
 import { recordCost } from '../services/cost-tracker.js';
-import { getValidToken, isTokenExpiredError, invalidateCachedToken } from '../utils/meta-token.js';
+import { getValidToken, getValidUserToken, isTokenExpiredError, invalidateCachedToken } from '../utils/meta-token.js';
 
 const log = logger.child({ platform: 'meta-ad-library' });
 const API_VERSION = 'v22.0';
@@ -56,7 +56,8 @@ export async function searchAds(opts = {}) {
   const isEU = EU_UK_COUNTRIES.has(country);
   const selectedFields = fields || (isPolitical || isEU ? BASE_FIELDS + POLITICAL_FIELDS : BASE_FIELDS);
 
-  const token = await getValidToken();
+  // Ad Library API requires a User access token (System User tokens return error code 1)
+  const token = await getValidUserToken();
 
   const params = {
     access_token: token,
@@ -120,7 +121,7 @@ export async function searchPages(query) {
     const result = await rateLimited('meta', () =>
       retry(async () => {
         try {
-          const pageToken = await getValidToken();
+          const pageToken = await getValidUserToken();
           const res = await axios.get(`${BASE_URL}/pages/search`, {
             params: {
               access_token: pageToken,

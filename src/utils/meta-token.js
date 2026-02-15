@@ -131,6 +131,87 @@ export async function getValidToken() {
 }
 
 /**
+ * Get a valid User access token for endpoints that don't support System User tokens
+ * (e.g., Ad Library API /ads_archive). Falls back to the main token if not configured.
+ *
+ * Auto-refreshes the user token when it's expiring within 7 days.
+ */
+let cachedUserToken = null;
+let userTokenExpiry = 0;
+let userTokenValidated = false;
+
+export async function getValidUserToken() {
+  const userToken = config.META_USER_ACCESS_TOKEN;
+  if (!userToken) {
+    // Fall back to main token if no user token configured
+    return getValidToken();
+  }
+
+  // Return cached user token if validated and not near expiry
+  if (cachedUserToken && userTokenValidated && userTokenExpiry > 0) {
+    const bufferMs = 24 * 60 * 60 * 1000;
+    if (Date.now() < userTokenExpiry - bufferMs) {
+      return cachedUserToken;
+    }
+  }
+
+  const hasAppCredentials = config.META_APP_ID && config.META_APP_SECRET;
+
+  if (!hasAppCredentials) {
+    cachedUserToken = userToken;
+    userTokenValidated = false;
+    return userToken;
+  }
+
+  try {
+    const info = await debugToken(userToken);
+
+    if (!info || !info.is_valid) {
+      log.error('META_USER_ACCESS_TOKEN is expired. Generate a new one at https://developers.facebook.com/tools/explorer/ and exchange for long-lived token.');
+      throw new MetaTokenError(
+        'Meta User access token is expired. Generate a new one at Graph Explorer and run the exchange command for a long-lived token.'
+      );
+    }
+
+    const expiresAt = info.expires_at ? info.expires_at * 1000 : 0;
+    const now = Date.now();
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+    if (expiresAt > 0 && expiresAt - now < sevenDaysMs) {
+      log.info('Meta User token expiring soon, attempting refresh', {
+        expiresIn: Math.round((expiresAt - now) / 3600000) + 'h',
+      });
+
+      try {
+        const refreshed = await exchangeForLongLived(userToken);
+        cachedUserToken = refreshed.access_token;
+        userTokenExpiry = refreshed.expires_in
+          ? now + refreshed.expires_in * 1000
+          : expiresAt;
+        userTokenValidated = true;
+        log.info('Meta User token refreshed successfully', {
+          expiresIn: Math.round((userTokenExpiry - now) / 86400000) + 'd',
+        });
+        return cachedUserToken;
+      } catch (refreshErr) {
+        log.warn('User token refresh failed, using existing token', { error: refreshErr.message });
+      }
+    }
+
+    cachedUserToken = userToken;
+    userTokenExpiry = expiresAt;
+    userTokenValidated = true;
+    return cachedUserToken;
+  } catch (error) {
+    if (error instanceof MetaTokenError) throw error;
+    log.warn('User token validation failed, using configured token', { error: error.message });
+    cachedUserToken = userToken;
+    userTokenValidated = false;
+    return userToken;
+  }
+}
+
+/**
  * Check if an error is a Meta OAuth/token expiry error (code 190).
  */
 export function isTokenExpiredError(error) {
@@ -156,4 +237,4 @@ export class MetaTokenError extends Error {
   }
 }
 
-export default { getValidToken, debugToken, exchangeForLongLived, isTokenExpiredError, invalidateCachedToken, MetaTokenError };
+export default { getValidToken, getValidUserToken, debugToken, exchangeForLongLived, isTokenExpiredError, invalidateCachedToken, MetaTokenError };
