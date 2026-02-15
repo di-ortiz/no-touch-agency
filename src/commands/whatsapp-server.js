@@ -34,6 +34,7 @@ import * as googleAnalytics from '../api/google-analytics.js';
 import * as googleTransparency from '../api/google-transparency.js';
 import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
+import * as chartBuilderService from '../services/chart-builder.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -401,18 +402,18 @@ const CSA_TOOLS = [
   // --- Presentation Builders ---
   {
     name: 'build_media_plan_deck',
-    description: 'Build a professional Google Slides media plan presentation. Includes executive summary, objectives, target audiences, channel strategy, budget allocation, projections, creative mockups, and timeline. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, campaignName: { type: 'string' }, mediaPlan: { type: 'object', description: 'Media plan data: { summary, objective, budget, timeline, kpis[], audiences[], channels[], budgetBreakdown[], projections: {impressions, clicks, conversions, cpa, roas, reach, notes}, nextSteps }' }, creatives: { type: 'array', description: 'Creative mockup refs: [{ label, url, concept }]' } }, required: ['clientName', 'mediaPlan'] },
+    description: 'Build a professional Google Slides media plan presentation with REAL CHARTS (pie charts for budget allocation, bar charts for projections). Includes executive summary, objectives, target audiences, channel strategy, budget allocation chart, projections chart, creative mockups, and timeline. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, campaignName: { type: 'string' }, mediaPlan: { type: 'object', description: 'Media plan data: { summary, objective, budget, timeline, kpis[], audiences[], channels[{platform, budget, projectedClicks, projectedConversions}], budgetBreakdown[{channel, amount, percentage, objective}], projections: {impressions, clicks, conversions, cpa, roas, reach, notes}, nextSteps }' }, creatives: { type: 'array', description: 'Creative mockup refs: [{ label, url, concept }]' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName', 'mediaPlan'] },
   },
   {
     name: 'build_competitor_deck',
-    description: 'Build a professional Google Slides competitor research presentation. Includes competitor landscape, domain overview, keyword gap analysis, SERP analysis, and competitor ad examples. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array', description: 'Competitor data: [{ name, domain, traffic, keywords, avgPosition, strengths, weaknesses }]' }, keywordGap: { type: 'array', description: 'Keyword gap data: [{ keyword, volume, competition, competitorPosition, yourPosition }]' }, competitorAds: { type: 'array', description: 'Competitor ads: [{ pageName, headline, body, cta, platforms }]' }, serpAnalysis: { type: 'object', description: '{ keyword, organicResults, paidResults }' }, domainOverview: { type: 'object', description: '{ organicTraffic, paidTraffic, organicKeywords, backlinks }' }, summary: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+    description: 'Build a professional Google Slides competitor research presentation with REAL CHARTS (bar charts for traffic comparison, keyword counts). Includes competitor landscape, domain overview, keyword gap analysis, SERP analysis, and competitor ad examples. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array', description: 'Competitor data: [{ name, domain, traffic, keywords, avgPosition, strengths, weaknesses }]' }, keywordGap: { type: 'array', description: 'Keyword gap data: [{ keyword, volume, competition, competitorPosition, yourPosition }]' }, competitorAds: { type: 'array', description: 'Competitor ads: [{ pageName, headline, body, cta, platforms }]' }, serpAnalysis: { type: 'object', description: '{ keyword, organicResults, paidResults }' }, domainOverview: { type: 'object', description: '{ organicTraffic, paidTraffic, organicKeywords, backlinks }' }, summary: { type: 'string' }, recommendations: { type: 'string' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName'] },
   },
   {
     name: 'build_performance_deck',
-    description: 'Build a professional Google Slides performance report presentation. Includes KPI metrics, campaign breakdown, website analytics, traffic sources, top pages, keyword performance, audience insights, and recommendations. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string', description: 'Date range label (e.g. "Feb 1-7, 2026")' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas, cpc }' }, analytics: { type: 'object', description: 'GA4 data: { sessions, totalUsers, pageViews, bounceRate, engagementRate, conversions, trafficSources[], topPages[] }' }, campaigns: { type: 'array', description: 'Campaign data: [{ name, spend, clicks, conversions, cpa, roas }]' }, topKeywords: { type: 'array', description: '[{ keyword, impressions, clicks, ctr, conversions, cpa }]' }, audienceData: { type: 'object', description: '{ devices[], countries[], gender[] }' }, analysis: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+    description: 'Build a professional Google Slides performance report presentation with REAL CHARTS (spend pie chart, traffic sources pie, daily trend line, device breakdown pie). Includes KPI metrics, campaign breakdown, website analytics, traffic sources, top pages, keyword performance, audience insights, and recommendations. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string', description: 'Date range label (e.g. "Feb 1-7, 2026")' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas, cpc }' }, analytics: { type: 'object', description: 'GA4 data: { sessions, totalUsers, pageViews, bounceRate, engagementRate, conversions, trafficSources[], topPages[] }' }, campaigns: { type: 'array', description: 'Campaign data: [{ name, spend, clicks, conversions, cpa, roas }]' }, topKeywords: { type: 'array', description: '[{ keyword, impressions, clicks, ctr, conversions, cpa }]' }, audienceData: { type: 'object', description: '{ devices[], countries[], gender[] }' }, dailyTrend: { type: 'array', description: 'Daily data: [{ date, sessions, conversions }] — for line chart' }, analysis: { type: 'string' }, recommendations: { type: 'string' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName'] },
   },
   // --- PDF Reports ---
   {
@@ -424,6 +425,31 @@ const CSA_TOOLS = [
     name: 'generate_competitor_pdf',
     description: 'Generate a competitor analysis report as a Google Doc with PDF download link. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array' }, keywordGap: { type: 'array' }, competitorAds: { type: 'array' }, summary: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+  },
+  // --- Charts ---
+  {
+    name: 'create_chart_presentation',
+    description: 'Create a Google Slides presentation with one or more data charts (pie, bar, column, line, area, stacked). Each chart is a real embedded Google Sheets chart — not text, not an image, but an actual interactive chart. Use this whenever the user wants to visualize data like budget allocation, performance projections, competitor comparisons, traffic sources, trends, etc.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      title: { type: 'string', description: 'Presentation title (e.g. "Budget & Performance Projections")' },
+      charts: { type: 'array', description: 'Array of chart configs. Each: { title: "Chart Title", chartType: "pie|bar|column|line|area|stacked_bar|stacked_column", labels: ["Label1", "Label2", ...], series: [{ name: "Series Name", values: [100, 200, ...] }] }', items: { type: 'object', properties: {
+        title: { type: 'string' },
+        chartType: { type: 'string', enum: ['pie', 'bar', 'column', 'line', 'area', 'stacked_bar', 'stacked_column'] },
+        labels: { type: 'array', items: { type: 'string' } },
+        series: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
+      }, required: ['title', 'chartType', 'labels', 'series'] } },
+    }, required: ['clientName', 'charts'] },
+  },
+  {
+    name: 'create_single_chart',
+    description: 'Create a single chart in Google Sheets and return a link. Use this for quick one-off charts without a full presentation. Returns a Google Sheets link where the chart can be viewed and downloaded.',
+    input_schema: { type: 'object', properties: {
+      title: { type: 'string', description: 'Chart title' },
+      chartType: { type: 'string', enum: ['pie', 'bar', 'column', 'line', 'area', 'stacked_bar', 'stacked_column'], description: 'Chart type' },
+      labels: { type: 'array', items: { type: 'string' }, description: 'Category labels' },
+      series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
+    }, required: ['title', 'chartType', 'labels', 'series'] },
   },
 ];
 
@@ -1096,6 +1122,7 @@ Return ONLY the JSON array, no other text.`;
         campaignName: toolInput.campaignName,
         mediaPlan: toolInput.mediaPlan,
         creatives: toolInput.creatives,
+        charts: toolInput.charts,
         folderId,
       });
       if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
@@ -1113,6 +1140,7 @@ Return ONLY the JSON array, no other text.`;
         domainOverview: toolInput.domainOverview,
         summary: toolInput.summary,
         recommendations: toolInput.recommendations,
+        charts: toolInput.charts,
         folderId,
       });
       if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
@@ -1130,8 +1158,10 @@ Return ONLY the JSON array, no other text.`;
         campaigns: toolInput.campaigns,
         topKeywords: toolInput.topKeywords,
         audienceData: toolInput.audienceData,
+        dailyTrend: toolInput.dailyTrend,
         analysis: toolInput.analysis,
         recommendations: toolInput.recommendations,
+        charts: toolInput.charts,
         folderId,
       });
       if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
@@ -1173,6 +1203,29 @@ Return ONLY the JSON array, no other text.`;
       });
       if (!result) return { error: 'Failed to generate competitor report. Check Google credentials.' };
       return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+    }
+
+    // --- Charts ---
+    case 'create_chart_presentation': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const result = await chartBuilderService.buildChartPresentation({
+        clientName: toolInput.clientName,
+        title: toolInput.title,
+        charts: toolInput.charts,
+        folderId,
+      });
+      if (!result) return { error: 'Failed to create chart presentation. Check Google credentials.' };
+      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
+    }
+    case 'create_single_chart': {
+      const result = await chartBuilderService.createChart({
+        title: toolInput.title,
+        chartType: toolInput.chartType,
+        labels: toolInput.labels,
+        series: toolInput.series,
+      });
+      return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
     }
 
     default:

@@ -1,4 +1,5 @@
 import * as googleSlides from '../api/google-slides.js';
+import * as chartBuilder from './chart-builder.js';
 import logger from '../utils/logger.js';
 
 const log = logger.child({ workflow: 'presentation-builder' });
@@ -119,6 +120,67 @@ function addTableSlide(requests, slideIndex, heading, headers, rows) {
     requests.push(...textBox(slideId, id('tb_more'), { x: 50, y: 360, width: 620, height: 18, text: `+ ${rows.length - 20} more rows`, fontSize: 9, color: C.mutedText }));
   }
   return slideIndex + 1;
+}
+
+/**
+ * Add a chart slide to a presentation. Creates the chart in Sheets and embeds it.
+ * IMPORTANT: This must be called AFTER the initial batchUpdate, since it does its
+ * own batchUpdate to embed the Sheets chart.
+ *
+ * @param {string} presentationId
+ * @param {string} title - Chart title
+ * @param {string} chartType - pie | bar | column | line | area | stacked_bar | stacked_column
+ * @param {string[]} labels - Category labels
+ * @param {Array<{name: string, values: number[]}>} series - Data series
+ * @param {string} folderId
+ */
+async function addChartSlidePost(presentationId, title, chartType, labels, series, folderId) {
+  try {
+    const chart = await chartBuilder.createChart({ title, chartType, labels, series, folderId });
+    if (!chart || !chart.chartId) {
+      log.warn('Chart creation failed, skipping chart slide', { title });
+      return;
+    }
+
+    const slideId = id('chart_slide');
+    const reqs = [];
+    reqs.push({
+      createSlide: { objectId: slideId, slideLayoutReference: { predefinedLayout: 'BLANK' } },
+    });
+    // Chart heading
+    const headId = id('ch_head');
+    reqs.push({
+      createShape: {
+        objectId: headId,
+        shapeType: 'TEXT_BOX',
+        elementProperties: {
+          pageObjectId: slideId,
+          size: { width: { magnitude: 620, unit: 'PT' }, height: { magnitude: 30, unit: 'PT' } },
+          transform: { scaleX: 1, scaleY: 1, translateX: 50, translateY: 12, unit: 'PT' },
+        },
+      },
+    });
+    reqs.push({ insertText: { objectId: headId, text: title } });
+    reqs.push({
+      updateTextStyle: {
+        objectId: headId,
+        style: {
+          fontSize: { magnitude: 20, unit: 'PT' },
+          fontFamily: 'Inter',
+          bold: true,
+          foregroundColor: { opaqueColor: { rgbColor: C.primary } },
+        },
+        textRange: { type: 'ALL' },
+        fields: 'fontSize,fontFamily,bold,foregroundColor',
+      },
+    });
+    // Embed chart
+    reqs.push(chartBuilder.embedChartRequest(slideId, id('ch_embed'), chart.spreadsheetId, chart.chartId, { x: 60, y: 48, width: 590, height: 330 }));
+
+    await googleSlides.batchUpdate(presentationId, reqs);
+  } catch (e) {
+    log.warn('Failed to add chart slide', { title, error: e.message });
+  }
 }
 
 // ============================================================
@@ -260,6 +322,38 @@ export async function buildMediaPlanDeck(opts = {}) {
   if (defaultSlideId) requests.push({ deleteObject: { objectId: defaultSlideId } });
 
   await googleSlides.batchUpdate(presentationId, requests);
+
+  // --- Post-build: Add chart slides (charts require separate batchUpdate calls) ---
+
+  // Budget allocation pie chart
+  if (mp.budgetBreakdown && mp.budgetBreakdown.length > 0) {
+    const labels = mp.budgetBreakdown.map(b => b.channel || 'Other');
+    const values = mp.budgetBreakdown.map(b => parseFloat(String(b.amount || '0').replace(/[^0-9.]/g, '')) || 0);
+    if (values.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Budget Allocation', 'pie', labels, [{ name: 'Budget', values }], opts.folderId);
+    }
+  }
+
+  // Projections bar chart
+  if (mp.projections && mp.channels && mp.channels.length > 0) {
+    const channelLabels = mp.channels.map(ch => typeof ch === 'string' ? ch : (ch.platform || 'Channel'));
+    const hasProjectionData = mp.channels.some(ch => ch.projectedClicks || ch.projectedConversions);
+    if (hasProjectionData) {
+      const clicksSeries = { name: 'Est. Clicks', values: mp.channels.map(ch => ch.projectedClicks || 0) };
+      const convSeries = { name: 'Est. Conversions', values: mp.channels.map(ch => ch.projectedConversions || 0) };
+      await addChartSlidePost(presentationId, 'Projected Performance by Channel', 'column', channelLabels, [clicksSeries, convSeries], opts.folderId);
+    }
+  }
+
+  // Charts from opts.charts (explicit chart data passed by the agent)
+  if (opts.charts && opts.charts.length > 0) {
+    for (const chart of opts.charts) {
+      if (chart.labels && chart.series) {
+        await addChartSlidePost(presentationId, chart.title || 'Chart', chart.chartType || 'bar', chart.labels, chart.series, opts.folderId);
+      }
+    }
+  }
+
   log.info(`Media plan deck built for ${opts.clientName}`, { presentationId });
   return presentation;
 }
@@ -394,6 +488,32 @@ export async function buildCompetitorDeck(opts = {}) {
   if (defaultSlideId) requests.push({ deleteObject: { objectId: defaultSlideId } });
 
   await googleSlides.batchUpdate(presentationId, requests);
+
+  // --- Post-build: Add chart slides ---
+
+  // Competitor traffic comparison bar chart
+  if (opts.competitors && opts.competitors.length > 1) {
+    const labels = opts.competitors.slice(0, 10).map(c => c.name || c.domain || '?');
+    const trafficValues = opts.competitors.slice(0, 10).map(c => parseInt(c.traffic || c.estimatedTraffic || 0));
+    if (trafficValues.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Competitor Traffic Comparison', 'bar', labels, [{ name: 'Est. Monthly Traffic', values: trafficValues }], opts.folderId);
+    }
+
+    const kwValues = opts.competitors.slice(0, 10).map(c => parseInt(c.keywords || 0));
+    if (kwValues.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Competitor Keywords Count', 'bar', labels, [{ name: 'Ranking Keywords', values: kwValues }], opts.folderId);
+    }
+  }
+
+  // Explicit charts
+  if (opts.charts && opts.charts.length > 0) {
+    for (const chart of opts.charts) {
+      if (chart.labels && chart.series) {
+        await addChartSlidePost(presentationId, chart.title || 'Chart', chart.chartType || 'bar', chart.labels, chart.series, opts.folderId);
+      }
+    }
+  }
+
   log.info(`Competitor deck built for ${opts.clientName}`, { presentationId });
   return presentation;
 }
@@ -545,6 +665,53 @@ export async function buildPerformanceDeck(opts = {}) {
   if (defaultSlideId) requests.push({ deleteObject: { objectId: defaultSlideId } });
 
   await googleSlides.batchUpdate(presentationId, requests);
+
+  // --- Post-build: Add chart slides ---
+
+  // Campaign spend pie chart
+  if (opts.campaigns && opts.campaigns.length > 1) {
+    const labels = opts.campaigns.map(c => c.name || 'Campaign');
+    const spendValues = opts.campaigns.map(c => parseFloat(String(c.spend || '0').replace(/[^0-9.]/g, '')) || 0);
+    if (spendValues.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Spend by Campaign', 'pie', labels, [{ name: 'Spend', values: spendValues }], opts.folderId);
+    }
+  }
+
+  // Traffic sources pie chart
+  if (opts.analytics?.trafficSources && opts.analytics.trafficSources.length > 1) {
+    const labels = opts.analytics.trafficSources.map(s => s.channel || 'Other');
+    const sessValues = opts.analytics.trafficSources.map(s => parseInt(s.sessions || 0));
+    if (sessValues.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Sessions by Traffic Source', 'pie', labels, [{ name: 'Sessions', values: sessValues }], opts.folderId);
+    }
+  }
+
+  // Daily trend line chart
+  if (opts.dailyTrend && opts.dailyTrend.length > 1) {
+    const labels = opts.dailyTrend.map(d => d.date || '');
+    const sessionsSeries = { name: 'Sessions', values: opts.dailyTrend.map(d => d.sessions || 0) };
+    const convSeries = { name: 'Conversions', values: opts.dailyTrend.map(d => d.conversions || 0) };
+    await addChartSlidePost(presentationId, 'Daily Performance Trend', 'line', labels, [sessionsSeries, convSeries], opts.folderId);
+  }
+
+  // Audience devices pie chart
+  if (opts.audienceData?.devices && opts.audienceData.devices.length > 1) {
+    const labels = opts.audienceData.devices.map(d => d.device || 'Other');
+    const values = opts.audienceData.devices.map(d => parseInt(d.sessions || 0));
+    if (values.some(v => v > 0)) {
+      await addChartSlidePost(presentationId, 'Sessions by Device', 'pie', labels, [{ name: 'Sessions', values }], opts.folderId);
+    }
+  }
+
+  // Explicit charts
+  if (opts.charts && opts.charts.length > 0) {
+    for (const chart of opts.charts) {
+      if (chart.labels && chart.series) {
+        await addChartSlidePost(presentationId, chart.title || 'Chart', chart.chartType || 'bar', chart.labels, chart.series, opts.folderId);
+      }
+    }
+  }
+
   log.info(`Performance deck built for ${opts.clientName}`, { presentationId });
   return presentation;
 }
