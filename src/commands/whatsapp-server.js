@@ -20,6 +20,10 @@ import { getJobs, runJob } from '../services/scheduler.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as metaAdLibrary from '../api/meta-ad-library.js';
 import * as googleAds from '../api/google-ads.js';
+import * as pagespeed from '../api/pagespeed.js';
+import * as googleSheets from '../api/google-sheets.js';
+import * as keywordPlanner from '../api/google-keyword-planner.js';
+import * as dataforseo from '../api/dataforseo.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import config from '../config.js';
 import logger from '../utils/logger.js';
@@ -209,6 +213,61 @@ const CSA_TOOLS = [
     description: 'Request to pause a campaign. This creates an approval request that the owner must confirm.',
     input_schema: { type: 'object', properties: { campaignId: { type: 'string' }, platform: { type: 'string', enum: ['meta', 'google'] }, reason: { type: 'string' } }, required: ['campaignId', 'platform'] },
   },
+  // --- Search Volume & Keyword Research ---
+  {
+    name: 'get_search_volume',
+    description: 'Get search volume, CPC, and competition data for specific keywords. Uses DataForSEO for accurate data. Great for keyword research and campaign planning.',
+    input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to look up (max 100)' }, location: { type: 'string', description: 'Location (default: "United States")' }, language: { type: 'string', description: 'Language (default: "English")' } }, required: ['keywords'] },
+  },
+  {
+    name: 'get_keyword_ideas',
+    description: 'Get keyword suggestions and related terms based on a seed keyword. Returns ideas with search volume, competition, and CPC. Perfect for expanding keyword lists.',
+    input_schema: { type: 'object', properties: { keyword: { type: 'string', description: 'Seed keyword to get ideas for' }, location: { type: 'string', description: 'Location (default: "United States")' }, limit: { type: 'number', description: 'Max results (default: 20)' } }, required: ['keyword'] },
+  },
+  // --- SERP & Competitor Intelligence ---
+  {
+    name: 'analyze_serp',
+    description: 'Analyze the Google search results page (SERP) for a keyword. Shows who ranks organically and in paid positions, plus featured snippets. Great for understanding competitive landscape.',
+    input_schema: { type: 'object', properties: { keyword: { type: 'string', description: 'Keyword to search' }, location: { type: 'string', description: 'Location (default: "United States")' } }, required: ['keyword'] },
+  },
+  {
+    name: 'find_seo_competitors',
+    description: 'Find the top SEO competitors for a domain — who competes for similar keywords in organic search.',
+    input_schema: { type: 'object', properties: { domain: { type: 'string', description: 'Domain to analyze (e.g. "example.com")' }, location: { type: 'string', description: 'Location (default: "United States")' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['domain'] },
+  },
+  {
+    name: 'get_keyword_gap',
+    description: 'Find keywords that a competitor ranks for but you do not. Reveals opportunities to target. Essential for competitive strategy.',
+    input_schema: { type: 'object', properties: { yourDomain: { type: 'string', description: 'Your domain (e.g. "yourbrand.com")' }, competitorDomain: { type: 'string', description: 'Competitor domain (e.g. "competitor.com")' }, location: { type: 'string', description: 'Location (default: "United States")' }, limit: { type: 'number', description: 'Max results (default: 20)' } }, required: ['yourDomain', 'competitorDomain'] },
+  },
+  {
+    name: 'get_domain_overview',
+    description: 'Get an SEO overview of a domain — organic traffic estimate, number of ranking keywords, paid traffic, and backlinks.',
+    input_schema: { type: 'object', properties: { domain: { type: 'string', description: 'Domain to analyze' }, location: { type: 'string', description: 'Location (default: "United States")' } }, required: ['domain'] },
+  },
+  // --- Audits ---
+  {
+    name: 'audit_landing_page',
+    description: 'Run a full landing page audit using Google PageSpeed Insights. Returns performance score, Core Web Vitals (LCP, CLS, TBT), SEO score, accessibility score, and top opportunities for improvement. Free and works on any URL.',
+    input_schema: { type: 'object', properties: { url: { type: 'string', description: 'Full URL to audit (e.g. "https://example.com/landing")' }, strategy: { type: 'string', enum: ['mobile', 'desktop'], description: 'Device type (default: mobile)' } }, required: ['url'] },
+  },
+  {
+    name: 'audit_seo_page',
+    description: 'Run a detailed on-page SEO audit for a URL. Checks title, meta description, headings, word count, images, links, mobile-friendliness, HTTPS, and more. Uses DataForSEO.',
+    input_schema: { type: 'object', properties: { url: { type: 'string', description: 'Full URL to audit' } }, required: ['url'] },
+  },
+  // --- Content Calendars ---
+  {
+    name: 'create_content_calendar',
+    description: 'Create a content/post calendar as a Google Sheet. Sofia generates the calendar with dates, platforms, content types, copy, creative briefs, CTAs, and status tracking. Returns a shareable Google Sheets link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, month: { type: 'string', description: 'Month to plan (e.g. "2026-03")' }, platforms: { type: 'string', description: 'Comma-separated platforms (e.g. "Instagram, Facebook, TikTok")' }, postsPerWeek: { type: 'number', description: 'Posts per week per platform (default: 3)' }, themes: { type: 'string', description: 'Content themes or campaign focus (optional)' } }, required: ['clientName', 'month'] },
+  },
+  // --- Report Export ---
+  {
+    name: 'export_report_to_sheet',
+    description: 'Export a performance report to a formatted Google Sheet with data tables. Returns a shareable link.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, reportType: { type: 'string', enum: ['weekly', 'monthly', 'custom'], description: 'Report type' }, data: { type: 'string', description: 'Report data description or metrics to include' } }, required: ['clientName', 'reportType'] },
+  },
 ];
 
 /**
@@ -383,6 +442,198 @@ async function executeCSATool(toolName, toolInput) {
       const approvalId = `pause-${Date.now()}`;
       pendingApprovals.set(approvalId, { type: 'pause', campaignId: toolInput.campaignId, platform: toolInput.platform, reason: toolInput.reason });
       return { approvalId, status: 'pending_approval', message: `Approval needed. Reply APPROVE ${approvalId} or DENY ${approvalId}` };
+    }
+    // --- Search Volume & Keyword Research ---
+    case 'get_search_volume': {
+      try {
+        const results = await dataforseo.getKeywordData({
+          keywords: toolInput.keywords.slice(0, 100),
+          location: toolInput.location,
+          language: toolInput.language,
+        });
+        return { keywords: results, source: 'DataForSEO' };
+      } catch (e) {
+        // Fallback to Google Keyword Planner if DataForSEO fails
+        if (config.GOOGLE_ADS_MANAGER_ACCOUNT_ID) {
+          try {
+            const results = await keywordPlanner.getSearchVolume({ keywords: toolInput.keywords.slice(0, 20) });
+            return { keywords: results, source: 'Google Keyword Planner' };
+          } catch (e2) {
+            return { error: `Both DataForSEO and Google Keyword Planner failed. DataForSEO: ${e.message}. Google: ${e2.message}` };
+          }
+        }
+        return { error: e.message };
+      }
+    }
+    case 'get_keyword_ideas': {
+      try {
+        const results = await dataforseo.getKeywordSuggestions({
+          keyword: toolInput.keyword,
+          location: toolInput.location,
+          limit: toolInput.limit || 20,
+        });
+        return { seedKeyword: toolInput.keyword, ideas: results, source: 'DataForSEO' };
+      } catch (e) {
+        if (config.GOOGLE_ADS_MANAGER_ACCOUNT_ID) {
+          try {
+            const results = await keywordPlanner.getKeywordIdeas({ keywords: [toolInput.keyword], limit: toolInput.limit || 20 });
+            return { seedKeyword: toolInput.keyword, ideas: results, source: 'Google Keyword Planner' };
+          } catch (e2) {
+            return { error: `Both DataForSEO and Google Keyword Planner failed. DataForSEO: ${e.message}. Google: ${e2.message}` };
+          }
+        }
+        return { error: e.message };
+      }
+    }
+    // --- SERP & Competitor Intelligence ---
+    case 'analyze_serp': {
+      const results = await dataforseo.getSerpResults({
+        keyword: toolInput.keyword,
+        location: toolInput.location,
+      });
+      return results;
+    }
+    case 'find_seo_competitors': {
+      const results = await dataforseo.getCompetitors({
+        domain: toolInput.domain,
+        location: toolInput.location,
+        limit: toolInput.limit || 10,
+      });
+      return { domain: toolInput.domain, competitors: results };
+    }
+    case 'get_keyword_gap': {
+      const results = await dataforseo.getKeywordGap({
+        yourDomain: toolInput.yourDomain,
+        competitorDomain: toolInput.competitorDomain,
+        location: toolInput.location,
+        limit: toolInput.limit || 20,
+      });
+      return { yourDomain: toolInput.yourDomain, competitorDomain: toolInput.competitorDomain, gaps: results };
+    }
+    case 'get_domain_overview': {
+      const results = await dataforseo.getDomainOverview({
+        domain: toolInput.domain,
+        location: toolInput.location,
+      });
+      return results;
+    }
+    // --- Audits ---
+    case 'audit_landing_page': {
+      const results = await pagespeed.runPageSpeedAudit(toolInput.url, {
+        strategy: toolInput.strategy || 'mobile',
+      });
+      return results;
+    }
+    case 'audit_seo_page': {
+      const results = await dataforseo.onPageAudit({ url: toolInput.url });
+      return results;
+    }
+    // --- Content Calendars ---
+    case 'create_content_calendar': {
+      const client = getClient(toolInput.clientName);
+      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+      // Generate calendar content using AI
+      const platforms = (toolInput.platforms || 'Instagram, Facebook').split(',').map(p => p.trim());
+      const postsPerWeek = toolInput.postsPerWeek || 3;
+      const month = toolInput.month;
+
+      const calendarPrompt = `Generate a content calendar for ${toolInput.clientName} for ${month}.
+Platforms: ${platforms.join(', ')}
+Posts per week per platform: ${postsPerWeek}
+${toolInput.themes ? `Themes/Focus: ${toolInput.themes}` : ''}
+${client ? `Industry: ${client.industry || 'N/A'}\nBrand voice: ${client.brand_voice || 'Professional'}` : ''}
+
+Return a JSON array of post objects with these fields:
+- date (YYYY-MM-DD format, spread across the month)
+- platform (one of the specified platforms)
+- type (Story, Reel, Carousel, Static Post, Video, Live, etc.)
+- copy (the actual caption/copy — 2-3 sentences)
+- creative (brief description of the visual/creative)
+- cta (call to action)
+- hashtags (relevant hashtags, 5-8 per post)
+
+Return ONLY the JSON array, no other text.`;
+
+      const { askClaude: generateCalendar } = await import('../api/anthropic.js');
+      const aiResponse = await generateCalendar({
+        systemPrompt: 'You are a social media content strategist. Generate practical, engaging content calendars. Return only valid JSON arrays.',
+        userMessage: calendarPrompt,
+        model: 'claude-sonnet-4-5-20250929',
+        maxTokens: 8192,
+        workflow: 'content-calendar',
+        clientId: client?.id,
+      });
+
+      let posts = [];
+      try {
+        const jsonMatch = aiResponse.text.match(/\[[\s\S]*\]/);
+        if (jsonMatch) posts = JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        return { error: 'Failed to generate calendar content. Please try again.' };
+      }
+
+      const result = await googleSheets.createContentCalendar({
+        clientName: toolInput.clientName,
+        month,
+        posts,
+        folderId,
+      });
+
+      if (!result) return { error: 'Google Sheets not configured. Set GOOGLE_APPLICATION_CREDENTIALS in .env' };
+      return { clientName: toolInput.clientName, month, totalPosts: posts.length, platforms, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
+    }
+    // --- Report Export ---
+    case 'export_report_to_sheet': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const folderId = client.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+      // Gather performance data
+      const reportData = [];
+      const headers = ['Metric', 'Value', 'Target', 'Status'];
+      reportData.push(headers);
+
+      if (client.meta_ad_account_id) {
+        try {
+          const insights = await metaAds.getAccountInsights(client.meta_ad_account_id, { datePreset: toolInput.reportType === 'monthly' ? 'last_30d' : 'last_7d' });
+          const metrics = metaAds.extractConversions(insights);
+          reportData.push(['Platform', 'Meta Ads', '', '']);
+          reportData.push(['Spend', `$${metrics.spend || 0}`, `$${(client.monthly_budget_cents || 0) / 100}`, '']);
+          reportData.push(['ROAS', `${metrics.roas || 0}x`, `${client.target_roas || 'N/A'}x`, '']);
+          reportData.push(['CPA', `$${metrics.cpa || 0}`, `$${(client.target_cpa_cents || 0) / 100}`, '']);
+          reportData.push(['Conversions', metrics.conversions || 0, '', '']);
+          reportData.push(['CTR', `${metrics.ctr || 0}%`, '', '']);
+          reportData.push(['Impressions', metrics.impressions || 0, '', '']);
+          reportData.push(['', '', '', '']);
+        } catch (e) { reportData.push(['Meta Ads', `Error: ${e.message}`, '', '']); }
+      }
+
+      if (client.google_ads_customer_id) {
+        try {
+          const perf = await googleAds.getAccountPerformance(client.google_ads_customer_id);
+          if (perf.length > 0) {
+            const metrics = googleAds.formatGoogleAdsMetrics(perf[0]);
+            reportData.push(['Platform', 'Google Ads', '', '']);
+            reportData.push(['Spend', `$${metrics.cost}`, '', '']);
+            reportData.push(['ROAS', `${metrics.roas.toFixed(2)}x`, `${client.target_roas || 'N/A'}x`, '']);
+            reportData.push(['CPA', `$${metrics.cpa.toFixed(2)}`, `$${(client.target_cpa_cents || 0) / 100}`, '']);
+            reportData.push(['Conversions', metrics.conversions, '', '']);
+            reportData.push(['CTR', `${metrics.ctr.toFixed(2)}%`, '', '']);
+            reportData.push(['Impressions', metrics.impressions, '', '']);
+          }
+        } catch (e) { reportData.push(['Google Ads', `Error: ${e.message}`, '', '']); }
+      }
+
+      const result = await googleSheets.createReportSheet({
+        clientName: toolInput.clientName,
+        reportType: toolInput.reportType,
+        data: reportData,
+        folderId,
+      });
+
+      if (!result) return { error: 'Google Sheets not configured. Set GOOGLE_APPLICATION_CREDENTIALS in .env' };
+      return { clientName: toolInput.clientName, reportType: toolInput.reportType, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
     }
     default:
       return { error: `Unknown tool: ${toolName}` };

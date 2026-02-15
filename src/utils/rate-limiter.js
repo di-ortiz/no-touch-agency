@@ -15,6 +15,8 @@ const limiters = {
   whatsapp: new PQueue({ concurrency: 1, interval: 1000, intervalCap: 1 }),
   telegram: new PQueue({ concurrency: 1, interval: 1000, intervalCap: 1 }),
   google: new PQueue({ concurrency: 5, interval: 1000, intervalCap: 5 }),
+  dataforseo: new PQueue({ concurrency: 3, interval: 1000, intervalCap: 3 }),
+  pagespeed: new PQueue({ concurrency: 2, interval: 2000, intervalCap: 2 }),
 };
 
 /**
