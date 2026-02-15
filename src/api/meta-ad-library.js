@@ -4,6 +4,7 @@ import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
 import { recordCost } from '../services/cost-tracker.js';
+import { getValidToken, isTokenExpiredError, invalidateCachedToken } from '../utils/meta-token.js';
 
 const log = logger.child({ platform: 'meta-ad-library' });
 const API_VERSION = 'v22.0';
@@ -55,17 +56,18 @@ export async function searchAds(opts = {}) {
   const isEU = EU_UK_COUNTRIES.has(country);
   const selectedFields = fields || (isPolitical || isEU ? BASE_FIELDS + POLITICAL_FIELDS : BASE_FIELDS);
 
+  const token = await getValidToken();
+
   const params = {
-    access_token: config.META_ACCESS_TOKEN,
+    access_token: token,
     ad_type: adType,
     ad_active_status: adActiveStatus,
     ad_reached_countries: JSON.stringify([country]),
     fields: selectedFields,
     limit,
+    ...( searchTerms ? { search_terms: searchTerms } : {} ),
+    ...( searchPageIds ? { search_page_ids: searchPageIds } : {} ),
   };
-
-  if (searchTerms) params.search_terms = searchTerms;
-  if (searchPageIds) params.search_page_ids = searchPageIds;
 
   return rateLimited('meta', () =>
     retry(async () => {
@@ -79,6 +81,10 @@ export async function searchAds(opts = {}) {
         log.info('Ad Library search', { terms: searchTerms, results: res.data?.data?.length || 0 });
         return res.data;
       } catch (error) {
+        // On token expiry, invalidate cache so next call gets a fresh token
+        if (isTokenExpiredError(error)) {
+          invalidateCachedToken();
+        }
         // Surface the actual Meta API error message for better debugging
         const metaError = error.response?.data?.error;
         if (metaError) {
@@ -114,9 +120,10 @@ export async function searchPages(query) {
     const result = await rateLimited('meta', () =>
       retry(async () => {
         try {
+          const pageToken = await getValidToken();
           const res = await axios.get(`${BASE_URL}/pages/search`, {
             params: {
-              access_token: config.META_ACCESS_TOKEN,
+              access_token: pageToken,
               q: query,
               fields: 'id,name,category,fan_count,verification_status,link',
             },

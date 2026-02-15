@@ -4,23 +4,38 @@ import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
 import { recordCost } from '../services/cost-tracker.js';
+import { getValidToken, isTokenExpiredError, invalidateCachedToken } from '../utils/meta-token.js';
 
 const log = logger.child({ platform: 'meta' });
-const API_VERSION = 'v21.0';
+const API_VERSION = 'v22.0';
 const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
 
 async function request(method, path, params = {}, data) {
+  const token = await getValidToken();
   return rateLimited('meta', () =>
     retry(async () => {
-      const res = await axios({
-        method,
-        url: `${BASE_URL}${path}`,
-        params: { access_token: config.META_ACCESS_TOKEN, ...params },
-        data,
-        timeout: 30000,
-      });
-      recordCost({ platform: 'meta', workflow: 'api', costCentsOverride: 0 });
-      return res.data;
+      try {
+        const res = await axios({
+          method,
+          url: `${BASE_URL}${path}`,
+          params: { access_token: token, ...params },
+          data,
+          timeout: 30000,
+        });
+        recordCost({ platform: 'meta', workflow: 'api', costCentsOverride: 0 });
+        return res.data;
+      } catch (error) {
+        if (isTokenExpiredError(error)) {
+          invalidateCachedToken();
+        }
+        const metaError = error.response?.data?.error;
+        if (metaError) {
+          const msg = `Meta API error (${metaError.code || error.response?.status}): ${metaError.message || 'Unknown error'}`;
+          log.error(msg, { type: metaError.type, fbtraceId: metaError.fbtrace_id });
+          throw new Error(msg);
+        }
+        throw error;
+      }
     }, { retries: 3, label: `Meta ${method} ${path}`, shouldRetry: isRetryableHttpError })
   );
 }
