@@ -156,16 +156,34 @@ async function handleTelegramCommand(message, chatId) {
       return handleTelegramStats(parsed.params, reply);
     case 'pause':
       return handleTelegramPause(parsed.params, reply);
+    case 'resume':
+      return handleTelegramResume(reply);
     case 'report':
       return handleTelegramReport(parsed.params, reply);
     case 'overdue':
       return handleTelegramOverdue(reply);
     case 'briefing':
       return handleTelegramBriefing(reply);
+    case 'competitor':
+      return handleTelegramCompetitor(parsed.params, reply);
     case 'budget':
       return handleTelegramBudget(parsed.params, reply);
     case 'cost':
       return handleTelegramCostReport(parsed.params, reply);
+    case 'audit':
+      return handleTelegramAuditLog(parsed.params, reply);
+    case 'client_info':
+      return handleTelegramClientInfo(parsed.params, reply);
+    case 'create_campaign':
+      return handleTelegramCreateCampaign(parsed.params, reply);
+    case 'standup':
+      return handleTelegramStandup(reply);
+    case 'generate_creatives':
+      return handleTelegramGenerateCreatives(parsed.params, reply);
+    case 'competitor_ads':
+      return handleTelegramCompetitorAds(parsed.params, reply);
+    case 'media_plan':
+      return handleTelegramMediaPlan(parsed.params, reply);
     case 'help':
       return handleTelegramHelp(reply);
     default:
@@ -224,6 +242,99 @@ async function handleTelegramPause(params, reply) {
   return reply(
     `🔐 <b>Confirm Pause</b>\n\nCampaign: ${campaignId}\nPlatform: ${platform}\nReason: ${reason || 'Not specified'}\n\nReply: <b>APPROVE ${approvalId}</b> or <b>DENY ${approvalId}</b>`
   );
+}
+
+async function handleTelegramResume(reply) {
+  return reply('⚠️ Resume functionality requires manual approval. Please confirm which campaign to resume and I\'ll set it up.');
+}
+
+async function handleTelegramCompetitor(params, reply) {
+  const { clientName } = params || {};
+  if (!clientName) return reply('❌ Please specify a client name.\nExample: "Competitor analysis for Acme Corp"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`🔍 Running competitor analysis for ${client.name}...`);
+  try {
+    const result = await analyzeCompetitors(client);
+    const summary = result.highlights.map(h => `• ${h}`).join('\n');
+    await reply(`🔍 <b>Competitor Analysis: ${client.name}</b>\n\n${summary}\n\n<i>Full report saved to Google Drive</i>`);
+  } catch (e) { await reply(`❌ Competitor analysis failed: ${e.message}`); }
+}
+
+async function handleTelegramCreateCampaign(params, reply) {
+  const { clientName, objective } = params || {};
+  if (!clientName) return reply('❌ Please specify a client.\nExample: "Create campaign for Acme Corp conversions"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`📝 Generating campaign brief for ${client.name}...`);
+  try {
+    const result = await generateCampaignBrief({
+      clientId: client.id,
+      campaignObjective: objective || 'conversions',
+      platform: client.meta_ad_account_id ? 'meta' : 'google',
+    });
+    await reply(`📝 <b>Brief Generated: ${client.name}</b>\nCompleteness: ${result.completeness.score}/10\nSimilar past campaigns referenced: ${result.similarCampaigns}\n\n<i>Full brief posted to ClickUp</i>`);
+  } catch (e) { await reply(`❌ Brief generation failed: ${e.message}`); }
+}
+
+async function handleTelegramStandup(reply) {
+  await reply('📋 Generating daily standup...');
+  await generateDailyStandup();
+}
+
+async function handleTelegramGenerateCreatives(params, reply) {
+  const { clientName, platform } = params || {};
+  if (!clientName) return reply('❌ Specify a client.\nExample: "Generate creatives for Acme Corp on Meta"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`🎨 Generating creatives for ${client.name}...`);
+  try {
+    await generateCreatives({ clientId: client.id, platform: platform || 'meta' });
+    await reply(`🎨 <b>Creatives Ready: ${client.name}</b>\nSent for approval. Check ClickUp/Google Drive for full creative package.`);
+  } catch (e) { await reply(`❌ Creative generation failed: ${e.message}`); }
+}
+
+async function handleTelegramCompetitorAds(params, reply) {
+  const { clientName, competitorName } = params || {};
+  if (!clientName) return reply('❌ Specify a client.\nExample: "Show competitor ads for Acme Corp" or "Show Nike ads for Acme Corp"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`🔍 Pulling competitor ads for ${client.name}${competitorName ? ` (${competitorName})` : ''}...`);
+  try {
+    const result = await pullCompetitorCreatives({ clientId: client.id, competitorName: competitorName || undefined });
+    const totalAds = result.results?.reduce((sum, r) => sum + r.adsFound, 0) || 0;
+    if (totalAds === 0) await reply('🔍 No active competitor ads found. Try specifying a competitor name.');
+  } catch (e) { await reply(`❌ Failed to pull competitor ads: ${e.message}`); }
+}
+
+async function handleTelegramMediaPlan(params, reply) {
+  const { clientName, goals, pains, audience, budget, platforms, offer, timeline } = params || {};
+  if (!clientName) return reply('❌ Specify a client.\nExample: "Create media plan for Acme Corp" or "Media plan for Acme Corp with $5000 budget focused on lead gen"');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  await reply(`📋 Generating media plan for ${client.name}...\nThis includes creative mockup recommendations. Please wait.`);
+  try {
+    await generateMediaPlan({
+      clientId: client.id,
+      brief: { goals, pains, audience, budget, platforms, offer, timeline },
+    });
+  } catch (e) { await reply(`❌ Media plan generation failed: ${e.message}`); }
+}
+
+async function handleTelegramAuditLog(params, reply) {
+  const entries = getAuditLog(params?.limit || 10, params?.clientName ? getClient(params.clientName)?.id : undefined);
+  let msg = `📋 <b>Recent Actions (${entries.length})</b>\n\n`;
+  for (const e of entries) msg += `• ${e.timestamp} - ${e.action} (${e.approved_by}) - ${e.result}\n`;
+  return reply(msg);
+}
+
+async function handleTelegramClientInfo(params, reply) {
+  const { clientName } = params || {};
+  if (!clientName) return reply('❌ Please specify a client name.');
+  const client = getClient(clientName);
+  if (!client) return reply(`❌ Client "${clientName}" not found.`);
+  const context = buildClientContext(client.id);
+  return reply(context);
 }
 
 async function handleTelegramReport(params, reply) {
@@ -292,10 +403,13 @@ async function handleTelegramHelp(reply) {
 
 ⏸️ <b>Campaign Management:</b>
 • "Pause campaign [ID] on [platform]"
+• "Resume campaign [ID]"
 • "Create campaign for [client]"
+• "Generate creatives for [client]"
 
 📋 <b>Tasks:</b>
 • "Overdue tasks"
+• "What's due today?"
 • "Daily standup"
 
 📝 <b>Reports:</b>
@@ -306,6 +420,18 @@ async function handleTelegramHelp(reply) {
 💰 <b>Budget &amp; Costs:</b>
 • "Budget for [client]"
 • "AI cost report"
+• "Budget overview"
+
+🔍 <b>Intelligence:</b>
+• "Competitor analysis for [client]"
+• "Competitor ads for [client]"
+• "Show [competitor] ads for [client]"
+• "Client info for [client]"
+• "Audit log"
+
+📋 <b>Planning:</b>
+• "Media plan for [client]"
+• "Media plan for [client] with $5000 budget for lead gen"
 
 🔐 <b>Approvals:</b>
 • "APPROVE [id]" / "DENY [id]" / "DETAILS [id]"
@@ -317,7 +443,7 @@ All commands use natural language!`;
 async function handleTelegramUnknown(message, reply) {
   const response = await askClaude({
     systemPrompt: 'You are a PPC agency assistant. The user sent a command that was not recognized. Help them by suggesting the right command format. Be brief.',
-    userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, report, overdue, briefing, budget, cost, help.`,
+    userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, resume, report, overdue, briefing, competitor, competitor ads, budget, cost, audit, client info, create campaign, generate creatives, media plan, standup, help.`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 256,
     workflow: 'command-unknown',
