@@ -642,7 +642,7 @@ Return ONLY the JSON array, no other text.`;
       const aiResponse = await generateCalendar({
         systemPrompt: 'You are a social media content strategist. Generate practical, engaging content calendars. Return only valid JSON arrays.',
         userMessage: calendarPrompt,
-        model: 'claude-sonnet-4-5-20250929',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 8192,
         workflow: 'content-calendar',
         clientId: client?.id,
@@ -1156,7 +1156,7 @@ async function handleTelegramCommand(message, chatId) {
       systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
       messages,
       tools: CSA_TOOLS,
-      model: 'claude-sonnet-4-5-20250929',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 4096,
       workflow: 'telegram-csa',
     });
@@ -1194,7 +1194,7 @@ async function handleTelegramCommand(message, chatId) {
         systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
         messages,
         tools: CSA_TOOLS,
-        model: 'claude-sonnet-4-5-20250929',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 4096,
         workflow: 'telegram-csa',
       });
@@ -1211,7 +1211,10 @@ async function handleTelegramCommand(message, chatId) {
     }
   } catch (error) {
     log.error('Telegram command loop failed', { error: error.message, stack: error.stack });
-    const errorMsg = `Something went wrong while processing your request: ${error.message}. Please try again.`;
+    const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
+    const errorMsg = isRateLimit
+      ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
+      : 'Something went wrong while processing your request. Please try again.';
     addToHistory(chatId, 'assistant', errorMsg);
     await reply(errorMsg);
   }
@@ -1250,7 +1253,7 @@ Your role:
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client chat ID: ${chatId}\nMessage: ${message}`,
-      model: 'claude-sonnet-4-5-20250929',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'client-chat',
     });
@@ -1299,7 +1302,7 @@ async function handleCommand(message) {
       systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
       messages,
       tools: CSA_TOOLS,
-      model: 'claude-sonnet-4-5-20250929',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 4096,
       workflow: 'whatsapp-csa',
     });
@@ -1337,7 +1340,7 @@ async function handleCommand(message) {
         systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
         messages,
         tools: CSA_TOOLS,
-        model: 'claude-sonnet-4-5-20250929',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 4096,
         workflow: 'whatsapp-csa',
       });
@@ -1355,7 +1358,10 @@ async function handleCommand(message) {
     }
   } catch (error) {
     log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
-    const errorMsg = `Something went wrong while processing your request: ${error.message}. Please try again.`;
+    const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
+    const errorMsg = isRateLimit
+      ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
+      : 'Something went wrong while processing your request. Please try again.';
     addToHistory(ownerChatId, 'assistant', errorMsg);
     await sendWhatsApp(errorMsg);
   }
@@ -1378,7 +1384,7 @@ Your role:
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client phone: ${from}\nMessage: ${message}`,
-      model: 'claude-sonnet-4-5-20250929',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'client-chat',
     });

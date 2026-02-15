@@ -1,5 +1,5 @@
 import logger from '../utils/logger.js';
-import { askClaude, deepAnalysis } from '../api/anthropic.js';
+import { askClaude } from '../api/anthropic.js';
 import * as openaiMedia from '../api/openai-media.js';
 import * as googleSlides from '../api/google-slides.js';
 import { getClient, buildClientContext, getTopCreatives } from './knowledge-base.js';
@@ -106,9 +106,11 @@ ${platform === 'google' ? 'Also include "longHeadline" (90 chars max) for respon
 
 IMPORTANT: Stay STRICTLY within character limits. Return ONLY the JSON array.`;
 
-  const response = await deepAnalysis({
+  const response = await askClaude({
     systemPrompt: `You are an expert PPC ad copywriter specializing in ${platform} ads. You write high-converting ad copy that strictly follows platform character limits. You always return valid JSON.`,
-    prompt,
+    userMessage: prompt,
+    model: 'claude-haiku-4-5-20251001',
+    maxTokens: 4096,
     workflow: 'text-ad-generation',
     clientId: client?.id,
   });
