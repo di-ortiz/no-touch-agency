@@ -50,8 +50,7 @@ function getDb() {
 
 // --- Cost per 1K tokens in cents ---
 const PRICING = {
-  'claude-sonnet-4-5-20250514': { input: 0.3, output: 1.5 },
-  'claude-sonnet-4-20250514': { input: 0.3, output: 1.5 },
+  'claude-sonnet-4-5-20250929': { input: 0.3, output: 1.5 },
   'claude-haiku-4-5-20251001': { input: 0.08, output: 0.4 },
   'gpt-4o': { input: 0.25, output: 1.0 },
   'dall-e-3': { perImage: 4.0 },

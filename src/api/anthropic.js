@@ -16,7 +16,7 @@ const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
  * @param {object} opts
  * @param {string} opts.systemPrompt - System prompt
  * @param {string} opts.userMessage - User message
- * @param {string} opts.model - Model to use (default: claude-sonnet-4-5-20250514)
+ * @param {string} opts.model - Model to use (default: claude-sonnet-4-5-20250929)
  * @param {number} opts.maxTokens - Max tokens (default: 4096)
  * @param {string} opts.workflow - Workflow name for cost tracking
  * @param {string} opts.clientId - Client ID for cost tracking
@@ -25,7 +25,7 @@ const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
 export async function askClaude({
   systemPrompt,
   userMessage,
-  model = 'claude-sonnet-4-5-20250514',
+  model = 'claude-sonnet-4-5-20250929',
   maxTokens = 4096,
   workflow,
   clientId,
@@ -109,7 +109,7 @@ export async function deepAnalysis({ systemPrompt, prompt, workflow, clientId })
   return askClaude({
     systemPrompt: systemPrompt || 'You are a senior PPC strategist with 10+ years of experience managing large-scale campaigns across Meta, Google, and TikTok. Provide detailed, actionable analysis.',
     userMessage: prompt,
-    model: 'claude-sonnet-4-5-20250514',
+    model: 'claude-sonnet-4-5-20250929',
     maxTokens: 8192,
     workflow,
     clientId,

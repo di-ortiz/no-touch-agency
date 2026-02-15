@@ -359,7 +359,7 @@ async function handleTelegramCommand(message, chatId) {
     systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
     messages,
     tools: TELEGRAM_TOOLS,
-    model: 'claude-sonnet-4-5-20250514',
+    model: 'claude-sonnet-4-5-20250929',
     maxTokens: 2048,
     workflow: 'telegram-csa',
   });
@@ -395,7 +395,7 @@ async function handleTelegramCommand(message, chatId) {
       systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
       messages,
       tools: TELEGRAM_TOOLS,
-      model: 'claude-sonnet-4-5-20250514',
+      model: 'claude-sonnet-4-5-20250929',
       maxTokens: 2048,
       workflow: 'telegram-csa',
     });
@@ -440,7 +440,7 @@ Your role:
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client chat ID: ${chatId}\nMessage: ${message}`,
-      model: 'claude-sonnet-4-5-20250514',
+      model: 'claude-sonnet-4-5-20250929',
       maxTokens: 1024,
       workflow: 'client-chat',
     });
@@ -896,7 +896,7 @@ Your role:
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client phone: ${from}\nMessage: ${message}`,
-      model: 'claude-sonnet-4-5-20250514',
+      model: 'claude-sonnet-4-5-20250929',
       maxTokens: 1024,
       workflow: 'client-chat',
     });

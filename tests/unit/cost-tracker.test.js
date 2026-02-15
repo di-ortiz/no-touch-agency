@@ -25,7 +25,7 @@ describe('Cost Tracker', () => {
     it('records a cost with explicit override', () => {
       const cost = recordCost({
         platform: 'anthropic',
-        model: 'claude-sonnet-4-5-20250514',
+        model: 'claude-sonnet-4-5-20250929',
         workflow: 'test-workflow',
         clientId: 'client-001',
         costCentsOverride: 5.0,
@@ -36,7 +36,7 @@ describe('Cost Tracker', () => {
     it('calculates cost from token counts for known models', () => {
       const cost = recordCost({
         platform: 'anthropic',
-        model: 'claude-sonnet-4-5-20250514',
+        model: 'claude-sonnet-4-5-20250929',
         workflow: 'test-workflow',
         inputTokens: 1000,
         outputTokens: 500,
