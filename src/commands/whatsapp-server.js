@@ -27,7 +27,11 @@ import * as dataforseo from '../api/dataforseo.js';
 import * as openaiMedia from '../api/openai-media.js';
 import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
+import * as webScraper from '../api/web-scraper.js';
+import * as leadsie from '../api/leadsie.js';
+import * as googleDrive from '../api/google-drive.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
+import axios from 'axios';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import helmet from 'helmet';
@@ -291,6 +295,34 @@ const CSA_TOOLS = [
     name: 'generate_creative_package',
     description: 'Generate a FULL creative package: text ads + ad images + optional video, all assembled into a beautiful Google Slides presentation deck for client approval. This is the all-in-one creative tool — use it when the user wants a complete set of creatives ready for review.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Primary platform' }, campaignName: { type: 'string', description: 'Campaign name for the deck' }, objective: { type: 'string', description: 'Campaign objective' }, audience: { type: 'string', description: 'Target audience' }, offer: { type: 'string', description: 'Offer/promotion' }, concept: { type: 'string', description: 'Creative concept/theme' }, textVariations: { type: 'number', description: 'Number of text ad variations (default: 5)' }, generateImages: { type: 'boolean', description: 'Generate images with DALL-E 3 (default: true)' }, generateVideo: { type: 'boolean', description: 'Generate video with Sora 2 (default: false)' } }, required: ['clientName', 'platform'] },
+  },
+  // --- Web Browsing ---
+  {
+    name: 'browse_website',
+    description: 'Visit a website and extract its content, headings, images, brand colors, and metadata. Perfect for researching competitor websites, getting creative inspiration, analyzing landing pages, or understanding a brand before creating ads. Works on any public URL.',
+    input_schema: { type: 'object', properties: { url: { type: 'string', description: 'URL to visit (e.g. "https://example.com" or "example.com")' }, purpose: { type: 'string', description: 'Why you\'re visiting: "creative_inspiration", "competitor_research", "brand_analysis", or "general"' } }, required: ['url'] },
+  },
+  // --- Client Onboarding (Leadsie) ---
+  {
+    name: 'create_onboarding_link',
+    description: 'Create a Leadsie invite link to send to a new client so they can grant access to their ad accounts (Meta, Google Ads, TikTok) in one click. Sofia will send the link directly via chat.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client business name' }, clientEmail: { type: 'string', description: 'Client email (optional)' }, platforms: { type: 'string', description: 'Comma-separated platforms: facebook, google, tiktok (default: facebook,google)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'check_onboarding_status',
+    description: 'Check whether a client has completed their Leadsie onboarding (granted ad account access).',
+    input_schema: { type: 'object', properties: { inviteId: { type: 'string', description: 'Leadsie invite ID to check' } }, required: ['inviteId'] },
+  },
+  // --- Drive File Management ---
+  {
+    name: 'setup_client_drive',
+    description: 'Create the full Google Drive folder structure for a new client (Brand Assets, Reports, Creatives, Strategic Plans, Audits, Competitor Research). Returns folder IDs for configuration.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' } }, required: ['clientName'] },
+  },
+  {
+    name: 'list_client_files',
+    description: 'List files in a client\'s Google Drive folder. Shows brand assets, reports, creatives, and other uploaded files.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, folder: { type: 'string', enum: ['all', 'brand_assets', 'reports', 'creatives', 'strategic_plans', 'audits', 'competitor_research'], description: 'Which folder to list (default: all)' } }, required: ['clientName'] },
   },
 ];
 
@@ -769,6 +801,119 @@ Return ONLY the JSON array, no other text.`;
           : 'Creative package generated (Google Slides not configured for deck)',
       };
     }
+    // --- Website Browsing ---
+    case 'browse_website': {
+      const purpose = toolInput.purpose || 'general';
+      if (purpose === 'creative_inspiration') {
+        const analysis = await webScraper.analyzeForCreativeInspiration(toolInput.url);
+        return {
+          url: analysis.url,
+          brandName: analysis.brand.name,
+          tagline: analysis.brand.tagline,
+          heroImage: analysis.brand.heroImage,
+          brandColors: analysis.brand.colors,
+          headline: analysis.messaging.headline,
+          subheadings: analysis.messaging.subheadings?.slice(0, 5),
+          keyPhrases: analysis.messaging.keyPhrases?.slice(0, 5),
+          images: analysis.visuals.images?.slice(0, 5),
+          contentPreview: analysis.content?.slice(0, 2000),
+          wordCount: analysis.wordCount,
+        };
+      }
+      const page = await webScraper.fetchWebpage(toolInput.url, {
+        includeImages: true,
+        includeLinks: purpose === 'competitor_research',
+        maxLength: 6000,
+      });
+      return {
+        url: page.url,
+        statusCode: page.statusCode,
+        title: page.title,
+        description: page.description,
+        headings: { h1: page.headings.h1, h2: page.headings.h2?.slice(0, 8) },
+        bodyPreview: page.bodyText?.slice(0, 3000),
+        images: page.images?.slice(0, 10),
+        links: page.links?.slice(0, 15),
+        brandColors: page.brandColors,
+        wordCount: page.wordCount,
+      };
+    }
+
+    // --- Leadsie Onboarding ---
+    case 'create_onboarding_link': {
+      const platforms = toolInput.platforms
+        ? toolInput.platforms.split(',').map(p => p.trim())
+        : ['facebook', 'google'];
+      const invite = await leadsie.createInvite({
+        clientName: toolInput.clientName,
+        clientEmail: toolInput.clientEmail || '',
+        platforms,
+      });
+      return {
+        inviteUrl: invite.inviteUrl,
+        inviteId: invite.inviteId,
+        status: invite.status,
+        platforms,
+        message: `Onboarding link created for ${toolInput.clientName}. Send this link to the client: ${invite.inviteUrl}`,
+      };
+    }
+
+    case 'check_onboarding_status': {
+      const status = await leadsie.getInviteStatus(toolInput.inviteId);
+      return {
+        inviteId: status.inviteId,
+        clientName: status.clientName,
+        status: status.status,
+        platforms: status.platforms,
+        grantedAccounts: status.grantedAccounts,
+        createdAt: status.createdAt,
+        completedAt: status.completedAt,
+        message: status.status === 'completed'
+          ? `${status.clientName} has completed onboarding! Access granted for: ${status.grantedAccounts?.map(a => a.name || a.id).join(', ') || 'accounts linked'}.`
+          : `Onboarding status: ${status.status}. The client hasn't completed the process yet.`,
+      };
+    }
+
+    // --- Google Drive Client Folders ---
+    case 'setup_client_drive': {
+      const folders = await googleDrive.ensureClientFolders(toolInput.clientName);
+      if (!folders) {
+        return { error: 'Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env.' };
+      }
+      return {
+        clientName: toolInput.clientName,
+        rootFolderId: folders.root?.id,
+        folders: Object.entries(folders).filter(([k]) => k !== 'root').map(([key, f]) => ({
+          name: key,
+          id: f?.id,
+        })),
+        message: `Google Drive folder structure created for ${toolInput.clientName}. They can now send files via WhatsApp and I'll save them automatically.`,
+      };
+    }
+
+    case 'list_client_files': {
+      const client = getClient(toolInput.clientName);
+      const folderKey = toolInput.folder || 'all';
+      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+      if (!folderId) {
+        return { error: 'No Google Drive folder found for this client. Use setup_client_drive first.' };
+      }
+
+      const files = await googleDrive.listFiles(folderId, { limit: 30 });
+      return {
+        clientName: toolInput.clientName,
+        folder: folderKey,
+        files: (files || []).map(f => ({
+          name: f.name,
+          type: f.mimeType,
+          modifiedTime: f.modifiedTime,
+          webViewLink: f.webViewLink,
+        })),
+        totalFiles: files?.length || 0,
+      };
+    }
+
     default:
       return { error: `Unknown tool: ${toolName}` };
   }
@@ -797,9 +942,26 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const changes = entry?.changes?.[0];
     const message = changes?.value?.messages?.[0];
 
-    if (!message || message.type !== 'text') return;
+    if (!message) return;
 
     const from = message.from; // e.g. "1234567890"
+
+    // Handle file uploads (images, documents, video, audio)
+    if (['image', 'document', 'video', 'audio'].includes(message.type)) {
+      const media = message[message.type];
+      const caption = media?.caption || message.caption || '';
+      log.info('WhatsApp media received', { from, type: message.type, mimeType: media?.mime_type });
+
+      const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
+      const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
+      if (isOwner) {
+        await handleMediaUpload(from, message.type, media, caption);
+      }
+      return;
+    }
+
+    if (message.type !== 'text') return;
+
     const body = message.text?.body?.trim();
 
     if (!body) return;
@@ -830,16 +992,26 @@ app.post('/webhook/telegram', async (req, res) => {
 
   try {
     const message = req.body?.message;
-    if (!message || !message.text) return;
+    if (!message) return;
 
     const chatId = String(message.chat?.id);
-    const body = message.text.trim();
+    const isOwner = chatId === config.TELEGRAM_OWNER_CHAT_ID;
 
+    // Handle file uploads (photos, documents, video, audio)
+    const fileObj = message.document || message.photo?.slice(-1)?.[0] || message.video || message.audio;
+    if (fileObj && isOwner) {
+      const caption = message.caption || '';
+      const mediaType = message.document ? 'document' : message.photo ? 'image' : message.video ? 'video' : 'audio';
+      log.info('Telegram file received', { chatId, mediaType, fileId: fileObj.file_id });
+      await handleTelegramMediaUpload(chatId, mediaType, fileObj, caption);
+      return;
+    }
+
+    if (!message.text) return;
+    const body = message.text.trim();
     if (!body) return;
 
     log.info('Telegram message received', { chatId, body: body.substring(0, 100) });
-
-    const isOwner = chatId === config.TELEGRAM_OWNER_CHAT_ID;
 
     if (isOwner) {
       // Owner gets full command access — reuse existing command handler, send via Telegram
@@ -1123,6 +1295,186 @@ Current clients on file: ${clients.map(c => c.name).join(', ')}`,
   } catch (error) {
     log.error('Client message handling failed', { from, error: error.message });
     await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+  }
+}
+
+// --- WhatsApp Media Upload Handler ---
+async function handleMediaUpload(from, mediaType, media, caption) {
+  try {
+    // Download media from WhatsApp servers
+    const mediaId = media.id;
+    const mediaUrl = await getWhatsAppMediaUrl(mediaId);
+    if (!mediaUrl) {
+      return sendWhatsApp('Could not retrieve the file. Please try again.');
+    }
+
+    const mediaData = await downloadWhatsAppMedia(mediaUrl);
+    if (!mediaData) {
+      return sendWhatsApp('Could not download the file. Please try again.');
+    }
+
+    // Determine the client from caption (e.g. "for ClientName" or "ClientName brand guide")
+    let clientName = null;
+    let folderType = 'brand_assets'; // default folder
+    if (caption) {
+      const forMatch = caption.match(/(?:for|para|cliente?)\s+["']?([^"'\n,]+)/i);
+      if (forMatch) clientName = forMatch[1].trim();
+
+      if (/brand|marca|logo|guideline|identidade/i.test(caption)) folderType = 'brand_assets';
+      else if (/creative|criativo|mockup|ad/i.test(caption)) folderType = 'creatives';
+      else if (/report|relatório/i.test(caption)) folderType = 'reports';
+      else if (/competitor|concorr/i.test(caption)) folderType = 'competitor_research';
+    }
+
+    const client = clientName ? getClient(clientName) : null;
+    const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+    if (!folderId) {
+      return sendWhatsApp('Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env to enable file storage.');
+    }
+
+    // Determine file name
+    const ext = getExtFromMime(media.mime_type);
+    const fileName = media.filename || `${mediaType}_${Date.now()}${ext}`;
+
+    // Upload to Google Drive
+    const { Readable } = await import('stream');
+    const stream = new Readable();
+    stream.push(Buffer.from(mediaData));
+    stream.push(null);
+
+    const uploaded = await googleDrive.uploadFile(
+      fileName,
+      stream,
+      media.mime_type,
+      folderId,
+    );
+
+    if (uploaded) {
+      const msg = [
+        `✅ *File saved to Google Drive*`,
+        `📁 ${fileName}`,
+        client ? `📋 Client: ${client.name}` : '',
+        uploaded.webViewLink ? `🔗 ${uploaded.webViewLink}` : '',
+      ].filter(Boolean).join('\n');
+      await sendWhatsApp(msg);
+    } else {
+      await sendWhatsApp('File received but Google Drive upload failed. Check Drive configuration.');
+    }
+  } catch (error) {
+    log.error('Media upload failed', { error: error.message, mediaType });
+    await sendWhatsApp(`Could not save file: ${error.message}`);
+  }
+}
+
+async function getWhatsAppMediaUrl(mediaId) {
+  try {
+    const res = await axios.get(
+      `https://graph.facebook.com/v21.0/${mediaId}`,
+      { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` } }
+    );
+    return res.data?.url;
+  } catch (e) {
+    log.error('Failed to get media URL', { error: e.message });
+    return null;
+  }
+}
+
+async function downloadWhatsAppMedia(url) {
+  try {
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` },
+      responseType: 'arraybuffer',
+      timeout: 30000,
+    });
+    return res.data;
+  } catch (e) {
+    log.error('Failed to download media', { error: e.message });
+    return null;
+  }
+}
+
+function getExtFromMime(mimeType) {
+  const map = {
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
+    'video/mp4': '.mp4', 'video/3gpp': '.3gp',
+    'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/aac': '.aac',
+    'application/pdf': '.pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+  };
+  return map[mimeType] || '';
+}
+
+async function handleTelegramMediaUpload(chatId, mediaType, fileObj, caption) {
+  try {
+    const botToken = config.TELEGRAM_BOT_TOKEN;
+    if (!botToken) {
+      return sendTelegram('Telegram bot token not configured.', chatId);
+    }
+
+    // Get file path from Telegram
+    const fileRes = await axios.get(`https://api.telegram.org/bot${botToken}/getFile`, {
+      params: { file_id: fileObj.file_id },
+    });
+    const filePath = fileRes.data?.result?.file_path;
+    if (!filePath) {
+      return sendTelegram('Could not retrieve the file. Please try again.', chatId);
+    }
+
+    // Download the file
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    const fileData = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    if (!fileData.data) {
+      return sendTelegram('Could not download the file. Please try again.', chatId);
+    }
+
+    // Determine client and folder from caption
+    let clientName = null;
+    let folderType = 'brand_assets';
+    if (caption) {
+      const forMatch = caption.match(/(?:for|para|cliente?)\s+["']?([^"'\n,]+)/i);
+      if (forMatch) clientName = forMatch[1].trim();
+
+      if (/brand|marca|logo|guideline|identidade/i.test(caption)) folderType = 'brand_assets';
+      else if (/creative|criativo|mockup|ad/i.test(caption)) folderType = 'creatives';
+      else if (/report|relatório/i.test(caption)) folderType = 'reports';
+      else if (/competitor|concorr/i.test(caption)) folderType = 'competitor_research';
+    }
+
+    const client = clientName ? getClient(clientName) : null;
+    const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+    if (!folderId) {
+      return sendTelegram('Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env.', chatId);
+    }
+
+    const mimeType = fileObj.mime_type || 'application/octet-stream';
+    const ext = getExtFromMime(mimeType);
+    const fileName = fileObj.file_name || `${mediaType}_${Date.now()}${ext}`;
+
+    const { Readable } = await import('stream');
+    const stream = new Readable();
+    stream.push(Buffer.from(fileData.data));
+    stream.push(null);
+
+    const uploaded = await googleDrive.uploadFile(fileName, stream, mimeType, folderId);
+
+    if (uploaded) {
+      const msg = [
+        `✅ <b>File saved to Google Drive</b>`,
+        `📁 ${fileName}`,
+        client ? `📋 Client: ${client.name}` : '',
+        uploaded.webViewLink ? `🔗 ${uploaded.webViewLink}` : '',
+      ].filter(Boolean).join('\n');
+      await sendTelegram(msg, chatId);
+    } else {
+      await sendTelegram('File received but Google Drive upload failed. Check Drive configuration.', chatId);
+    }
+  } catch (error) {
+    log.error('Telegram media upload failed', { error: error.message, mediaType });
+    await sendTelegram(`Could not save file: ${error.message}`, chatId);
   }
 }
 

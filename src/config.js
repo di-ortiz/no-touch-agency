@@ -65,6 +65,9 @@ const envSchema = z.object({
   DATAFORSEO_LOGIN: z.string().optional().default(''),
   DATAFORSEO_PASSWORD: z.string().optional().default(''),
 
+  // Leadsie
+  LEADSIE_API_KEY: z.string().optional().default(''),
+
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
