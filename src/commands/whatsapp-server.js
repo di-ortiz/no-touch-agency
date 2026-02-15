@@ -122,333 +122,289 @@ app.post('/webhook/telegram', async (req, res) => {
   }
 });
 
-// --- Telegram Command Handler (mirrors WhatsApp commands but sends via Telegram) ---
+// --- Telegram Conversational CSA Agent ---
+const TELEGRAM_CSA_PROMPT = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You chat via Telegram with the agency owner.
+
+Your personality:
+- Friendly, proactive, and genuinely helpful — like a trusted team member
+- You speak naturally, never like a command-line interface
+- You celebrate wins ("Great ROAS this week!") and flag concerns proactively
+- You offer suggestions and next steps without being asked
+- You use casual but professional language — no jargon unless the user does first
+
+Communication style:
+- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
+- Keep messages concise but insightful — no walls of text
+- When sharing data, add context ("That's 15% above your target!")
+- If something needs attention, lead with that
+- Use emojis naturally but sparingly
+
+When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
+
+If a tool returns an error, explain it simply and suggest alternatives. Never show raw error objects.
+
+For approval-sensitive actions (pausing campaigns, budget changes), always confirm with the user before proceeding.`;
+
+const TELEGRAM_TOOLS = [
+  {
+    name: 'get_client_stats',
+    description: 'Get performance stats (spend, ROAS, CPA, conversions, CTR) for a client across their ad platforms (Meta, Google Ads). Use this when the user asks about performance, metrics, how campaigns are doing, etc.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name to look up' }, platform: { type: 'string', enum: ['meta', 'google', 'all'], description: 'Which platform to check' } }, required: ['clientName'] },
+  },
+  {
+    name: 'list_clients',
+    description: 'List all clients managed by the agency with their connected platforms. Use when user asks about clients, accounts, or wants an overview.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_budget_info',
+    description: 'Get budget details for a specific client or overview of all clients. Includes monthly budget, target ROAS, and target CPA.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (omit for overview of all)' } } },
+  },
+  {
+    name: 'run_competitor_analysis',
+    description: 'Run a deep competitor intelligence analysis for a client. Analyzes competitor ad strategy, messaging, targeting, and identifies opportunities.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'pull_competitor_ads',
+    description: 'Pull live competitor ads from the Meta Ad Library with AI creative analysis. Can target a specific competitor or all known competitors.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitorName: { type: 'string', description: 'Specific competitor (optional)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_report',
+    description: 'Generate a performance report (weekly or monthly) for a client.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_campaign_brief',
+    description: 'Generate a campaign brief for a client, including objectives, targeting, and strategy.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, objective: { type: 'string', description: 'Campaign objective (e.g. conversions, awareness, leads)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_creatives',
+    description: 'Generate ad creative concepts and copy for a client.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, platform: { type: 'string', enum: ['meta', 'google'] } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_media_plan',
+    description: 'Generate a comprehensive media plan with budget allocation, platform strategy, and creative recommendations.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, goals: { type: 'string' }, budget: { type: 'string' }, platforms: { type: 'string' }, audience: { type: 'string' }, offer: { type: 'string' }, timeline: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'check_overdue_tasks',
+    description: 'Check for overdue tasks across all clients in the project management system.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'run_morning_briefing',
+    description: 'Generate the morning briefing with overnight performance, alerts, and today\'s priorities.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_daily_standup',
+    description: 'Generate a daily standup summary of tasks and progress.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_ai_cost_report',
+    description: 'Get AI API usage costs for the agency (how much we\'re spending on Claude, GPT, etc.).',
+    input_schema: { type: 'object', properties: { period: { type: 'string', enum: ['today', 'week', 'month'] } } },
+  },
+  {
+    name: 'get_audit_log',
+    description: 'View recent actions and changes made by the system.',
+    input_schema: { type: 'object', properties: { limit: { type: 'number', description: 'Number of entries' }, clientName: { type: 'string' } } },
+  },
+  {
+    name: 'get_client_info',
+    description: 'Get detailed profile for a specific client including all settings, accounts, and configuration.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'request_campaign_pause',
+    description: 'Request to pause a campaign. This creates an approval request that the owner must confirm.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string' }, platform: { type: 'string', enum: ['meta', 'google'] }, reason: { type: 'string' } }, required: ['campaignId', 'platform'] },
+  },
+];
+
+async function executeTelegramTool(toolName, toolInput) {
+  switch (toolName) {
+    case 'get_client_stats': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found. Available clients: ${getAllClients().map(c => c.name).join(', ')}` };
+      const results = {};
+      const platform = toolInput.platform || 'all';
+      if (client.meta_ad_account_id && (platform === 'meta' || platform === 'all')) {
+        try {
+          const insights = await metaAds.getAccountInsights(client.meta_ad_account_id, { datePreset: 'last_7d' });
+          results.meta = metaAds.extractConversions(insights);
+        } catch (e) { results.meta = { error: e.message }; }
+      }
+      if (client.google_ads_customer_id && (platform === 'google' || platform === 'all')) {
+        try {
+          const perf = await googleAds.getAccountPerformance(client.google_ads_customer_id);
+          if (perf.length > 0) results.google = googleAds.formatGoogleAdsMetrics(perf[0]);
+        } catch (e) { results.google = { error: e.message }; }
+      }
+      return { client: client.name, period: 'last_7d', ...results, monthlyBudget: (client.monthly_budget_cents || 0) / 100, targetRoas: client.target_roas, targetCpa: (client.target_cpa_cents || 0) / 100 };
+    }
+    case 'list_clients': {
+      const clients = getAllClients();
+      return { clients: clients.map(c => ({ name: c.name, platforms: [c.meta_ad_account_id ? 'Meta' : null, c.google_ads_customer_id ? 'Google' : null, c.tiktok_advertiser_id ? 'TikTok' : null].filter(Boolean), monthlyBudget: (c.monthly_budget_cents || 0) / 100 })) };
+    }
+    case 'get_budget_info': {
+      if (toolInput.clientName) {
+        const client = getClient(toolInput.clientName);
+        if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+        return { client: client.name, monthlyBudget: (client.monthly_budget_cents || 0) / 100, targetRoas: client.target_roas || 'N/A', targetCpa: (client.target_cpa_cents || 0) / 100 };
+      }
+      const clients = getAllClients();
+      const overview = clients.map(c => ({ name: c.name, monthlyBudget: (c.monthly_budget_cents || 0) / 100 }));
+      return { clients: overview, totalMonthly: overview.reduce((s, c) => s + c.monthlyBudget, 0) };
+    }
+    case 'run_competitor_analysis': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const result = await analyzeCompetitors(client);
+      return { client: client.name, highlights: result.highlights, reportSaved: true };
+    }
+    case 'pull_competitor_ads': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const result = await pullCompetitorCreatives({ clientId: client.id, competitorName: toolInput.competitorName || undefined });
+      const totalAds = result.results?.reduce((sum, r) => sum + r.adsFound, 0) || 0;
+      return { client: client.name, totalAdsFound: totalAds, results: result.results };
+    }
+    case 'generate_report': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      if (toolInput.reportType === 'monthly') await generateMonthlyReview(client.id);
+      else await generateWeeklyReport(client.id);
+      return { client: client.name, type: toolInput.reportType || 'weekly', status: 'generated' };
+    }
+    case 'generate_campaign_brief': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const result = await generateCampaignBrief({ clientId: client.id, campaignObjective: toolInput.objective || 'conversions', platform: client.meta_ad_account_id ? 'meta' : 'google' });
+      return { client: client.name, completeness: result.completeness, similarCampaigns: result.similarCampaigns };
+    }
+    case 'generate_creatives': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      await generateCreatives({ clientId: client.id, platform: toolInput.platform || 'meta' });
+      return { client: client.name, status: 'creatives_generated', platform: toolInput.platform || 'meta' };
+    }
+    case 'generate_media_plan': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      await generateMediaPlan({ clientId: client.id, brief: { goals: toolInput.goals, budget: toolInput.budget, platforms: toolInput.platforms, audience: toolInput.audience, offer: toolInput.offer, timeline: toolInput.timeline } });
+      return { client: client.name, status: 'media_plan_generated' };
+    }
+    case 'check_overdue_tasks': {
+      const result = await runTaskMonitor();
+      return { overdue: result.overdue, total: result.total };
+    }
+    case 'run_morning_briefing': {
+      await runMorningBriefing();
+      return { status: 'briefing_generated' };
+    }
+    case 'get_daily_standup': {
+      await generateDailyStandup();
+      return { status: 'standup_generated' };
+    }
+    case 'get_ai_cost_report': {
+      const summary = getCostSummary(toolInput.period || 'month');
+      return summary;
+    }
+    case 'get_audit_log': {
+      const clientId = toolInput.clientName ? getClient(toolInput.clientName)?.id : undefined;
+      const entries = getAuditLog(toolInput.limit || 10, clientId);
+      return { entries };
+    }
+    case 'get_client_info': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      return { profile: buildClientContext(client.id) };
+    }
+    case 'request_campaign_pause': {
+      const approvalId = `pause-${Date.now()}`;
+      pendingApprovals.set(approvalId, { type: 'pause', campaignId: toolInput.campaignId, platform: toolInput.platform, reason: toolInput.reason });
+      return { approvalId, status: 'pending_approval', message: `Approval needed. Reply APPROVE ${approvalId} or DENY ${approvalId}` };
+    }
+    default:
+      return { error: `Unknown tool: ${toolName}` };
+  }
+}
+
 async function handleTelegramCommand(message, chatId) {
-  // Check for approval responses first
+  const reply = (msg) => sendTelegram(msg, chatId);
+
+  // Handle approval responses directly (these need exact format)
   const approvalMatch = message.match(/^(APPROVE|DENY|DETAILS)\s+([a-f0-9-]+)/i);
   if (approvalMatch) {
     return handleTelegramApproval(approvalMatch[1].toUpperCase(), approvalMatch[2], chatId);
   }
 
-  // Use Claude to parse intent (same as WhatsApp)
-  const parseResponse = await askClaude({
-    systemPrompt: SYSTEM_PROMPTS.commandParser,
-    userMessage: message,
-    model: 'claude-haiku-4-5-20251001',
-    maxTokens: 512,
-    workflow: 'command-parser',
-  });
-
-  let parsed;
-  try {
-    const jsonMatch = parseResponse.text.match(/\{[\s\S]*\}/);
-    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { intent: 'unknown' };
-  } catch {
-    parsed = { intent: 'unknown', params: { originalMessage: message } };
-  }
-
-  log.info('Telegram parsed command', { intent: parsed.intent, params: parsed.params });
-
-  // Route to handlers, passing sendTelegram as the reply function
-  const reply = (msg) => sendTelegram(msg, chatId);
-  switch (parsed.intent) {
-    case 'stats':
-      return handleTelegramStats(parsed.params, reply);
-    case 'pause':
-      return handleTelegramPause(parsed.params, reply);
-    case 'resume':
-      return handleTelegramResume(reply);
-    case 'report':
-      return handleTelegramReport(parsed.params, reply);
-    case 'overdue':
-      return handleTelegramOverdue(reply);
-    case 'briefing':
-      return handleTelegramBriefing(reply);
-    case 'competitor':
-      return handleTelegramCompetitor(parsed.params, reply);
-    case 'budget':
-      return handleTelegramBudget(parsed.params, reply);
-    case 'cost':
-      return handleTelegramCostReport(parsed.params, reply);
-    case 'audit':
-      return handleTelegramAuditLog(parsed.params, reply);
-    case 'client_info':
-      return handleTelegramClientInfo(parsed.params, reply);
-    case 'create_campaign':
-      return handleTelegramCreateCampaign(parsed.params, reply);
-    case 'standup':
-      return handleTelegramStandup(reply);
-    case 'generate_creatives':
-      return handleTelegramGenerateCreatives(parsed.params, reply);
-    case 'competitor_ads':
-      return handleTelegramCompetitorAds(parsed.params, reply);
-    case 'media_plan':
-      return handleTelegramMediaPlan(parsed.params, reply);
-    case 'help':
-      return handleTelegramHelp(reply);
-    default:
-      return handleTelegramUnknown(message, reply);
-  }
-}
-
-async function handleTelegramStats(params, reply) {
-  const { clientName, platform } = params || {};
-  if (!clientName) {
-    const clients = getAllClients();
-    let msg = `📊 <b>All Clients Summary</b>\n\n`;
-    for (const c of clients) {
-      msg += `• <b>${c.name}</b>: `;
-      const platforms = [];
-      if (c.meta_ad_account_id) platforms.push('Meta');
-      if (c.google_ads_customer_id) platforms.push('Google');
-      if (c.tiktok_advertiser_id) platforms.push('TikTok');
-      msg += platforms.join(', ') || 'No accounts linked';
-      msg += '\n';
-    }
-    return reply(msg);
-  }
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found. Type "clients" to see all clients.`);
-
-  let msg = `📊 <b>${client.name} - Performance</b>\n\n`;
-  if (client.meta_ad_account_id && (!platform || platform === 'meta')) {
-    try {
-      const insights = await metaAds.getAccountInsights(client.meta_ad_account_id, { datePreset: 'last_7d' });
-      const data = metaAds.extractConversions(insights);
-      if (data) {
-        msg += `<b>Meta (Last 7 Days):</b>\nSpend: $${data.spend.toFixed(2)}\nROAS: ${data.roas.toFixed(2)}\nCPA: $${data.cpa.toFixed(2)}\nConversions: ${data.conversions}\nCTR: ${data.ctr.toFixed(2)}%\n\n`;
-      }
-    } catch { msg += `Meta: <i>Error fetching data</i>\n\n`; }
-  }
-  if (client.google_ads_customer_id && (!platform || platform === 'google')) {
-    try {
-      const perf = await googleAds.getAccountPerformance(client.google_ads_customer_id);
-      if (perf.length > 0) {
-        const data = googleAds.formatGoogleAdsMetrics(perf[0]);
-        msg += `<b>Google Ads (Last 7 Days):</b>\nSpend: $${data.cost}\nROAS: ${data.roas.toFixed(2)}\nCPA: $${data.cpa.toFixed(2)}\nConversions: ${data.conversions}\nCTR: ${data.ctr.toFixed(2)}%\n\n`;
-      }
-    } catch { msg += `Google Ads: <i>Error fetching data</i>\n\n`; }
-  }
-  return reply(msg);
-}
-
-async function handleTelegramPause(params, reply) {
-  const { campaignId, platform, reason } = params || {};
-  if (!campaignId || !platform) {
-    return reply('❌ Please specify campaign ID and platform.\nExample: "Pause campaign 12345 on Meta because low ROAS"');
-  }
-  const approvalId = `pause-${Date.now()}`;
-  pendingApprovals.set(approvalId, { type: 'pause', campaignId, platform, reason });
-  return reply(
-    `🔐 <b>Confirm Pause</b>\n\nCampaign: ${campaignId}\nPlatform: ${platform}\nReason: ${reason || 'Not specified'}\n\nReply: <b>APPROVE ${approvalId}</b> or <b>DENY ${approvalId}</b>`
-  );
-}
-
-async function handleTelegramResume(reply) {
-  return reply('⚠️ Resume functionality requires manual approval. Please confirm which campaign to resume and I\'ll set it up.');
-}
-
-async function handleTelegramCompetitor(params, reply) {
-  const { clientName } = params || {};
-  if (!clientName) return reply('❌ Please specify a client name.\nExample: "Competitor analysis for Acme Corp"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`🔍 Running competitor analysis for ${client.name}...`);
-  try {
-    const result = await analyzeCompetitors(client);
-    const summary = result.highlights.map(h => `• ${h}`).join('\n');
-    await reply(`🔍 <b>Competitor Analysis: ${client.name}</b>\n\n${summary}\n\n<i>Full report saved to Google Drive</i>`);
-  } catch (e) { await reply(`❌ Competitor analysis failed: ${e.message}`); }
-}
-
-async function handleTelegramCreateCampaign(params, reply) {
-  const { clientName, objective } = params || {};
-  if (!clientName) return reply('❌ Please specify a client.\nExample: "Create campaign for Acme Corp conversions"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`📝 Generating campaign brief for ${client.name}...`);
-  try {
-    const result = await generateCampaignBrief({
-      clientId: client.id,
-      campaignObjective: objective || 'conversions',
-      platform: client.meta_ad_account_id ? 'meta' : 'google',
-    });
-    await reply(`📝 <b>Brief Generated: ${client.name}</b>\nCompleteness: ${result.completeness.score}/10\nSimilar past campaigns referenced: ${result.similarCampaigns}\n\n<i>Full brief posted to ClickUp</i>`);
-  } catch (e) { await reply(`❌ Brief generation failed: ${e.message}`); }
-}
-
-async function handleTelegramStandup(reply) {
-  await reply('📋 Generating daily standup...');
-  await generateDailyStandup();
-}
-
-async function handleTelegramGenerateCreatives(params, reply) {
-  const { clientName, platform } = params || {};
-  if (!clientName) return reply('❌ Specify a client.\nExample: "Generate creatives for Acme Corp on Meta"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`🎨 Generating creatives for ${client.name}...`);
-  try {
-    await generateCreatives({ clientId: client.id, platform: platform || 'meta' });
-    await reply(`🎨 <b>Creatives Ready: ${client.name}</b>\nSent for approval. Check ClickUp/Google Drive for full creative package.`);
-  } catch (e) { await reply(`❌ Creative generation failed: ${e.message}`); }
-}
-
-async function handleTelegramCompetitorAds(params, reply) {
-  const { clientName, competitorName } = params || {};
-  if (!clientName) return reply('❌ Specify a client.\nExample: "Show competitor ads for Acme Corp" or "Show Nike ads for Acme Corp"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`🔍 Pulling competitor ads for ${client.name}${competitorName ? ` (${competitorName})` : ''}...`);
-  try {
-    const result = await pullCompetitorCreatives({ clientId: client.id, competitorName: competitorName || undefined });
-    const totalAds = result.results?.reduce((sum, r) => sum + r.adsFound, 0) || 0;
-    if (totalAds === 0) await reply('🔍 No active competitor ads found. Try specifying a competitor name.');
-  } catch (e) { await reply(`❌ Failed to pull competitor ads: ${e.message}`); }
-}
-
-async function handleTelegramMediaPlan(params, reply) {
-  const { clientName, goals, pains, audience, budget, platforms, offer, timeline } = params || {};
-  if (!clientName) return reply('❌ Specify a client.\nExample: "Create media plan for Acme Corp" or "Media plan for Acme Corp with $5000 budget focused on lead gen"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`📋 Generating media plan for ${client.name}...\nThis includes creative mockup recommendations. Please wait.`);
-  try {
-    await generateMediaPlan({
-      clientId: client.id,
-      brief: { goals, pains, audience, budget, platforms, offer, timeline },
-    });
-  } catch (e) { await reply(`❌ Media plan generation failed: ${e.message}`); }
-}
-
-async function handleTelegramAuditLog(params, reply) {
-  const entries = getAuditLog(params?.limit || 10, params?.clientName ? getClient(params.clientName)?.id : undefined);
-  let msg = `📋 <b>Recent Actions (${entries.length})</b>\n\n`;
-  for (const e of entries) msg += `• ${e.timestamp} - ${e.action} (${e.approved_by}) - ${e.result}\n`;
-  return reply(msg);
-}
-
-async function handleTelegramClientInfo(params, reply) {
-  const { clientName } = params || {};
-  if (!clientName) return reply('❌ Please specify a client name.');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  const context = buildClientContext(client.id);
-  return reply(context);
-}
-
-async function handleTelegramReport(params, reply) {
-  const { clientName, type } = params || {};
-  if (!clientName) return reply('❌ Please specify a client name.\nExample: "Generate weekly report for Acme Corp"');
-  const client = getClient(clientName);
-  if (!client) return reply(`❌ Client "${clientName}" not found.`);
-  await reply(`📝 Generating ${type || 'weekly'} report for ${client.name}...`);
-  try {
-    if (type === 'monthly') await generateMonthlyReview(client.id);
-    else await generateWeeklyReport(client.id);
-  } catch (e) { await reply(`❌ Report generation failed: ${e.message}`); }
-}
-
-async function handleTelegramOverdue(reply) {
-  const result = await runTaskMonitor();
-  if (result.overdue === 0) return reply('✅ No overdue tasks! All on track.');
-}
-
-async function handleTelegramBriefing(reply) {
-  await reply('📊 Generating morning briefing now...');
-  await runMorningBriefing();
-}
-
-async function handleTelegramBudget(params, reply) {
-  const { clientName } = params || {};
-  if (clientName) {
-    const client = getClient(clientName);
-    if (!client) return reply(`❌ Client "${clientName}" not found.`);
-    return reply(`💰 <b>${client.name} Budget</b>\nMonthly: $${((client.monthly_budget_cents || 0) / 100).toFixed(0)}\nTarget ROAS: ${client.target_roas || 'N/A'}\nTarget CPA: $${((client.target_cpa_cents || 0) / 100).toFixed(2)}`);
-  }
+  // Build context
   const clients = getAllClients();
-  let msg = '💰 <b>Budget Overview</b>\n\n';
-  let totalBudget = 0;
-  for (const c of clients) {
-    const budget = (c.monthly_budget_cents || 0) / 100;
-    totalBudget += budget;
-    msg += `• ${c.name}: $${budget.toFixed(0)}/mo\n`;
-  }
-  msg += `\n<b>Total: $${totalBudget.toFixed(0)}/mo</b>`;
-  return reply(msg);
-}
+  const clientContext = clients.length > 0
+    ? `\n\nCurrent clients: ${clients.map(c => c.name).join(', ')}`
+    : '\n\nNo clients onboarded yet.';
 
-async function handleTelegramCostReport(params, reply) {
-  const period = params?.period || 'month';
-  const summary = getCostSummary(period);
-  let msg = `🤖 <b>AI Cost Report (${period})</b>\n\nTotal: <b>$${summary.totalDollars}</b>\nBudget Used: ${summary.budgetUsedPct}%\n\n`;
-  if (summary.byPlatform.length > 0) {
-    msg += `<b>By Platform:</b>\n`;
-    for (const p of summary.byPlatform) msg += `• ${p.platform}: $${(p.total / 100).toFixed(2)}\n`;
-  }
-  if (summary.byWorkflow.length > 0) {
-    msg += `\n<b>By Workflow:</b>\n`;
-    for (const w of summary.byWorkflow) msg += `• ${w.workflow}: $${(w.total / 100).toFixed(2)}\n`;
-  }
-  return reply(msg);
-}
+  const messages = [{ role: 'user', content: message }];
 
-async function handleTelegramHelp(reply) {
-  const msg = `🤖 <b>PPC Agency Bot Commands (Telegram)</b>
-
-📊 <b>Performance:</b>
-• "Stats for [client]"
-• "How is [client] performing?"
-• "Show me all clients"
-
-⏸️ <b>Campaign Management:</b>
-• "Pause campaign [ID] on [platform]"
-• "Resume campaign [ID]"
-• "Create campaign for [client]"
-• "Generate creatives for [client]"
-
-📋 <b>Tasks:</b>
-• "Overdue tasks"
-• "What's due today?"
-• "Daily standup"
-
-📝 <b>Reports:</b>
-• "Weekly report for [client]"
-• "Monthly report for [client]"
-• "Morning briefing"
-
-💰 <b>Budget &amp; Costs:</b>
-• "Budget for [client]"
-• "AI cost report"
-• "Budget overview"
-
-🔍 <b>Intelligence:</b>
-• "Competitor analysis for [client]"
-• "Competitor ads for [client]"
-• "Show [competitor] ads for [client]"
-• "Client info for [client]"
-• "Audit log"
-
-📋 <b>Planning:</b>
-• "Media plan for [client]"
-• "Media plan for [client] with $5000 budget for lead gen"
-
-🔐 <b>Approvals:</b>
-• "APPROVE [id]" / "DENY [id]" / "DETAILS [id]"
-
-All commands use natural language!`;
-  return reply(msg);
-}
-
-async function handleTelegramUnknown(message, reply) {
-  const response = await askClaude({
-    systemPrompt: 'You are a PPC agency assistant. The user sent a command that was not recognized. Help them by suggesting the right command format. Be brief.',
-    userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, resume, report, overdue, briefing, competitor, competitor ads, budget, cost, audit, client info, create campaign, generate creatives, media plan, standup, help.`,
-    model: 'claude-haiku-4-5-20251001',
-    maxTokens: 256,
-    workflow: 'command-unknown',
+  // Conversational loop with tool use
+  let response = await askClaude({
+    systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
+    messages,
+    tools: TELEGRAM_TOOLS,
+    model: 'claude-sonnet-4-5-20250514',
+    maxTokens: 2048,
+    workflow: 'telegram-csa',
   });
-  return reply(`🤔 I didn't quite understand that.\n\n${response.text}\n\nType <b>help</b> for all commands.`);
+
+  // Handle tool use loop (max 5 rounds to prevent infinite loops)
+  let rounds = 0;
+  while (response.stopReason === 'tool_use' && rounds < 5) {
+    rounds++;
+
+    // Send a natural "working on it" message on first tool call
+    if (rounds === 1 && response.text) {
+      await reply(response.text);
+    }
+
+    // Execute all tool calls
+    const toolResults = [];
+    for (const tool of response.toolUse) {
+      log.info('Executing tool', { tool: tool.name, input: tool.input });
+      try {
+        const result = await executeTelegramTool(tool.name, tool.input);
+        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+      } catch (e) {
+        log.error('Tool execution failed', { tool: tool.name, error: e.message });
+        toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
+      }
+    }
+
+    // Continue conversation with tool results
+    messages.push({ role: 'assistant', content: response.raw.content });
+    messages.push({ role: 'user', content: toolResults });
+
+    response = await askClaude({
+      systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
+      messages,
+      tools: TELEGRAM_TOOLS,
+      model: 'claude-sonnet-4-5-20250514',
+      maxTokens: 2048,
+      workflow: 'telegram-csa',
+    });
+  }
+
+  // Send final response
+  if (response.text) {
+    await reply(response.text);
+  }
 }
 
 async function handleTelegramApproval(action, approvalId, chatId) {
