@@ -134,7 +134,7 @@ async function handleTelegramCommand(message, chatId) {
   const parseResponse = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.commandParser,
     userMessage: message,
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 512,
     workflow: 'command-parser',
   });
@@ -318,7 +318,7 @@ async function handleTelegramUnknown(message, reply) {
   const response = await askClaude({
     systemPrompt: 'You are a PPC agency assistant. The user sent a command that was not recognized. Help them by suggesting the right command format. Be brief.',
     userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, report, overdue, briefing, budget, cost, help.`,
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 256,
     workflow: 'command-unknown',
   });
@@ -386,7 +386,7 @@ async function handleCommand(message) {
   const parseResponse = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.commandParser,
     userMessage: message,
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 512,
     workflow: 'command-parser',
   });
@@ -789,7 +789,7 @@ async function handleUnknown(message) {
   const response = await askClaude({
     systemPrompt: 'You are a PPC agency assistant. The user sent a command that was not recognized. Help them by suggesting the right command format. Be brief.',
     userMessage: `User said: "${message}". Suggest the right command format from: stats, pause, report, overdue, briefing, competitor, budget, cost, audit, client info, help.`,
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 256,
     workflow: 'command-unknown',
   });

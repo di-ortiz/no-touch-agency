@@ -174,7 +174,7 @@ Return JSON:
   "issues": ["list of compliance issues"],
   "suggestions": ["improvements to better match brand"]
 }`,
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 512,
     workflow: 'brand-compliance',
     clientId: client.id,
