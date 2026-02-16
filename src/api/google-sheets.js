@@ -13,21 +13,20 @@ let driveClient;
 
 function getAuth() {
   if (!auth) {
-    if (config.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS)) {
+    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+    if (fs.existsSync(credPath)) {
       auth = new google.auth.GoogleAuth({
-        keyFile: config.GOOGLE_APPLICATION_CREDENTIALS,
+        keyFile: credPath,
         scopes: [
           'https://www.googleapis.com/auth/spreadsheets',
           'https://www.googleapis.com/auth/drive',
         ],
       });
     } else {
-      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set)';
-      const fileExists = config.GOOGLE_APPLICATION_CREDENTIALS ? fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS) : false;
-      log.error('Google credentials MISSING', { credPath, fileExists });
+      log.error('Google credentials MISSING', { credPath });
       throw new Error(
         `Google service account credentials not found. ` +
-        `GOOGLE_APPLICATION_CREDENTIALS is set to "${credPath}" but the file ${fileExists ? 'cannot be read' : 'does NOT exist'}. ` +
+        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
         `To fix: 1) Go to console.cloud.google.com → IAM → Service Accounts, ` +
         `2) Create a service account with Sheets/Drive API access, ` +
         `3) Download the JSON key and save it to ${credPath}`

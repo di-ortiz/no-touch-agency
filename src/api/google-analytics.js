@@ -12,17 +12,17 @@ let analyticsClient;
 
 function getAuth() {
   if (!auth) {
-    if (config.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS)) {
+    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+    if (fs.existsSync(credPath)) {
       auth = new google.auth.GoogleAuth({
-        keyFile: config.GOOGLE_APPLICATION_CREDENTIALS,
+        keyFile: credPath,
         scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
       });
     } else {
-      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set)';
       log.error('Google credentials MISSING', { credPath });
       throw new Error(
         `Google service account credentials not found. ` +
-        `GOOGLE_APPLICATION_CREDENTIALS is set to "${credPath}" but the file does NOT exist. ` +
+        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
         `To fix: download the service account JSON key from console.cloud.google.com and save it to ${credPath}`
       );
     }
