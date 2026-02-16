@@ -4,9 +4,10 @@ import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, s
 import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
-  createPendingClient, getPendingClientByToken, activatePendingClient,
+  createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, activatePendingClient,
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
+  getContactsByClientId, getCrossChannelHistory,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -191,6 +192,42 @@ function addToHistory(chatId, role, content, channel = 'whatsapp') {
 
 function clearHistory(chatId) {
   clearMessages(chatId);
+}
+
+/**
+ * Try to link a second channel (e.g. Telegram) to an existing client
+ * that was already onboarded via another channel (e.g. WhatsApp).
+ * Returns the client context if linking succeeded, null otherwise.
+ */
+function tryLinkCrossChannel(token, chatId, channel) {
+  const pending = getPendingClientByTokenAny(token);
+  if (!pending || !pending.activated_phone) return null;
+
+  // Find the existing contact from the first channel
+  const existingContact = getContactByPhone(pending.activated_phone);
+  if (!existingContact?.client_id) return null;
+
+  // Create a new contact for this channel, linked to the same client
+  try {
+    createContact({
+      phone: chatId,
+      name: existingContact.name,
+      email: existingContact.email,
+      clientId: existingContact.client_id,
+      channel,
+    });
+    log.info('Cross-channel link created', {
+      clientId: existingContact.client_id,
+      existingPhone: pending.activated_phone,
+      newChatId: chatId,
+      channel,
+    });
+  } catch (e) {
+    // Contact already exists — that's fine
+    log.info('Cross-channel contact already exists', { chatId, channel });
+  }
+
+  return getClientContextByPhone(chatId);
 }
 
 // Cache for Telegram bot username (fetched once at startup)
@@ -1721,6 +1758,7 @@ async function handleTelegramClientMessage(chatId, message) {
     // Handle /start TOKEN from Telegram deep link
     let actualMessage = message;
     let pendingData = null;
+    let crossLinked = false;
     const startMatch = message.match(/^\/start\s+([a-f0-9]{12})$/i);
     if (startMatch) {
       const pending = getPendingClientByToken(startMatch[1]);
@@ -1728,6 +1766,18 @@ async function handleTelegramClientMessage(chatId, message) {
         activatePendingClient(pending.token, chatId, 'telegram');
         pendingData = pending;
         log.info('Activated pending client from Telegram /start', { token: pending.token, chatId });
+      } else {
+        // Token already activated on another channel — try cross-channel link
+        const linked = tryLinkCrossChannel(startMatch[1], chatId, 'telegram');
+        if (linked) {
+          crossLinked = true;
+          log.info('Cross-channel link via Telegram /start', { chatId });
+          await sendTelegram(
+            `Hey${linked.contactName ? ` <b>${linked.contactName}</b>` : ''}! I see you've already been onboarded on another channel. Great to connect with you here on Telegram too! How can I help you today?`,
+            chatId,
+          );
+          return;
+        }
       }
       actualMessage = `Hi Sofia! I just signed up.${pendingData?.name ? ` My name is ${pendingData.name}` : ''}`;
     }
@@ -1741,7 +1791,7 @@ async function handleTelegramClientMessage(chatId, message) {
     }
 
     // Check if this is a NEW person
-    const clientContext = getClientContextByPhone(chatId);
+    let clientContext = getClientContextByPhone(chatId);
     if (!clientContext) {
       // Check for token in message (non /start format)
       if (!startMatch && !pendingData) {
@@ -1752,6 +1802,18 @@ async function handleTelegramClientMessage(chatId, message) {
             activatePendingClient(found.token, chatId, 'telegram');
             pendingData = found;
             log.info('Activated pending client from token (Telegram)', { token: found.token, chatId });
+          } else {
+            // Token already activated — try cross-channel link
+            const linked = tryLinkCrossChannel(tokenMatch[1], chatId, 'telegram');
+            if (linked) {
+              crossLinked = true;
+              log.info('Cross-channel link via Telegram inline token', { chatId });
+              await sendTelegram(
+                `Hey${linked.contactName ? ` <b>${linked.contactName}</b>` : ''}! I see you've already been onboarded on another channel. Great to connect with you here on Telegram too! How can I help you today?`,
+                chatId,
+              );
+              return;
+            }
           }
         }
       }
@@ -1762,7 +1824,7 @@ async function handleTelegramClientMessage(chatId, message) {
       if (pendingData && pendingData.name) {
         // Client came from website — personalized welcome + confirmation
         try {
-          createContact({ phone: chatId, name: pendingData.name, email: pendingData.email });
+          createContact({ phone: chatId, name: pendingData.name, email: pendingData.email, channel: 'telegram' });
         } catch (e) { /* might already exist */ }
 
         const prefillAnswers = {};
@@ -1821,12 +1883,22 @@ async function handleTelegramClientMessage(chatId, message) {
     if (clientContext.channelsNeed) contextParts.push(`<b>Channels Interested In:</b> ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`<b>Brand Voice:</b> ${clientContext.brandVoice}`);
 
+    // Check for cross-channel contacts
+    let crossChannelNote = '';
+    if (clientContext.clientId) {
+      const contacts = getContactsByClientId(clientContext.clientId);
+      if (contacts.length > 1) {
+        const channels = contacts.map(c => c.channel || 'whatsapp');
+        crossChannelNote = `\n\nNOTE: This client is connected on multiple channels: ${channels.join(', ')}. You may reference conversations from other channels if relevant. Current channel: Telegram.`;
+      }
+    }
+
     const memoryContext = contextParts.length > 0
       ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
-${memoryContext}
+${memoryContext}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -1838,8 +1910,18 @@ Your role:
 - Keep responses under 500 words
 - Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>`;
 
-    // Load conversation history so Sofia remembers past conversations
-    const history = getHistory(chatId);
+    // Load conversation history (cross-channel if available, otherwise single-channel)
+    let history;
+    if (clientContext.clientId) {
+      const contacts = getContactsByClientId(clientContext.clientId);
+      if (contacts.length > 1) {
+        history = getCrossChannelHistory(clientContext.clientId, MAX_HISTORY_MESSAGES * 2);
+      } else {
+        history = getHistory(chatId);
+      }
+    } else {
+      history = getHistory(chatId);
+    }
     addToHistory(chatId, 'user', message, 'telegram');
 
     const messages = [...history, { role: 'user', content: message }];
@@ -2045,7 +2127,7 @@ async function handleClientMessage(from, message) {
     }
 
     // 2. Check if this is a NEW person (not a known contact and no completed onboarding)
-    const clientContext = getClientContextByPhone(from);
+    let clientContext = getClientContextByPhone(from);
     if (!clientContext) {
       // New person — check for a sign-up token in the message
       let pendingData = null;
@@ -2056,6 +2138,18 @@ async function handleClientMessage(from, message) {
           activatePendingClient(found.token, from, 'whatsapp');
           pendingData = found;
           log.info('Activated pending client from token', { token: found.token, from });
+        } else {
+          // Token already activated on another channel — try cross-channel link
+          const linked = tryLinkCrossChannel(tokenMatch[1], from, 'whatsapp');
+          if (linked) {
+            clientContext = linked;
+            log.info('Cross-channel link: client already onboarded on another channel', { from });
+            await sendWhatsApp(
+              `Hey${linked.contactName ? ` *${linked.contactName}*` : ''}! I see you've already been onboarded on another channel. Great to connect with you here on WhatsApp too! How can I help you today?`,
+              from,
+            );
+            return;
+          }
         }
       }
 
@@ -2065,7 +2159,7 @@ async function handleClientMessage(from, message) {
       if (pendingData && pendingData.name) {
         // Client came from website with form data — personalized welcome + confirmation
         try {
-          createContact({ phone: from, name: pendingData.name, email: pendingData.email });
+          createContact({ phone: from, name: pendingData.name, email: pendingData.email, channel: 'whatsapp' });
         } catch (e) { /* might already exist */ }
 
         // Pre-populate answers with all known form data
@@ -2128,12 +2222,22 @@ async function handleClientMessage(from, message) {
     if (clientContext.channelsNeed) contextParts.push(`*Channels Interested In:* ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`*Brand Voice:* ${clientContext.brandVoice}`);
 
+    // Check for cross-channel contacts
+    let crossChannelNote = '';
+    if (clientContext.clientId) {
+      const contacts = getContactsByClientId(clientContext.clientId);
+      if (contacts.length > 1) {
+        const channels = contacts.map(c => c.channel || 'whatsapp');
+        crossChannelNote = `\n\nNOTE: This client is connected on multiple channels: ${channels.join(', ')}. You may reference conversations from other channels if relevant. Current channel: WhatsApp.`;
+      }
+    }
+
     const memoryContext = contextParts.length > 0
       ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
-${memoryContext}
+${memoryContext}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -2145,8 +2249,18 @@ Your role:
 - Keep responses under 500 words
 - Use WhatsApp formatting: *bold*, _italic_`;
 
-    // Load conversation history so Sofia remembers past conversations
-    const history = getHistory(from);
+    // Load conversation history (cross-channel if available, otherwise single-channel)
+    let history;
+    if (clientContext.clientId) {
+      const contacts = getContactsByClientId(clientContext.clientId);
+      if (contacts.length > 1) {
+        history = getCrossChannelHistory(clientContext.clientId, MAX_HISTORY_MESSAGES * 2);
+      } else {
+        history = getHistory(from);
+      }
+    } else {
+      history = getHistory(from);
+    }
     addToHistory(from, 'user', message, 'whatsapp');
 
     const messages = [...history, { role: 'user', content: message }];

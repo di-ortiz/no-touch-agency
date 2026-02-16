@@ -5,7 +5,7 @@ import {
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
   createClient, getClient, updateClient,
   saveMessage, getMessages,
-  getPendingClientByChatId,
+  getPendingClientByChatId, getContactsByClientId,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleSheets from '../api/google-sheets.js';
@@ -229,7 +229,7 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
       if (contact) {
         updateContact(phone, { name: answers.name });
       } else {
-        createContact({ phone, name: answers.name });
+        createContact({ phone, name: answers.name, channel });
       }
     }
 
@@ -253,7 +253,7 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
         const send = channel === 'telegram' ? sendTelegram : sendWhatsApp;
         await send(thinkingMsg, phone);
       } catch (e) { /* best effort */ }
-      const result = await finalizeOnboarding(phone, session.id, answers);
+      const result = await finalizeOnboarding(phone, session.id, answers, channel);
       saveMessage(phone, channel, 'assistant', result.message);
       return result.message;
     }
@@ -270,7 +270,7 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
 /**
  * Finalize the onboarding: create client, Drive folders, Leadsie link, intake doc.
  */
-async function finalizeOnboarding(phone, sessionId, answers) {
+async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp') {
   log.info('Finalizing onboarding', { phone, answers });
 
   const steps = [];
@@ -320,7 +320,7 @@ async function finalizeOnboarding(phone, sessionId, answers) {
     if (contact) {
       updateContact(phone, { clientId: client.id });
     } else {
-      createContact({ phone, name: answers.name, clientId: client.id });
+      createContact({ phone, name: answers.name, clientId: client.id, channel });
     }
 
     steps.push('Client profile created');
@@ -789,6 +789,11 @@ export function getClientContextByPhone(phone) {
 
   const client = contact.client_id ? getClient(contact.client_id) : null;
 
+  // Get all channels this client is connected on
+  const channels = contact.client_id
+    ? getContactsByClientId(contact.client_id).map(c => ({ phone: c.phone, channel: c.channel || 'whatsapp' }))
+    : [{ phone: contact.phone, channel: contact.channel || 'whatsapp' }];
+
   return {
     contactName: contact.name,
     clientId: contact.client_id,
@@ -817,6 +822,7 @@ export function getClientContextByPhone(phone) {
     driveBrandAssetsFolderId: client?.drive_brand_assets_folder_id,
     profileSheetId: client?.drive_profile_sheet_id,
     onboardingComplete: client?.onboarding_complete === 1,
+    channels,
   };
 }
 

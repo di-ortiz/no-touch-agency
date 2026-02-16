@@ -242,6 +242,9 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN sales_process TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN additional_info TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN drive_profile_sheet_id TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migration: add channel to client_contacts for cross-channel identity
+    try { db.exec("ALTER TABLE client_contacts ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -258,9 +261,9 @@ export function createContact(data) {
   const d = getDb();
   const id = uuid();
   d.prepare(`
-    INSERT INTO client_contacts (id, client_id, phone, name, email, role)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner');
+    INSERT INTO client_contacts (id, client_id, phone, name, email, role, channel)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner', data.channel || 'whatsapp');
   return { id, ...data };
 }
 
@@ -276,6 +279,14 @@ export function updateContact(phone, updates) {
   }
   values.push(normalized);
   d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?`).run(...values);
+}
+
+/**
+ * Get all contact entries for a given client_id (supports cross-channel identity).
+ */
+export function getContactsByClientId(clientId) {
+  const d = getDb();
+  return d.prepare('SELECT * FROM client_contacts WHERE client_id = ?').all(clientId);
 }
 
 // --- Onboarding Sessions ---
@@ -568,6 +579,15 @@ export function getPendingClientByToken(token) {
   return d.prepare("SELECT * FROM pending_clients WHERE token = ? AND status = 'pending'").get(token);
 }
 
+/**
+ * Look up a pending client by token regardless of status.
+ * Used for cross-channel linking when a token was already activated on another channel.
+ */
+export function getPendingClientByTokenAny(token) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE token = ?").get(token);
+}
+
 export function getPendingClientByChatId(chatId) {
   const d = getDb();
   return d.prepare("SELECT * FROM pending_clients WHERE chat_id = ? ORDER BY activated_at DESC LIMIT 1").get(chatId);
@@ -594,6 +614,32 @@ export function getMessages(chatId, limit = 40) {
   const d = getDb();
   const rows = d.prepare('SELECT role, content FROM conversation_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?').all(chatId, limit);
   return rows.reverse(); // oldest first
+}
+
+/**
+ * Get conversation history across ALL channels for a client.
+ * Merges messages from all contact identifiers linked to this client_id.
+ */
+export function getCrossChannelHistory(clientId, limit = 40) {
+  const d = getDb();
+  const contacts = d.prepare('SELECT phone, channel FROM client_contacts WHERE client_id = ?').all(clientId);
+  if (contacts.length === 0) return [];
+
+  if (contacts.length === 1) {
+    return d.prepare('SELECT role, content, channel, created_at FROM conversation_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?')
+      .all(contacts[0].phone, limit)
+      .reverse();
+  }
+
+  const chatIds = contacts.map(c => c.phone);
+  const placeholders = chatIds.map(() => '?').join(', ');
+  const rows = d.prepare(`
+    SELECT role, content, channel, created_at FROM conversation_history
+    WHERE chat_id IN (${placeholders})
+    ORDER BY id DESC LIMIT ?
+  `).all(...chatIds, limit);
+
+  return rows.reverse();
 }
 
 export function clearMessages(chatId) {
@@ -625,7 +671,22 @@ export function checkClientMessageLimit(chatId) {
   const client = getClient(contact.client_id);
   const plan = (client?.plan || 'smb').toLowerCase();
   const limit = PLAN_DAILY_LIMITS[plan] || PLAN_DAILY_LIMITS.smb;
-  const used = getClientMessageCountToday(chatId);
+
+  // Count across ALL channels for this client (prevents limit bypass via channel switching)
+  const allContacts = getContactsByClientId(contact.client_id);
+  let used;
+  if (allContacts.length > 1) {
+    const chatIds = allContacts.map(c => c.phone);
+    const d = getDb();
+    const placeholders = chatIds.map(() => '?').join(', ');
+    const row = d.prepare(`
+      SELECT COUNT(*) as count FROM conversation_history
+      WHERE chat_id IN (${placeholders}) AND role = 'user' AND created_at >= date('now')
+    `).get(...chatIds);
+    used = row?.count || 0;
+  } else {
+    used = getClientMessageCountToday(chatId);
+  }
 
   return {
     allowed: used < limit,
@@ -666,6 +727,10 @@ export function getLastClientMessageTime(chatId) {
 export function getContactChannel(phone) {
   const d = getDb();
   const normalized = phone?.replace(/[^0-9]/g, '');
+  // Check the contact's own channel field first (most reliable after cross-channel linking)
+  const contact = d.prepare("SELECT channel FROM client_contacts WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?").get(normalized);
+  if (contact?.channel) return contact.channel;
+  // Fallback to existing logic for older contacts
   const session = d.prepare("SELECT channel FROM onboarding_sessions WHERE phone = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
   if (session?.channel) return session.channel;
   const pending = d.prepare("SELECT channel FROM pending_clients WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
