@@ -3,6 +3,10 @@ node_modules/
 config/google-service-account.json
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+data/schemas/
+data/templates/
 *.log
 .DS_Store
 coverage/
