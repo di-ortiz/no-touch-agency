@@ -119,6 +119,9 @@ CRITICAL RULES:
 - For ad-hoc research and competitor intelligence, use the direct search tools.
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
+- NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
+- When asked to create presentations, charts, graphs, reports, or any Google Slides/Sheets/Drive/Docs content, you MUST call the appropriate tool (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, generate_performance_pdf, generate_competitor_pdf). NEVER substitute with text-based tables, ASCII art, or emoji-based charts. The tools create REAL Google Slides with interactive charts.
+- If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
@@ -1430,6 +1433,9 @@ CRITICAL RULES:
 - For ad-hoc research and competitor intelligence, use the direct search tools.
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
+- NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
+- When asked to create presentations, charts, graphs, reports, or any Google Slides/Sheets/Drive/Docs content, you MUST call the appropriate tool (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, generate_performance_pdf, generate_competitor_pdf). NEVER substitute with text-based tables, ASCII art, or emoji-based charts. The tools create REAL Google Slides with interactive charts.
+- If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
