@@ -2,8 +2,14 @@ import express from 'express';
 import { askClaude } from '../api/anthropic.js';
 import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
 import { sendTelegram, sendAlert as sendTelegramAlert } from '../api/telegram.js';
-import { getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession } from '../services/knowledge-base.js';
+import {
+  getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
+  createPendingClient, getPendingClientByToken, activatePendingClient,
+  saveMessage, getMessages, clearMessages, createOnboardingSession,
+} from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone } from '../services/client-onboarding-flow.js';
+import { getMe as getTelegramMe } from '../api/telegram.js';
+import crypto from 'crypto';
 import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
@@ -57,42 +63,97 @@ app.use('/webhook', rateLimit({
   message: 'Too many requests',
 }));
 
+// CORS for /api routes (called from Lovable website)
+app.use('/api', (req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Rate limit /api endpoints
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: 'Too many requests',
+}));
+
+// --- POST /api/client-init --- (called by Lovable after payment)
+app.post('/api/client-init', async (req, res) => {
+  try {
+    // Optional API key check
+    if (config.CLIENT_INIT_API_KEY) {
+      const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+      if (apiKey !== config.CLIENT_INIT_API_KEY) {
+        return res.status(401).json({ error: 'Invalid API key' });
+      }
+    }
+
+    const { email, plan, name } = req.body || {};
+
+    // Generate unique 12-char token
+    const token = crypto.randomBytes(6).toString('hex');
+
+    // Store in DB
+    createPendingClient({ token, email, plan, name });
+
+    // Build WhatsApp deep link
+    const waPhone = config.WHATSAPP_BUSINESS_PHONE || config.WHATSAPP_OWNER_PHONE;
+    const waMessage = `Hi Sofia! I just signed up. My code is ${token}`;
+    const whatsappLink = `https://wa.me/${waPhone}?text=${encodeURIComponent(waMessage)}`;
+
+    // Build Telegram deep link
+    let telegramLink = null;
+    if (telegramBotUsername) {
+      telegramLink = `https://t.me/${telegramBotUsername}?start=${token}`;
+    } else if (config.TELEGRAM_BOT_TOKEN) {
+      // Try to fetch bot username dynamically
+      try {
+        const me = await getTelegramMe();
+        telegramBotUsername = me.username;
+        telegramLink = `https://t.me/${telegramBotUsername}?start=${token}`;
+      } catch (e) {
+        log.warn('Could not fetch Telegram bot username', { error: e.message });
+      }
+    }
+
+    log.info('Client init created', { token, email, plan, name });
+
+    res.json({
+      success: true,
+      token,
+      links: {
+        whatsapp: whatsappLink,
+        telegram: telegramLink,
+      },
+    });
+  } catch (error) {
+    log.error('Client init failed', { error: error.message });
+    res.status(500).json({ error: 'Failed to create client session' });
+  }
+});
+
 // Pending approval actions
 const pendingApprovals = new Map();
 
-// Conversation history for memory (keyed by chatId/phone)
-const conversationHistory = new Map();
+// Persistent conversation history (DB-backed, survives restarts)
 const MAX_HISTORY_MESSAGES = 20; // keep last 20 exchanges per user
-const HISTORY_TTL_MS = 60 * 60 * 1000; // clear after 1 hour of inactivity
 
 function getHistory(chatId) {
-  const entry = conversationHistory.get(chatId);
-  if (!entry) return [];
-  // Clear stale history
-  if (Date.now() - entry.lastActive > HISTORY_TTL_MS) {
-    conversationHistory.delete(chatId);
-    return [];
-  }
-  return entry.messages;
+  return getMessages(chatId, MAX_HISTORY_MESSAGES * 2);
 }
 
-function addToHistory(chatId, role, content) {
-  let entry = conversationHistory.get(chatId);
-  if (!entry) {
-    entry = { messages: [], lastActive: Date.now() };
-    conversationHistory.set(chatId, entry);
-  }
-  entry.lastActive = Date.now();
-  entry.messages.push({ role, content });
-  // Trim to max size (keep pairs so context makes sense)
-  while (entry.messages.length > MAX_HISTORY_MESSAGES * 2) {
-    entry.messages.shift();
-  }
+function addToHistory(chatId, role, content, channel = 'whatsapp') {
+  saveMessage(chatId, channel, role, content);
 }
 
 function clearHistory(chatId) {
-  conversationHistory.delete(chatId);
+  clearMessages(chatId);
 }
+
+// Cache for Telegram bot username (fetched once at startup)
+let telegramBotUsername = config.TELEGRAM_BOT_USERNAME || '';
 
 // --- WhatsApp Conversational CSA Agent ---
 const WHATSAPP_CSA_PROMPT = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You chat via WhatsApp with the agency owner.
@@ -1608,15 +1669,55 @@ async function handleTelegramApproval(action, approvalId, chatId) {
 
 async function handleTelegramClientMessage(chatId, message) {
   try {
-    // Check for active onboarding via Telegram (uses chatId as phone)
+    // Handle /start TOKEN from Telegram deep link
+    let actualMessage = message;
+    const startMatch = message.match(/^\/start\s+([a-f0-9]{12})$/i);
+    if (startMatch) {
+      const pending = getPendingClientByToken(startMatch[1]);
+      if (pending) {
+        activatePendingClient(pending.token, chatId, 'telegram');
+        log.info('Activated pending client from Telegram /start', { token: pending.token, chatId });
+      }
+      actualMessage = `Hi Sofia! I just signed up.${pending?.name ? ` My name is ${pending.name}` : ''}`;
+    }
+
+    // Check for active onboarding via Telegram (uses chatId as identifier)
     if (hasActiveOnboarding(chatId)) {
       log.info('Routing Telegram to onboarding flow', { chatId });
-      const reply = await handleOnboardingMessage(chatId, message);
+      const reply = await handleOnboardingMessage(chatId, actualMessage);
       await sendTelegram(reply, chatId);
       return;
     }
 
+    // Check if this is a NEW person
     const clientContext = getClientContextByPhone(chatId);
+    if (!clientContext) {
+      // Check for token in message (non /start format)
+      if (!startMatch) {
+        const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
+        if (tokenMatch) {
+          const pending = getPendingClientByToken(tokenMatch[1]);
+          if (pending) {
+            activatePendingClient(pending.token, chatId, 'telegram');
+            log.info('Activated pending client from token (Telegram)', { token: pending.token, chatId });
+          }
+        }
+      }
+
+      // Auto-start onboarding for new Telegram contact
+      log.info('New Telegram contact, auto-starting onboarding', { chatId });
+      createOnboardingSession(chatId, 'telegram');
+      const reply = await handleOnboardingMessage(chatId, actualMessage);
+      await sendTelegram(reply, chatId);
+
+      // Notify owner
+      try {
+        await sendWhatsApp(`📥 *New client started onboarding via Telegram*\nChat ID: ${chatId}\nFirst message: "${message.substring(0, 100)}"`);
+      } catch (e) { /* best effort */ }
+      return;
+    }
+
+    // Known client — greet by name and use context
     const contactName = clientContext?.contactName;
 
     const clients = getAllClients();
@@ -1637,7 +1738,7 @@ Your role:
 ${contactName ? `- ALWAYS address the client by their name (${contactName}) naturally` : ''}
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
-      userMessage: `Client chat ID: ${chatId}\nMessage: ${message}`,
+      userMessage: `Client chat ID: ${chatId}\nMessage: ${actualMessage}`,
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'client-chat',
@@ -1813,8 +1914,33 @@ async function handleClientMessage(from, message) {
       return;
     }
 
-    // 2. Check if this is a known client — greet by name and use context
+    // 2. Check if this is a NEW person (not a known contact and no completed onboarding)
     const clientContext = getClientContextByPhone(from);
+    if (!clientContext) {
+      // New person — check for a sign-up token in the message
+      const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
+      if (tokenMatch) {
+        const pending = getPendingClientByToken(tokenMatch[1]);
+        if (pending) {
+          activatePendingClient(pending.token, from, 'whatsapp');
+          log.info('Activated pending client from token', { token: pending.token, from });
+        }
+      }
+
+      // Auto-start onboarding for any new person
+      log.info('New contact detected, auto-starting onboarding via WhatsApp', { from });
+      createOnboardingSession(from, 'whatsapp');
+      const reply = await handleOnboardingMessage(from, message);
+      await sendWhatsApp(reply, from);
+
+      // Notify owner
+      try {
+        await sendWhatsApp(`📥 *New client started onboarding via WhatsApp*\nPhone: ${from}\nFirst message: "${message.substring(0, 100)}"`);
+      } catch (e) { /* best effort */ }
+      return;
+    }
+
+    // 3. Known client — greet by name and use context
     const contactName = clientContext?.contactName;
 
     const clients = getAllClients();
@@ -2061,13 +2187,26 @@ async function handleApproval(action, approvalId) {
 // --- Start Server ---
 export function startServer(port) {
   const p = port || config.PORT || 3000;
-  app.listen(p, () => {
+  app.listen(p, async () => {
     log.info(`WhatsApp server listening on port ${p}`);
     console.log(`Webhook server running on port ${p}`);
     console.log(`WhatsApp webhook: http://your-server:${p}/webhook/whatsapp`);
     console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
     console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
+    console.log(`Client init API: http://your-server:${p}/api/client-init`);
     console.log(`Health check: http://your-server:${p}/health`);
+
+    // Fetch Telegram bot username if not configured
+    if (!telegramBotUsername && config.TELEGRAM_BOT_TOKEN) {
+      try {
+        const me = await getTelegramMe();
+        telegramBotUsername = me.username;
+        log.info('Telegram bot username fetched', { username: telegramBotUsername });
+        console.log(`Telegram bot: @${telegramBotUsername}`);
+      } catch (e) {
+        log.warn('Could not fetch Telegram bot username', { error: e.message });
+      }
+    }
   });
   return app;
 }

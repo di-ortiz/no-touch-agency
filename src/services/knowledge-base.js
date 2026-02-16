@@ -175,6 +175,28 @@ function getDb() {
         FOREIGN KEY (client_id) REFERENCES clients(id)
       );
 
+      CREATE TABLE IF NOT EXISTS pending_clients (
+        id TEXT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        email TEXT,
+        plan TEXT,
+        name TEXT,
+        status TEXT DEFAULT 'pending',
+        channel TEXT,
+        chat_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        activated_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        channel TEXT NOT NULL DEFAULT 'whatsapp',
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
       CREATE INDEX IF NOT EXISTS idx_campaign_client ON campaign_history(client_id);
       CREATE INDEX IF NOT EXISTS idx_creative_client ON creative_library(client_id);
       CREATE INDEX IF NOT EXISTS idx_test_client ON test_results(client_id);
@@ -182,7 +204,12 @@ function getDb() {
       CREATE INDEX IF NOT EXISTS idx_contact_phone ON client_contacts(phone);
       CREATE INDEX IF NOT EXISTS idx_contact_client ON client_contacts(client_id);
       CREATE INDEX IF NOT EXISTS idx_onboarding_phone ON onboarding_sessions(phone);
+      CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_clients(token);
+      CREATE INDEX IF NOT EXISTS idx_convo_chat ON conversation_history(chat_id);
     `);
+
+    // Safe migration: add channel column to onboarding_sessions if missing
+    try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -231,11 +258,11 @@ export function getOnboardingSession(phone) {
   return row;
 }
 
-export function createOnboardingSession(phone) {
+export function createOnboardingSession(phone, channel = 'whatsapp') {
   const d = getDb();
   const id = uuid();
-  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers) VALUES (?, ?, ?, ?, ?)').run(id, phone, 'in_progress', 'name', '{}');
-  return { id, phone, status: 'in_progress', currentStep: 'name', answers: {} };
+  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel) VALUES (?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', 'name', '{}', channel);
+  return { id, phone, status: 'in_progress', currentStep: 'name', answers: {}, channel };
 }
 
 export function updateOnboardingSession(id, updates) {
@@ -457,6 +484,52 @@ export function buildClientContext(clientId) {
   return context;
 }
 
+// --- Pending Clients (from website payment) ---
+
+export function createPendingClient(data) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`
+    INSERT INTO pending_clients (id, token, email, plan, name, status)
+    VALUES (?, ?, ?, ?, ?, 'pending')
+  `).run(id, data.token, data.email || null, data.plan || null, data.name || null);
+  log.info('Created pending client', { id, token: data.token });
+  return { id, token: data.token, ...data };
+}
+
+export function getPendingClientByToken(token) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE token = ? AND status = 'pending'").get(token);
+}
+
+export function activatePendingClient(token, chatId, channel) {
+  const d = getDb();
+  d.prepare(`
+    UPDATE pending_clients
+    SET status = 'activated', chat_id = ?, channel = ?, activated_at = datetime('now')
+    WHERE token = ?
+  `).run(chatId, channel, token);
+  log.info('Activated pending client', { token, chatId, channel });
+}
+
+// --- Persistent Conversation History ---
+
+export function saveMessage(chatId, channel, role, content) {
+  const d = getDb();
+  d.prepare('INSERT INTO conversation_history (chat_id, channel, role, content) VALUES (?, ?, ?, ?)').run(chatId, channel, role, content);
+}
+
+export function getMessages(chatId, limit = 40) {
+  const d = getDb();
+  const rows = d.prepare('SELECT role, content FROM conversation_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?').all(chatId, limit);
+  return rows.reverse(); // oldest first
+}
+
+export function clearMessages(chatId) {
+  const d = getDb();
+  d.prepare('DELETE FROM conversation_history WHERE chat_id = ?').run(chatId);
+}
+
 export default {
   createClient, getClient, getAllClients, updateClient, searchClients,
   recordCampaignPerformance, getClientCampaignHistory,
@@ -466,4 +539,6 @@ export default {
   buildClientContext,
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
+  createPendingClient, getPendingClientByToken, activatePendingClient,
+  saveMessage, getMessages, clearMessages,
 };

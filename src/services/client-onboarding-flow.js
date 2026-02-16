@@ -446,7 +446,7 @@ function buildIntakeDocument(answers) {
  * Start an onboarding session for a client (triggered by owner).
  * Creates the session and sends the first message.
  */
-export async function initiateOnboarding(clientPhone) {
+export async function initiateOnboarding(clientPhone, { channel = 'whatsapp', sendFn } = {}) {
   const normalized = clientPhone.replace(/[^0-9]/g, '');
 
   // Check if there's already an active session
@@ -455,8 +455,8 @@ export async function initiateOnboarding(clientPhone) {
     return { status: 'already_active', session: existing };
   }
 
-  // Create new session
-  const session = createOnboardingSession(normalized);
+  // Create new session with channel
+  const session = createOnboardingSession(normalized, channel);
 
   // Send the welcome message
   const welcomeMessage = [
@@ -466,7 +466,8 @@ export async function initiateOnboarding(clientPhone) {
   ].join('\n');
 
   try {
-    await sendWhatsApp(welcomeMessage, normalized);
+    const send = sendFn || sendWhatsApp;
+    await send(welcomeMessage, normalized);
   } catch (e) {
     log.error('Failed to send onboarding welcome', { error: e.message, phone: normalized });
   }

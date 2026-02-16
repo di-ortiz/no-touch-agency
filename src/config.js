@@ -72,6 +72,11 @@ const envSchema = z.object({
   LEADSIE_API_KEY: z.string().optional().default(''),
   LEADSIE_WEBHOOK_SECRET: z.string().optional().default(''),
 
+  // Client onboarding
+  WHATSAPP_BUSINESS_PHONE: z.string().optional().default(''), // The actual phone number for wa.me links
+  TELEGRAM_BOT_USERNAME: z.string().optional().default(''), // For t.me deep links
+  CLIENT_INIT_API_KEY: z.string().optional().default(''), // Optional API key to protect /api/client-init
+
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
