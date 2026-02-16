@@ -217,6 +217,17 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN channels_need TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN drive_brand_assets_folder_id TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add fields to pending_clients for Lovable form data
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN phone TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN website TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN business_name TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN business_description TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add plan and conversation_log_doc_id to clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN plan TEXT DEFAULT 'smb'"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN conversation_log_doc_id TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -265,11 +276,23 @@ export function getOnboardingSession(phone) {
   return row;
 }
 
-export function createOnboardingSession(phone, channel = 'whatsapp') {
+export function createOnboardingSession(phone, channel = 'whatsapp', prePopulated = {}) {
   const d = getDb();
   const id = uuid();
-  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel) VALUES (?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', 'name', '{}', channel);
-  return { id, phone, status: 'in_progress', currentStep: 'name', answers: {}, channel };
+  const answers = { ...prePopulated };
+
+  // Determine the first step that still needs an answer
+  const allSteps = ['name', 'business_name', 'website', 'business_description', 'product_service', 'target_audience', 'location', 'competitors', 'channels_have', 'channels_need'];
+  let startStep = 'name';
+  for (const step of allSteps) {
+    if (!answers[step]) {
+      startStep = step;
+      break;
+    }
+  }
+
+  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel) VALUES (?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', startStep, JSON.stringify(answers), channel);
+  return { id, phone, status: 'in_progress', currentStep: startStep, answers, channel };
 }
 
 export function updateOnboardingSession(id, updates) {
@@ -298,8 +321,8 @@ export function createClient(data) {
     INSERT INTO clients (id, name, hubspot_id, industry, website, description, target_audience,
       competitors, brand_voice, monthly_budget_cents, target_roas, target_cpa_cents, primary_kpi, goals,
       meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status,
-      location, channels_have, channels_need, product_service)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      location, channels_have, channels_need, product_service, plan)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.name, data.hubspotId || null, data.industry || null, data.website || null,
     data.description || null, data.targetAudience || null, competitors, data.brandVoice || null,
@@ -309,7 +332,7 @@ export function createClient(data) {
     data.tiktokAdvertiserId || null, data.twitterAdsAccountId || null,
     data.status || 'active',
     data.location || null, data.channelsHave || null, data.channelsNeed || null,
-    data.productService || null,
+    data.productService || null, data.plan || 'smb',
   );
 
   log.info(`Created client: ${data.name}`, { id });
@@ -500,9 +523,13 @@ export function createPendingClient(data) {
   const d = getDb();
   const id = uuid();
   d.prepare(`
-    INSERT INTO pending_clients (id, token, email, plan, name, status)
-    VALUES (?, ?, ?, ?, ?, 'pending')
-  `).run(id, data.token, data.email || null, data.plan || null, data.name || null);
+    INSERT INTO pending_clients (id, token, email, plan, name, status, phone, website, business_name, business_description, product_service)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+  `).run(
+    id, data.token, data.email || null, data.plan || null, data.name || null,
+    data.phone || null, data.website || null, data.businessName || null,
+    data.businessDescription || null, data.productService || null,
+  );
   log.info('Created pending client', { id, token: data.token });
   return { id, token: data.token, ...data };
 }
@@ -510,6 +537,11 @@ export function createPendingClient(data) {
 export function getPendingClientByToken(token) {
   const d = getDb();
   return d.prepare("SELECT * FROM pending_clients WHERE token = ? AND status = 'pending'").get(token);
+}
+
+export function getPendingClientByChatId(chatId) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE chat_id = ? ORDER BY activated_at DESC LIMIT 1").get(chatId);
 }
 
 export function activatePendingClient(token, chatId, channel) {
@@ -540,6 +572,55 @@ export function clearMessages(chatId) {
   d.prepare('DELETE FROM conversation_history WHERE chat_id = ?').run(chatId);
 }
 
+// --- Plan-based daily message limits ---
+
+const PLAN_DAILY_LIMITS = {
+  smb: 20,
+  medium: 50,
+  enterprise: 200,
+};
+
+/**
+ * Get the number of user messages sent today by a specific chat.
+ */
+export function getClientMessageCountToday(chatId) {
+  const d = getDb();
+  const row = d.prepare(`
+    SELECT COUNT(*) as count FROM conversation_history
+    WHERE chat_id = ? AND role = 'user' AND created_at >= date('now')
+  `).get(chatId);
+  return row?.count || 0;
+}
+
+/**
+ * Check if a client has exceeded their daily message limit based on their plan.
+ * Returns { allowed, remaining, limit, plan, used }
+ */
+export function checkClientMessageLimit(chatId) {
+  const contact = getContactByPhone(chatId);
+  if (!contact?.client_id) return { allowed: true, remaining: 999, limit: 999, plan: 'unknown', used: 0 };
+
+  const client = getClient(contact.client_id);
+  const plan = (client?.plan || 'smb').toLowerCase();
+  const limit = PLAN_DAILY_LIMITS[plan] || PLAN_DAILY_LIMITS.smb;
+  const used = getClientMessageCountToday(chatId);
+
+  return {
+    allowed: used < limit,
+    remaining: Math.max(0, limit - used),
+    limit,
+    plan,
+    used,
+  };
+}
+
+/**
+ * Get plan limits configuration.
+ */
+export function getPlanLimits() {
+  return { ...PLAN_DAILY_LIMITS };
+}
+
 export default {
   createClient, getClient, getAllClients, updateClient, searchClients,
   recordCampaignPerformance, getClientCampaignHistory,
@@ -549,6 +630,7 @@ export default {
   buildClientContext,
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
-  createPendingClient, getPendingClientByToken, activatePendingClient,
+  createPendingClient, getPendingClientByToken, getPendingClientByChatId, activatePendingClient,
   saveMessage, getMessages, clearMessages,
+  getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
 };

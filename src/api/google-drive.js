@@ -196,6 +196,31 @@ export async function uploadFile(name, content, mimeType, folderId) {
   );
 }
 
+/**
+ * Append text to the end of an existing Google Doc.
+ */
+export async function appendToDocument(documentId, text) {
+  const docs = getDocs();
+  if (!docs) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      // Get current document length
+      const doc = await docs.documents.get({ documentId });
+      const endIndex = doc.data.body.content
+        .reduce((max, el) => Math.max(max, el.endIndex || 0), 0) - 1;
+
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [{ insertText: { location: { index: Math.max(1, endIndex) }, text: '\n' + text } }],
+        },
+      });
+      return { documentId, appended: true };
+    }, { retries: 3, label: 'Google Drive append doc' })
+  );
+}
+
 // --- Client Folder Structure ---
 
 export async function ensureClientFolders(clientName) {
@@ -267,7 +292,7 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
 
 export default {
   listFiles, getFile, downloadFile, exportDocument,
-  createFolder, createDocument, uploadFile,
+  createFolder, createDocument, appendToDocument, uploadFile,
   ensureClientFolders,
   shareFolderWithAnyone, shareFolderWithEmail,
 };

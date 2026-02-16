@@ -6,6 +6,7 @@ import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, activatePendingClient,
   saveMessage, getMessages, clearMessages, createOnboardingSession,
+  createContact, checkClientMessageLimit, updateClient,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -90,13 +91,13 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    const { email, plan, name } = req.body || {};
+    const { email, plan, name, phone, website, business_name, business_description, product_service } = req.body || {};
 
     // Generate unique 12-char token
     const token = crypto.randomBytes(6).toString('hex');
 
-    // Store in DB
-    createPendingClient({ token, email, plan, name });
+    // Store in DB with all Lovable form data
+    createPendingClient({ token, email, plan, name, phone, website, businessName: business_name, businessDescription: business_description, productService: product_service });
 
     // Build WhatsApp deep link
     const waPhone = config.WHATSAPP_BUSINESS_PHONE || config.WHATSAPP_OWNER_PHONE;
@@ -118,7 +119,7 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    log.info('Client init created', { token, email, plan, name });
+    log.info('Client init created', { token, email, plan, name, website, business_name });
 
     res.json({
       success: true,
@@ -1671,14 +1672,15 @@ async function handleTelegramClientMessage(chatId, message) {
   try {
     // Handle /start TOKEN from Telegram deep link
     let actualMessage = message;
+    let startPending = null;
     const startMatch = message.match(/^\/start\s+([a-f0-9]{12})$/i);
     if (startMatch) {
-      const pending = getPendingClientByToken(startMatch[1]);
-      if (pending) {
-        activatePendingClient(pending.token, chatId, 'telegram');
-        log.info('Activated pending client from Telegram /start', { token: pending.token, chatId });
+      startPending = getPendingClientByToken(startMatch[1]);
+      if (startPending) {
+        activatePendingClient(startPending.token, chatId, 'telegram');
+        log.info('Activated pending client from Telegram /start', { token: startPending.token, chatId });
       }
-      actualMessage = `Hi Sofia! I just signed up.${pending?.name ? ` My name is ${pending.name}` : ''}`;
+      actualMessage = `Hi Sofia! I just signed up.${startPending?.name ? ` My name is ${startPending.name}` : ''}`;
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)
@@ -1693,10 +1695,11 @@ async function handleTelegramClientMessage(chatId, message) {
     const clientContext = getClientContextByPhone(chatId);
     if (!clientContext) {
       // Check for token in message (non /start format)
+      let pending = startPending;
       if (!startMatch) {
         const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
         if (tokenMatch) {
-          const pending = getPendingClientByToken(tokenMatch[1]);
+          pending = getPendingClientByToken(tokenMatch[1]);
           if (pending) {
             activatePendingClient(pending.token, chatId, 'telegram');
             log.info('Activated pending client from token (Telegram)', { token: pending.token, chatId });
@@ -1704,16 +1707,41 @@ async function handleTelegramClientMessage(chatId, message) {
         }
       }
 
-      // Auto-start onboarding for new Telegram contact
-      log.info('New Telegram contact, auto-starting onboarding', { chatId });
-      createOnboardingSession(chatId, 'telegram');
+      // Pre-populate onboarding with Lovable form data if available
+      const prePopulated = {};
+      if (pending) {
+        if (pending.name) prePopulated.name = pending.name;
+        if (pending.website) prePopulated.website = pending.website;
+        if (pending.business_name) prePopulated.business_name = pending.business_name;
+        if (pending.business_description) prePopulated.business_description = pending.business_description;
+        if (pending.product_service) prePopulated.product_service = pending.product_service;
+      }
+
+      // Auto-start onboarding for new Telegram contact (pre-populated with Lovable data)
+      log.info('New Telegram contact, auto-starting onboarding', { chatId, hasLovableData: !!pending });
+      createOnboardingSession(chatId, 'telegram', prePopulated);
+
+      if (pending?.name) {
+        createContact({ phone: chatId, name: pending.name });
+      }
+
       const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
       await sendTelegram(reply, chatId);
 
       // Notify owner
       try {
-        await sendWhatsApp(`📥 *New client started onboarding via Telegram*\nChat ID: ${chatId}\nFirst message: "${message.substring(0, 100)}"`);
+        await sendWhatsApp(`📥 *New client started onboarding via Telegram*\nChat ID: ${chatId}${pending?.name ? `\nName: ${pending.name}` : ''}${pending?.plan ? `\nPlan: ${pending.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
       } catch (e) { /* best effort */ }
+      return;
+    }
+
+    // Check daily message limit based on plan
+    const limitCheck = checkClientMessageLimit(chatId);
+    if (!limitCheck.allowed) {
+      await sendTelegram(
+        `Hey ${clientContext.contactName || 'there'}! You've reached your daily message limit (${limitCheck.limit} messages on the <b>${limitCheck.plan.toUpperCase()}</b> plan). Your limit resets tomorrow.\n\nNeed more? Ask us about upgrading your plan!`,
+        chatId,
+      );
       return;
     }
 
@@ -1767,6 +1795,18 @@ Your role:
 
     addToHistory(chatId, 'assistant', response.text, 'telegram');
     await sendTelegram(response.text, chatId);
+
+    // Append to live conversation log on Google Drive (best effort, non-blocking)
+    if (clientContext.clientId) {
+      const client = getClient(clientContext.clientId);
+      if (client?.conversation_log_doc_id) {
+        const timestamp = new Date().toISOString().replace('T', ' ').split('.')[0];
+        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${response.text}\n`;
+        googleDrive.appendToDocument(client.conversation_log_doc_id, logEntry).catch(e =>
+          log.warn('Failed to append to conversation log', { error: e.message })
+        );
+      }
+    }
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message });
     await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
@@ -1941,29 +1981,56 @@ async function handleClientMessage(from, message) {
     const clientContext = getClientContextByPhone(from);
     if (!clientContext) {
       // New person — check for a sign-up token in the message
+      let pending = null;
       const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
       if (tokenMatch) {
-        const pending = getPendingClientByToken(tokenMatch[1]);
+        pending = getPendingClientByToken(tokenMatch[1]);
         if (pending) {
           activatePendingClient(pending.token, from, 'whatsapp');
           log.info('Activated pending client from token', { token: pending.token, from });
         }
       }
 
-      // Auto-start onboarding for any new person
-      log.info('New contact detected, auto-starting onboarding via WhatsApp', { from });
-      createOnboardingSession(from, 'whatsapp');
+      // Pre-populate onboarding with Lovable form data if available
+      const prePopulated = {};
+      if (pending) {
+        if (pending.name) prePopulated.name = pending.name;
+        if (pending.website) prePopulated.website = pending.website;
+        if (pending.business_name) prePopulated.business_name = pending.business_name;
+        if (pending.business_description) prePopulated.business_description = pending.business_description;
+        if (pending.product_service) prePopulated.product_service = pending.product_service;
+      }
+
+      // Auto-start onboarding (pre-populated with Lovable data if token was provided)
+      log.info('New contact detected, auto-starting onboarding via WhatsApp', { from, hasLovableData: !!pending });
+      createOnboardingSession(from, 'whatsapp', prePopulated);
+
+      // If we have the name from Lovable, create the contact early so Sofia knows them
+      if (pending?.name) {
+        createContact({ phone: from, name: pending.name });
+      }
+
       const reply = await handleOnboardingMessage(from, message, 'whatsapp');
       await sendWhatsApp(reply, from);
 
       // Notify owner
       try {
-        await sendWhatsApp(`📥 *New client started onboarding via WhatsApp*\nPhone: ${from}\nFirst message: "${message.substring(0, 100)}"`);
+        await sendWhatsApp(`📥 *New client started onboarding via WhatsApp*\nPhone: ${from}${pending?.name ? `\nName: ${pending.name}` : ''}${pending?.plan ? `\nPlan: ${pending.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
       } catch (e) { /* best effort */ }
       return;
     }
 
-    // 3. Known client — greet by name and use context with full conversation history
+    // 3. Check daily message limit based on plan
+    const limitCheck = checkClientMessageLimit(from);
+    if (!limitCheck.allowed) {
+      await sendWhatsApp(
+        `Hey ${clientContext.contactName || 'there'}! You've reached your daily message limit (${limitCheck.limit} messages on the *${limitCheck.plan.toUpperCase()}* plan). Your limit resets tomorrow.\n\nNeed more? Ask us about upgrading your plan!`,
+        from,
+      );
+      return;
+    }
+
+    // 4. Known client — greet by name and use context with full conversation history
     const contactName = clientContext?.contactName;
 
     // Build rich client context for Sofia
@@ -2013,6 +2080,18 @@ Your role:
 
     addToHistory(from, 'assistant', response.text, 'whatsapp');
     await sendWhatsApp(response.text, from);
+
+    // Append to live conversation log on Google Drive (best effort, non-blocking)
+    if (clientContext.clientId) {
+      const client = getClient(clientContext.clientId);
+      if (client?.conversation_log_doc_id) {
+        const timestamp = new Date().toISOString().replace('T', ' ').split('.')[0];
+        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${response.text}\n`;
+        googleDrive.appendToDocument(client.conversation_log_doc_id, logEntry).catch(e =>
+          log.warn('Failed to append to conversation log', { error: e.message })
+        );
+      }
+    }
   } catch (error) {
     log.error('Client message handling failed', { from, error: error.message });
     await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);

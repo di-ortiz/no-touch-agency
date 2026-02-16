@@ -4,7 +4,8 @@ import {
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
   createClient, getClient, updateClient,
-  saveMessage,
+  saveMessage, getMessages,
+  getPendingClientByChatId,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as leadsie from '../api/leadsie.js';
@@ -209,6 +210,10 @@ async function finalizeOnboarding(phone, sessionId, answers) {
   let brandAssetsFolderUrl = null;
   let leadsieUrl = null;
 
+  // Look up the pending client record to get the plan from Lovable
+  const pendingClient = getPendingClientByChatId(phone);
+  const clientPlan = pendingClient?.plan || 'smb';
+
   // Step 1: Create client in knowledge base
   try {
     const competitors = answers.competitors
@@ -226,6 +231,7 @@ async function finalizeOnboarding(phone, sessionId, answers) {
       channelsHave: answers.channels_have || null,
       channelsNeed: answers.channels_need || null,
       productService: answers.product_service || null,
+      plan: clientPlan,
     });
     clientId = client.id;
 
@@ -305,7 +311,44 @@ async function finalizeOnboarding(phone, sessionId, answers) {
     errors.push(`Intake doc: ${e.message}`);
   }
 
-  // Step 4: Create Leadsie invite link
+  // Step 4: Create live conversation log document on Drive
+  try {
+    if (clientId) {
+      const client = getClient(clientId);
+      const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      if (folderId) {
+        const clientName = answers.business_name || answers.name;
+        const now = new Date().toISOString().split('T')[0];
+        const initialContent = `CONVERSATION LOG — ${clientName}\n${'='.repeat(40)}\nStarted: ${now}\nThis document is updated live with every conversation.\n\n`;
+
+        // Include the onboarding conversation that just happened
+        const history = getMessages(phone, 100);
+        const historyText = history.map(m => {
+          const speaker = m.role === 'user' ? answers.name || 'Client' : 'Sofia';
+          return `[${speaker}]: ${m.content}`;
+        }).join('\n\n');
+
+        const fullContent = initialContent + (historyText ? `--- ONBOARDING CONVERSATION ---\n\n${historyText}\n` : '');
+
+        const logDoc = await googleDrive.createDocument(
+          `${clientName} - Conversation Log`,
+          fullContent,
+          folderId,
+        );
+        if (logDoc) {
+          updateClient(clientId, { conversation_log_doc_id: logDoc.id });
+          // Share so it's accessible
+          try { await googleDrive.shareFolderWithAnyone(logDoc.id, 'reader'); } catch (e) { /* best effort */ }
+          steps.push('Conversation log document created');
+        }
+      }
+    }
+  } catch (e) {
+    log.warn('Conversation log doc creation failed', { error: e.message });
+    errors.push(`Conversation log: ${e.message}`);
+  }
+
+  // Step 5: Create Leadsie invite link
   try {
     const platformsToRequest = [];
     const channelsHave = (answers.channels_have || '').toLowerCase();
