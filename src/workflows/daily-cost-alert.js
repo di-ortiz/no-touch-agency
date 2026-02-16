@@ -1,44 +1,47 @@
 import logger from '../utils/logger.js';
 import { getCostSummary, isDailyBudgetExceeded } from '../services/cost-tracker.js';
-import { sendAlert } from '../api/whatsapp.js';
+import { sendAlert as sendWhatsAppAlert } from '../api/whatsapp.js';
+import { sendAlert as sendTelegramAlert } from '../api/telegram.js';
 import config from '../config.js';
 
 const log = logger.child({ workflow: 'daily-cost-alert' });
 
 /**
- * Daily Cost Alert — sends a WhatsApp summary of today's AI/API spend
- * to the agency owner every evening.  Includes:
- *   • Total $ spent today, this week, and this month
- *   • Breakdown by platform (Anthropic, OpenAI, WhatsApp, etc.)
- *   • Breakdown by workflow (morning-briefing, daily-monitor, etc.)
- *   • Top-spending clients
- *   • Budget utilisation % and warnings
+ * Send an owner-only alert to both WhatsApp and Telegram.
+ * These never reach clients — sendAlert() defaults to WHATSAPP_OWNER_PHONE
+ * and TELEGRAM_OWNER_CHAT_ID respectively.
  */
-export async function runDailyCostAlert() {
-  log.info('Generating daily cost alert');
+async function notifyOwner(level, title, body) {
+  const results = await Promise.allSettled([
+    sendWhatsAppAlert(level, title, body),
+    config.TELEGRAM_OWNER_CHAT_ID
+      ? sendTelegramAlert(level, title, body)
+      : Promise.resolve(),
+  ]);
 
-  const today = getCostSummary('today');
-  const week = getCostSummary('week');
-  const month = getCostSummary('month');
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      log.warn('Owner notification channel failed', { error: r.reason?.message });
+    }
+  }
+}
 
-  const budgetCents = config.MONTHLY_AI_BUDGET_CENTS || 100_000;
-  const budgetDollars = (budgetCents / 100).toFixed(0);
-  const monthPct = ((month.totalCents / budgetCents) * 100).toFixed(1);
-  const dailyThresholdExceeded = isDailyBudgetExceeded();
+/**
+ * Build the cost summary body shared by both morning and evening reports.
+ */
+function buildCostBody({ today, week, month, budgetDollars, monthPct, dailyThresholdExceeded, label }) {
+  const lines = [label, ``];
 
-  // --- Build message ---
-  const lines = [
-    `*Daily AI Cost Report*`,
-    ``,
+  if (dailyThresholdExceeded) {
+    lines.push(`*Daily spend threshold exceeded!*`, ``);
+  }
+
+  lines.push(
     `*Today:*  $${today.totalDollars}`,
     `*Last 7 days:*  $${week.totalDollars}`,
     `*This month:*  $${month.totalDollars}  (${monthPct}% of $${budgetDollars} budget)`,
-  ];
+  );
 
-  // Warning banner
-  if (dailyThresholdExceeded) {
-    lines.splice(1, 0, `*Daily spend threshold exceeded!*`);
-  }
   if (parseFloat(monthPct) >= 80) {
     lines.push(``, `*Monthly budget at ${monthPct}% — review spend.*`);
   }
@@ -67,26 +70,78 @@ export async function runDailyCostAlert() {
     }
   }
 
-  const level = dailyThresholdExceeded ? 'warning' : 'info';
-  await sendAlert(level, 'Daily AI Cost Report', lines.join('\n'));
+  return lines.join('\n');
+}
 
-  log.info('Daily cost alert sent', {
-    todayDollars: today.totalDollars,
-    monthDollars: month.totalDollars,
-    budgetPct: monthPct,
+/**
+ * Gather cost summaries and compute shared values.
+ */
+function gatherCostData() {
+  const today = getCostSummary('today');
+  const week = getCostSummary('week');
+  const month = getCostSummary('month');
+  const budgetCents = config.MONTHLY_AI_BUDGET_CENTS || 100_000;
+  const budgetDollars = (budgetCents / 100).toFixed(0);
+  const monthPct = ((month.totalCents / budgetCents) * 100).toFixed(1);
+  const dailyThresholdExceeded = isDailyBudgetExceeded();
+  return { today, week, month, budgetDollars, monthPct, dailyThresholdExceeded };
+}
+
+/**
+ * Morning Cost Alert — runs at 8 AM.
+ * Recaps yesterday's final numbers and shows month-to-date budget usage.
+ * Sent ONLY to the owner (WhatsApp + Telegram).
+ */
+export async function runMorningCostAlert() {
+  log.info('Generating morning cost alert for owner');
+
+  const data = gatherCostData();
+  const body = buildCostBody({ ...data, label: `*Morning Cost Recap*` });
+  const level = data.dailyThresholdExceeded ? 'warning' : 'info';
+
+  await notifyOwner(level, 'Morning Cost Recap', body);
+
+  log.info('Morning cost alert sent to owner', {
+    monthDollars: data.month.totalDollars,
+    budgetPct: data.monthPct,
   });
 
-  return { today, week, month, dailyThresholdExceeded };
+  return data;
+}
+
+/**
+ * Evening Cost Alert — runs at 9 PM.
+ * Shows today's running total and full breakdowns before the day closes.
+ * Sent ONLY to the owner (WhatsApp + Telegram).
+ */
+export async function runEveningCostAlert() {
+  log.info('Generating evening cost alert for owner');
+
+  const data = gatherCostData();
+  const body = buildCostBody({ ...data, label: `*End-of-Day Cost Report*` });
+  const level = data.dailyThresholdExceeded ? 'warning' : 'info';
+
+  await notifyOwner(level, 'End-of-Day Cost Report', body);
+
+  log.info('Evening cost alert sent to owner', {
+    todayDollars: data.today.totalDollars,
+    monthDollars: data.month.totalDollars,
+    budgetPct: data.monthPct,
+  });
+
+  return data;
 }
 
 // CLI entry point
 if (process.argv[1]?.endsWith('daily-cost-alert.js')) {
-  runDailyCostAlert()
-    .then(({ today, month }) => {
-      console.log(`Daily: $${today.totalDollars} | Month: $${month.totalDollars}`);
+  const mode = process.argv[2] || 'evening';
+  const fn = mode === 'morning' ? runMorningCostAlert : runEveningCostAlert;
+  fn()
+    .then((data) => {
+      console.log(`${mode}: Today $${data.today.totalDollars} | Month $${data.month.totalDollars}`);
       process.exit(0);
     })
     .catch(err => { console.error(err); process.exit(1); });
 }
 
-export default runDailyCostAlert;
+export default { runMorningCostAlert, runEveningCostAlert };

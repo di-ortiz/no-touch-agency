@@ -82,7 +82,8 @@ export function initializeSchedule(workflows) {
     crossDepartment,
     clientCheckIn,
     clientMorningBriefing,
-    dailyCostAlert,
+    morningCostAlert,
+    eveningCostAlert,
   } = workflows;
 
   // Workflow 1: Morning Intelligence Briefing - 8 AM
@@ -122,8 +123,9 @@ export function initializeSchedule(workflows) {
   // Client check-in - 9 AM daily (proactive follow-ups)
   if (clientCheckIn) registerJob('client-check-in', '0 9 * * *', clientCheckIn);
 
-  // Daily Cost Alert - 9 PM daily (end-of-day AI spend summary to owner)
-  if (dailyCostAlert) registerJob('daily-cost-alert', '0 21 * * *', dailyCostAlert);
+  // Owner Cost Alerts - morning recap at 8 AM, end-of-day report at 9 PM (owner-only, never sent to clients)
+  if (morningCostAlert) registerJob('morning-cost-alert', '0 8 * * *', morningCostAlert);
+  if (eveningCostAlert) registerJob('evening-cost-alert', '0 21 * * *', eveningCostAlert);
 
   log.info(`Initialized ${jobs.size} scheduled jobs`);
 }
