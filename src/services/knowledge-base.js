@@ -150,13 +150,106 @@ function getDb() {
         updated_at TEXT DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS client_contacts (
+        id TEXT PRIMARY KEY,
+        client_id TEXT,
+        phone TEXT UNIQUE,
+        name TEXT,
+        email TEXT,
+        role TEXT DEFAULT 'owner',
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS onboarding_sessions (
+        id TEXT PRIMARY KEY,
+        phone TEXT NOT NULL,
+        status TEXT DEFAULT 'in_progress',
+        current_step TEXT DEFAULT 'name',
+        answers TEXT DEFAULT '{}',
+        client_id TEXT,
+        leadsie_invite_id TEXT,
+        drive_folder_url TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_campaign_client ON campaign_history(client_id);
       CREATE INDEX IF NOT EXISTS idx_creative_client ON creative_library(client_id);
       CREATE INDEX IF NOT EXISTS idx_test_client ON test_results(client_id);
       CREATE INDEX IF NOT EXISTS idx_competitor_client ON competitor_intel(client_id);
+      CREATE INDEX IF NOT EXISTS idx_contact_phone ON client_contacts(phone);
+      CREATE INDEX IF NOT EXISTS idx_contact_client ON client_contacts(client_id);
+      CREATE INDEX IF NOT EXISTS idx_onboarding_phone ON onboarding_sessions(phone);
     `);
   }
   return db;
+}
+
+// --- Client Contacts ---
+
+export function getContactByPhone(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  return d.prepare('SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?').get(normalized);
+}
+
+export function createContact(data) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`
+    INSERT INTO client_contacts (id, client_id, phone, name, email, role)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner');
+  return { id, ...data };
+}
+
+export function updateContact(phone, updates) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(value);
+  }
+  values.push(normalized);
+  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?`).run(...values);
+}
+
+// --- Onboarding Sessions ---
+
+export function getOnboardingSession(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  const row = d.prepare("SELECT * FROM onboarding_sessions WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ? AND status = 'in_progress' ORDER BY created_at DESC LIMIT 1").get(normalized);
+  if (row) {
+    row.answers = row.answers ? JSON.parse(row.answers) : {};
+  }
+  return row;
+}
+
+export function createOnboardingSession(phone) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers) VALUES (?, ?, ?, ?, ?)').run(id, phone, 'in_progress', 'name', '{}');
+  return { id, phone, status: 'in_progress', currentStep: 'name', answers: {} };
+}
+
+export function updateOnboardingSession(id, updates) {
+  const d = getDb();
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
+  }
+  fields.push("updated_at = datetime('now')");
+  values.push(id);
+  d.prepare(`UPDATE onboarding_sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
 
 // --- Client CRUD ---
@@ -371,4 +464,6 @@ export default {
   recordTestResult,
   getBenchmark, setBenchmark,
   buildClientContext,
+  getContactByPhone, createContact, updateContact,
+  getOnboardingSession, createOnboardingSession, updateOnboardingSession,
 };

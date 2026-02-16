@@ -70,6 +70,7 @@ const envSchema = z.object({
 
   // Leadsie
   LEADSIE_API_KEY: z.string().optional().default(''),
+  LEADSIE_WEBHOOK_SECRET: z.string().optional().default(''),
 
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

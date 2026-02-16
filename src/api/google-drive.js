@@ -217,8 +217,58 @@ export async function ensureClientFolders(clientName) {
   return folders;
 }
 
+// --- Sharing ---
+
+/**
+ * Share a folder (or file) with "anyone with the link" as a writer.
+ * This allows clients to upload brand assets via a shared link.
+ */
+export async function shareFolderWithAnyone(folderId, role = 'writer') {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      await drive.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          type: 'anyone',
+          role,
+        },
+      });
+      log.info(`Shared folder ${folderId} with anyone (${role})`);
+      return { folderId, shared: true, role };
+    }, { retries: 3, label: 'Google Drive share folder' })
+  );
+}
+
+/**
+ * Share a folder with a specific email address.
+ */
+export async function shareFolderWithEmail(folderId, email, role = 'writer') {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      await drive.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          type: 'user',
+          role,
+          emailAddress: email,
+        },
+        sendNotificationEmail: true,
+      });
+      log.info(`Shared folder ${folderId} with ${email} (${role})`);
+      return { folderId, email, shared: true, role };
+    }, { retries: 3, label: 'Google Drive share with email' })
+  );
+}
+
 export default {
   listFiles, getFile, downloadFile, exportDocument,
   createFolder, createDocument, uploadFile,
   ensureClientFolders,
+  shareFolderWithAnyone, shareFolderWithEmail,
 };

@@ -2,7 +2,8 @@ import express from 'express';
 import { askClaude } from '../api/anthropic.js';
 import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
 import { sendTelegram, sendAlert as sendTelegramAlert } from '../api/telegram.js';
-import { getAllClients, getClient, buildClientContext } from '../services/knowledge-base.js';
+import { getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession } from '../services/knowledge-base.js';
+import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone } from '../services/client-onboarding-flow.js';
 import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
@@ -347,6 +348,11 @@ const CSA_TOOLS = [
     name: 'check_onboarding_status',
     description: 'Check whether a client has completed their Leadsie onboarding (granted ad account access).',
     input_schema: { type: 'object', properties: { inviteId: { type: 'string', description: 'Leadsie invite ID to check' } }, required: ['inviteId'] },
+  },
+  {
+    name: 'start_client_onboarding',
+    description: 'Start the conversational onboarding flow for a new client. Sofia will send them a welcome message on WhatsApp and guide them through questions (name, business, website, audience, competitors, channels, etc.). The client answers at their own pace and Sofia remembers where they left off. Once complete, Sofia auto-creates their Drive folder, Leadsie link, and intake document.',
+    input_schema: { type: 'object', properties: { clientPhone: { type: 'string', description: 'Client WhatsApp phone number (with country code, e.g. "5511999999999")' } }, required: ['clientPhone'] },
   },
   // --- Drive File Management ---
   {
@@ -1022,6 +1028,23 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    case 'start_client_onboarding': {
+      const result = await initiateOnboarding(toolInput.clientPhone);
+      if (result.status === 'already_active') {
+        return {
+          status: 'already_active',
+          phone: toolInput.clientPhone,
+          currentStep: result.session.current_step,
+          message: `There's already an active onboarding session for this number. The client is on step: ${result.session.current_step}. They can continue by messaging Sofia.`,
+        };
+      }
+      return {
+        status: 'started',
+        phone: toolInput.clientPhone,
+        message: `Onboarding started! I've sent a welcome message to ${toolInput.clientPhone}. Sofia will guide them through the questions and auto-create their Drive folder, Leadsie link, and intake document when done.`,
+      };
+    }
+
     // --- Google Drive Client Folders ---
     case 'setup_client_drive': {
       const folders = await googleDrive.ensureClientFolders(toolInput.clientName);
@@ -1585,17 +1608,33 @@ async function handleTelegramApproval(action, approvalId, chatId) {
 
 async function handleTelegramClientMessage(chatId, message) {
   try {
-    const clients = getAllClients();
-    const response = await askClaude({
-      systemPrompt: `You are an AI assistant for a professional PPC/digital marketing agency. You're chatting with a client via Telegram.
+    // Check for active onboarding via Telegram (uses chatId as phone)
+    if (hasActiveOnboarding(chatId)) {
+      log.info('Routing Telegram to onboarding flow', { chatId });
+      const reply = await handleOnboardingMessage(chatId, message);
+      await sendTelegram(reply, chatId);
+      return;
+    }
 
+    const clientContext = getClientContextByPhone(chatId);
+    const contactName = clientContext?.contactName;
+
+    const clients = getAllClients();
+    const memoryContext = clientContext
+      ? `\nYou are talking to <b>${contactName}</b>${clientContext.clientName ? ` from ${clientContext.clientName}` : ''}. Always greet them by name.`
+      : '';
+
+    const response = await askClaude({
+      systemPrompt: `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
+${memoryContext}
 Your role:
 - Answer questions about their campaigns, performance, and strategy
-- Be professional, friendly, and concise
+- Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to have the account manager follow up
 - Never share other clients' data
 - Keep responses under 500 words
 - Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
+${contactName ? `- ALWAYS address the client by their name (${contactName}) naturally` : ''}
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client chat ID: ${chatId}\nMessage: ${message}`,
@@ -1609,6 +1648,56 @@ Current clients on file: ${clients.map(c => c.name).join(', ')}`,
     await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
   }
 }
+
+// --- Leadsie Webhook (completion callback) ---
+app.post('/webhook/leadsie', async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const secret = config.LEADSIE_WEBHOOK_SECRET;
+    if (secret && req.headers['x-leadsie-secret'] !== secret) {
+      log.warn('Leadsie webhook: invalid secret');
+      return;
+    }
+
+    const { invite_id, status, client_name, granted_accounts } = req.body || {};
+    if (!invite_id || status !== 'completed') return;
+
+    log.info('Leadsie onboarding completed', { inviteId: invite_id, clientName: client_name });
+
+    // Find the client linked to this Leadsie invite
+    const { default: Database } = await import('better-sqlite3');
+    const DB_PATH = process.env.KB_DB_PATH || 'data/knowledge.db';
+    const db = new Database(DB_PATH);
+    const session = db.prepare('SELECT * FROM onboarding_sessions WHERE leadsie_invite_id = ?').get(invite_id);
+
+    if (session?.client_id) {
+      // Update client with granted ad account IDs
+      const updates = {};
+      for (const account of (granted_accounts || [])) {
+        if (account.platform === 'facebook' && account.account_id) {
+          updates.meta_ad_account_id = account.account_id;
+        } else if (account.platform === 'google' && account.account_id) {
+          updates.google_ads_customer_id = account.account_id;
+        } else if (account.platform === 'tiktok' && account.account_id) {
+          updates.tiktok_advertiser_id = account.account_id;
+        }
+      }
+      if (Object.keys(updates).length > 0) {
+        const { updateClient: updateClientKb } = await import('../services/knowledge-base.js');
+        updateClientKb(session.client_id, updates);
+      }
+
+      // Notify owner
+      const platformNames = (granted_accounts || []).map(a => a.platform).join(', ');
+      await sendWhatsApp(`✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n\nAccess granted for: ${platformNames || 'accounts linked'}\n\nAd account IDs have been saved automatically.`);
+    }
+
+    db.close();
+  } catch (error) {
+    log.error('Leadsie webhook handling failed', { error: error.message });
+  }
+});
 
 // --- Health Check ---
 app.get('/health', (req, res) => {
@@ -1716,17 +1805,34 @@ async function handleCommand(message) {
 // --- Client Message Handler (non-owner contacts) ---
 async function handleClientMessage(from, message) {
   try {
-    const clients = getAllClients();
-    const response = await askClaude({
-      systemPrompt: `You are an AI assistant for a professional PPC/digital marketing agency. You're chatting with a client via WhatsApp.
+    // 1. Check if client has an active onboarding session
+    if (hasActiveOnboarding(from)) {
+      log.info('Routing to onboarding flow', { from });
+      const reply = await handleOnboardingMessage(from, message);
+      await sendWhatsApp(reply, from);
+      return;
+    }
 
+    // 2. Check if this is a known client — greet by name and use context
+    const clientContext = getClientContextByPhone(from);
+    const contactName = clientContext?.contactName;
+
+    const clients = getAllClients();
+    const memoryContext = clientContext
+      ? `\nYou are talking to *${contactName}*${clientContext.clientName ? ` from ${clientContext.clientName}` : ''}. Always greet them by name.${clientContext.industry ? ` Industry: ${clientContext.industry}.` : ''}${clientContext.website ? ` Website: ${clientContext.website}.` : ''}`
+      : '';
+
+    const response = await askClaude({
+      systemPrompt: `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
+${memoryContext}
 Your role:
 - Answer questions about their campaigns, performance, and strategy
-- Be professional, friendly, and concise
+- Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to have the account manager follow up
 - Never share other clients' data
 - Keep responses under 500 words
 - Use WhatsApp formatting: *bold*, _italic_
+${contactName ? `- ALWAYS address the client by their name (${contactName}) naturally` : ''}
 
 Current clients on file: ${clients.map(c => c.name).join(', ')}`,
       userMessage: `Client phone: ${from}\nMessage: ${message}`,
@@ -1960,6 +2066,7 @@ export function startServer(port) {
     console.log(`Webhook server running on port ${p}`);
     console.log(`WhatsApp webhook: http://your-server:${p}/webhook/whatsapp`);
     console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
+    console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
     console.log(`Health check: http://your-server:${p}/health`);
   });
   return app;
