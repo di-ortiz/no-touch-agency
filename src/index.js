@@ -14,6 +14,7 @@ import { runLandingPageAnalysis } from './workflows/landing-page-analysis.js';
 import { runTestManager } from './workflows/ab-test-manager.js';
 import { runClientCheckIn } from './workflows/client-check-in.js';
 import { runClientMorningBriefing } from './workflows/client-morning-briefing.js';
+import { runDailyCostAlert } from './workflows/daily-cost-alert.js';
 import { sendAlert } from './api/whatsapp.js';
 import config from './config.js';
 import fs from 'fs';
@@ -58,6 +59,7 @@ async function main() {
     landingPageAnalysis: runLandingPageAnalysis,
     clientCheckIn: runClientCheckIn,
     clientMorningBriefing: runClientMorningBriefing,
+    dailyCostAlert: runDailyCostAlert,
   });
 
   // 3. Run ClickUp monitor at startup and schedule it
