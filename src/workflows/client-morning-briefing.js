@@ -42,13 +42,7 @@ export async function runClientMorningBriefing() {
         continue;
       }
 
-      // Only send if client has at least one ad platform configured
-      if (!client.meta_ad_account_id && !client.google_ads_customer_id && !client.tiktok_advertiser_id) {
-        results.skipped++;
-        continue;
-      }
-
-      // Collect performance data
+      // Collect performance data (if ad platforms are configured)
       const platformData = {};
 
       if (client.meta_ad_account_id) {
@@ -86,12 +80,7 @@ export async function runClientMorningBriefing() {
         }
       }
 
-      if (Object.keys(platformData).length === 0) {
-        results.skipped++;
-        continue;
-      }
-
-      // Generate personalized briefing
+      // Generate personalized briefing (with or without platform data)
       const contactName = clientContacts[0]?.name || 'there';
       const contactLang = clientContacts[0]?.language || 'en';
       const briefingMessage = await generateClientBriefing(client, platformData, contactName, contactLang);
@@ -130,12 +119,15 @@ async function generateClientBriefing(client, platformData, contactName, languag
     platformSummary += '\n';
   }
 
+  const langName = { es: 'Spanish', pt: 'Portuguese', fr: 'French' }[language] || 'English';
   const langInstruction = language !== 'en'
-    ? `\nIMPORTANT: Write the entire message in ${language === 'es' ? 'Spanish' : language === 'pt' ? 'Portuguese' : language === 'fr' ? 'French' : 'English'}.`
+    ? `\nIMPORTANT: Write the entire message in ${langName}.`
     : '';
 
-  const response = await askClaude({
-    systemPrompt: `You are Sofia, a warm PPC agency account manager sending a morning performance summary to a client via WhatsApp.
+  const hasPlatformData = Object.keys(platformData).length > 0;
+
+  const systemPrompt = hasPlatformData
+    ? `You are Sofia, a warm PPC agency account manager sending a morning performance summary to a client via WhatsApp.
 Write a brief, friendly, data-rich morning update. Use WhatsApp formatting (*bold*, _italic_).
 Include:
 1. A personal greeting using the client's name: "Good morning, NAME!"
@@ -143,15 +135,27 @@ Include:
 3. Any concerns or areas to watch
 4. One proactive suggestion or action item
 5. End with: "Would you like me to dig deeper into anything?"
-Keep it under 300 words. Be warm but data-driven.${langInstruction}`,
+Keep it under 300 words. Be warm but data-driven.${langInstruction}`
+    : `You are Sofia, a warm PPC agency account manager sending a proactive morning check-in to a client via WhatsApp.
+Their ad accounts aren't connected yet so you don't have performance data. Instead:
+1. Greet them warmly by name: "Good morning, NAME!"
+2. Remind them about next steps (sharing brand assets, granting ad account access via Leadsie)
+3. Offer to help with creative ideas, campaign strategy, or competitor research
+4. End with: "What would you like to work on today?"
+Keep it under 150 words. Be warm and proactive.${langInstruction}`;
+
+  const response = await askClaude({
+    systemPrompt,
     userMessage: `Client: ${client.name}
 Contact name: ${contactName}
 Industry: ${client.industry || 'N/A'}
-Target ROAS: ${client.target_roas || 'N/A'}
+${hasPlatformData ? `Target ROAS: ${client.target_roas || 'N/A'}
 Target CPA: $${((client.target_cpa_cents || 0) / 100).toFixed(2)}
 
 Yesterday's performance:
-${platformSummary || 'No data available'}`,
+${platformSummary}` : `Ad accounts: Not yet connected
+Website: ${client.website || 'N/A'}
+Channels they want: ${client.channels_need || 'N/A'}`}`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1024,
     workflow: 'client-morning-briefing',

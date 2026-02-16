@@ -1038,23 +1038,31 @@ Return ONLY the JSON array, no other text.`;
 
       const videoPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting. No text overlays.`;
 
-      const video = await openaiMedia.generateAdVideo({
-        prompt: videoPrompt,
-        format: toolInput.platform || 'meta_feed',
-        duration: toolInput.duration || 8,
-        workflow: 'ad-video-generation',
-        clientId: client?.id,
-      });
+      try {
+        const video = await openaiMedia.generateAdVideo({
+          prompt: videoPrompt,
+          format: toolInput.platform || 'meta_feed',
+          duration: toolInput.duration || 8,
+          workflow: 'ad-video-generation',
+          clientId: client?.id,
+        });
 
-      return {
-        clientName: toolInput.clientName,
-        concept: toolInput.concept,
-        videoUrl: video.videoUrl,
-        duration: video.duration,
-        resolution: video.resolution,
-        aspectRatio: video.aspectRatio,
-        status: video.status,
-      };
+        return {
+          clientName: toolInput.clientName,
+          concept: toolInput.concept,
+          videoUrl: video.videoUrl,
+          duration: video.duration,
+          resolution: video.resolution,
+          aspectRatio: video.aspectRatio,
+          status: video.status,
+        };
+      } catch (videoError) {
+        log.error('Video generation failed', { error: videoError.message, client: toolInput.clientName });
+        return {
+          error: `Video generation encountered an issue: ${videoError.message}. This can happen due to high demand or content restrictions. Try again with a simpler concept, or I can generate static images instead.`,
+          suggestion: 'Try generate_ad_images as an alternative',
+        };
+      }
     }
     case 'generate_creative_package': {
       const pkg = await creativeEngine.generateCreativePackage({
@@ -1824,7 +1832,7 @@ async function handleTelegramClientMessage(chatId, message) {
       if (pendingData && pendingData.name) {
         // Client came from website — personalized welcome + confirmation
         try {
-          createContact({ phone: chatId, name: pendingData.name, email: pendingData.email, channel: 'telegram' });
+          createContact({ phone: chatId, name: pendingData.name, email: pendingData.email, channel: 'telegram', language: lang });
         } catch (e) { /* might already exist */ }
 
         const prefillAnswers = {};
@@ -1904,11 +1912,24 @@ Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
 - Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
+- When they ask for creatives, images, or videos — USE YOUR TOOLS to generate them. Never just describe what you would create.
 - Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
-- Never share other clients' data
+- Never share other clients' data or internal cost information
 - Keep responses under 500 words
-- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>`;
+- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
+
+CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
+When the client asks for ads, visuals, creatives, or mockups:
+1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
+2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
+3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+
+    // Client-facing tools (safe subset — no campaign management, no cost reports)
+    const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
+      'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
+      'generate_text_ads', 'browse_website',
+    ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
     let history;
@@ -1926,23 +1947,74 @@ Your role:
 
     const messages = [...history, { role: 'user', content: message }];
 
-    const response = await askClaude({
+    // Send thinking indicator so client knows Sofia is working
+    await sendThinkingIndicator('telegram', chatId, 'Give me a moment...');
+
+    let response = await askClaude({
       systemPrompt,
       messages,
+      tools: CLIENT_TOOLS,
       model: 'claude-haiku-4-5-20251001',
-      maxTokens: 1024,
+      maxTokens: 2048,
       workflow: 'client-chat',
     });
 
-    addToHistory(chatId, 'assistant', response.text, 'telegram');
-    await sendTelegram(response.text, chatId);
+    // Tool-use loop (max 5 rounds for client safety)
+    let rounds = 0;
+    while (response.stopReason === 'tool_use' && rounds < 5) {
+      rounds++;
+
+      if (rounds === 1 && response.text) {
+        await sendTelegram(response.text, chatId);
+      }
+
+      const toolResults = [];
+      for (const tool of response.toolUse) {
+        log.info('Client tool execution (Telegram)', { tool: tool.name, client: contactName, round: rounds });
+
+        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
+        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video... This will take a few minutes.');
+        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
+
+        try {
+          if (clientContext.clientId && tool.input) {
+            tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
+          }
+          const result = await executeCSATool(tool.name, tool.input);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          await deliverMediaInline(tool.name, result, 'telegram', chatId);
+        } catch (e) {
+          log.error('Client tool failed (Telegram)', { tool: tool.name, error: e.message });
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
+        }
+      }
+
+      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await askClaude({
+        systemPrompt,
+        messages,
+        tools: CLIENT_TOOLS,
+        model: 'claude-haiku-4-5-20251001',
+        maxTokens: 2048,
+        workflow: 'client-chat',
+      });
+    }
+
+    const finalText = response.text || (rounds > 0
+      ? 'Your creatives are ready! Check them out above. Let me know if you\'d like any adjustments.'
+      : 'I\'m here to help! What would you like to work on?');
+
+    addToHistory(chatId, 'assistant', finalText, 'telegram');
+    await sendTelegram(finalText, chatId);
 
     // Append to live conversation log on Google Drive (best effort, non-blocking)
     if (clientContext.clientId) {
       const client = getClient(clientContext.clientId);
       if (client?.conversation_log_doc_id) {
         const timestamp = new Date().toISOString().replace('T', ' ').split('.')[0];
-        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${response.text}\n`;
+        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${finalText}\n`;
         googleDrive.appendToDocument(client.conversation_log_doc_id, logEntry).catch(e =>
           log.warn('Failed to append to conversation log', { error: e.message })
         );
@@ -2159,7 +2231,7 @@ async function handleClientMessage(from, message) {
       if (pendingData && pendingData.name) {
         // Client came from website with form data — personalized welcome + confirmation
         try {
-          createContact({ phone: from, name: pendingData.name, email: pendingData.email, channel: 'whatsapp' });
+          createContact({ phone: from, name: pendingData.name, email: pendingData.email, channel: 'whatsapp', language: lang });
         } catch (e) { /* might already exist */ }
 
         // Pre-populate answers with all known form data
@@ -2243,11 +2315,24 @@ Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
 - Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
+- When they ask for creatives, images, or videos — USE YOUR TOOLS to generate them. Never just describe what you would create.
 - Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
-- Never share other clients' data
+- Never share other clients' data or internal cost information
 - Keep responses under 500 words
-- Use WhatsApp formatting: *bold*, _italic_`;
+- Use WhatsApp formatting: *bold*, _italic_
+
+CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
+When the client asks for ads, visuals, creatives, or mockups:
+1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
+2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
+3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+
+    // Client-facing tools (safe subset — no campaign management, no cost reports)
+    const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
+      'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
+      'generate_text_ads', 'browse_website',
+    ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
     let history;
@@ -2265,23 +2350,78 @@ Your role:
 
     const messages = [...history, { role: 'user', content: message }];
 
-    const response = await askClaude({
+    // Send thinking indicator so client knows Sofia is working
+    await sendThinkingIndicator('whatsapp', from, 'Give me a moment...');
+
+    let response = await askClaude({
       systemPrompt,
       messages,
+      tools: CLIENT_TOOLS,
       model: 'claude-haiku-4-5-20251001',
-      maxTokens: 1024,
+      maxTokens: 2048,
       workflow: 'client-chat',
     });
 
-    addToHistory(from, 'assistant', response.text, 'whatsapp');
-    await sendWhatsApp(response.text, from);
+    // Tool-use loop (max 5 rounds for client safety)
+    let rounds = 0;
+    while (response.stopReason === 'tool_use' && rounds < 5) {
+      rounds++;
+
+      if (rounds === 1 && response.text) {
+        await sendWhatsApp(response.text, from);
+      }
+
+      const toolResults = [];
+      for (const tool of response.toolUse) {
+        log.info('Client tool execution', { tool: tool.name, client: contactName, round: rounds });
+
+        // Send thinking messages for slow tools
+        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', from, 'Generating your ad images... This might take a minute.');
+        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', from, 'Creating your video... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
+        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', from, 'Building your full creative package... Give me a few minutes!');
+
+        try {
+          // Inject clientId for cost tracking
+          if (clientContext.clientId && tool.input) {
+            tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
+          }
+          const result = await executeCSATool(tool.name, tool.input);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          // Deliver generated media (images/videos) inline
+          await deliverMediaInline(tool.name, result, 'whatsapp', from);
+        } catch (e) {
+          log.error('Client tool failed', { tool: tool.name, error: e.message });
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
+        }
+      }
+
+      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await askClaude({
+        systemPrompt,
+        messages,
+        tools: CLIENT_TOOLS,
+        model: 'claude-haiku-4-5-20251001',
+        maxTokens: 2048,
+        workflow: 'client-chat',
+      });
+    }
+
+    // Send final response
+    const finalText = response.text || (rounds > 0
+      ? 'Your creatives are ready! Check them out above. Let me know if you\'d like any adjustments.'
+      : 'I\'m here to help! What would you like to work on?');
+
+    addToHistory(from, 'assistant', finalText, 'whatsapp');
+    await sendWhatsApp(finalText, from);
 
     // Append to live conversation log on Google Drive (best effort, non-blocking)
     if (clientContext.clientId) {
       const client = getClient(clientContext.clientId);
       if (client?.conversation_log_doc_id) {
         const timestamp = new Date().toISOString().replace('T', ' ').split('.')[0];
-        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${response.text}\n`;
+        const logEntry = `\n[${timestamp}] ${contactName || 'Client'}: ${message}\n[${timestamp}] Sofia: ${finalText}\n`;
         googleDrive.appendToDocument(client.conversation_log_doc_id, logEntry).catch(e =>
           log.warn('Failed to append to conversation log', { error: e.message })
         );

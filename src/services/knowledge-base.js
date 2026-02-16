@@ -157,6 +157,8 @@ function getDb() {
         name TEXT,
         email TEXT,
         role TEXT DEFAULT 'owner',
+        channel TEXT DEFAULT 'whatsapp',
+        language TEXT DEFAULT 'en',
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (client_id) REFERENCES clients(id)
       );
@@ -261,9 +263,9 @@ export function createContact(data) {
   const d = getDb();
   const id = uuid();
   d.prepare(`
-    INSERT INTO client_contacts (id, client_id, phone, name, email, role, channel)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner', data.channel || 'whatsapp');
+    INSERT INTO client_contacts (id, client_id, phone, name, email, role, channel, language)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner', data.channel || 'whatsapp', data.language || 'en');
   return { id, ...data };
 }
 

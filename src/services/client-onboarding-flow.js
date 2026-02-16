@@ -830,29 +830,67 @@ export function getClientContextByPhone(phone) {
  * Build the personalized welcome message that presents all form data for confirmation.
  * Sent when a client arrives via token (already signed up on the website).
  */
+// Plan metadata for welcome messages
+const PLAN_INFO = {
+  smb:        { modules: 3, dailyMessages: 20, label: 'SMB' },
+  medium:     { modules: 6, dailyMessages: 50, label: 'Medium' },
+  enterprise: { modules: 8, dailyMessages: 200, label: 'Enterprise' },
+};
+
 export function buildPersonalizedWelcome(pendingData, language = 'en') {
   const name = pendingData.name || '';
   const token = pendingData.token || '';
-  const plan = pendingData.plan || '';
+  const plan = (pendingData.plan || 'smb').toLowerCase();
+  const planInfo = PLAN_INFO[plan] || PLAN_INFO.smb;
 
   // Collect known fields for the summary
+  const labels = {
+    en: { website: 'Website', business: 'Business', description: 'Description', product: 'Product/Service', email: 'Email' },
+    es: { website: 'Sitio web', business: 'Empresa', description: 'Descripcion', product: 'Producto/Servicio', email: 'Email' },
+    pt: { website: 'Website', business: 'Empresa', description: 'Descricao', product: 'Produto/Servico', email: 'Email' },
+  };
+  const l = labels[language] || labels.en;
+
   const fields = [];
-  if (pendingData.website) fields.push({ label: language === 'es' ? 'Sitio web' : 'Website', value: pendingData.website });
-  if (pendingData.business_name) fields.push({ label: language === 'es' ? 'Empresa' : 'Business', value: pendingData.business_name });
-  if (pendingData.business_description) fields.push({ label: language === 'es' ? 'Descripcion' : 'Description', value: pendingData.business_description });
-  if (pendingData.product_service) fields.push({ label: language === 'es' ? 'Producto/Servicio' : 'Product/Service', value: pendingData.product_service });
-  if (pendingData.email) fields.push({ label: 'Email', value: pendingData.email });
+  if (pendingData.website) fields.push({ label: l.website, value: pendingData.website });
+  if (pendingData.business_name) fields.push({ label: l.business, value: pendingData.business_name });
+  if (pendingData.business_description) fields.push({ label: l.description, value: pendingData.business_description });
+  if (pendingData.product_service) fields.push({ label: l.product, value: pendingData.product_service });
+  if (pendingData.email) fields.push({ label: l.email, value: pendingData.email });
 
   const fieldsSummary = fields.map(f => `- *${f.label}:* ${f.value}`).join('\n');
+
+  if (language === 'pt') {
+    return [
+      `Oi${name ? ` *${name}*` : ''}! Eu sou a Sofia, sua gerente de conta dedicada.`,
+      ``,
+      `Seu codigo de cliente: *${token}*`,
+      `Plano: *${planInfo.label}* (ate ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensagens/dia)`,
+      ``,
+      fields.length > 0 ? `Aqui esta o que tenho do seu cadastro:\n${fieldsSummary}` : '',
+      ``,
+      `*Proximos passos:*`,
+      `1. Vou fazer algumas perguntas rapidas sobre seu negocio para personalizar suas campanhas`,
+      `2. Vou pedir seus materiais de marca (logo, guia de identidade visual, criativos anteriores)`,
+      `3. Vou configurar o acesso as suas contas de anuncios de forma segura`,
+      ``,
+      fields.length > 0 ? `Tudo correto acima? Ou gostaria de alterar algo?` : `Vamos comecar! *Qual e o nome da sua empresa?*`,
+    ].filter(Boolean).join('\n');
+  }
 
   if (language === 'es') {
     return [
       `Hola${name ? ` *${name}*` : ''}! Soy Sofia, tu account manager dedicada.`,
       ``,
-      `Tu codigo unico de cliente es: *${token}*`,
-      plan ? `Plan contratado: *${plan}*` : '',
+      `Tu codigo de cliente: *${token}*`,
+      `Plan: *${planInfo.label}* (hasta ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensajes/dia)`,
       ``,
       fields.length > 0 ? `Esto es lo que tengo de tu registro:\n${fieldsSummary}` : '',
+      ``,
+      `*Proximos pasos:*`,
+      `1. Te hare unas preguntas rapidas sobre tu negocio para personalizar tus campanas`,
+      `2. Te pedire tus materiales de marca (logo, guia de marca, creativos anteriores)`,
+      `3. Configurare el acceso a tus cuentas publicitarias de forma segura`,
       ``,
       fields.length > 0 ? `Esta todo correcto? O quieres hacer algun cambio?` : `Vamos a configurar todo para ti. Para empezar, *como se llama tu empresa?*`,
     ].filter(Boolean).join('\n');
@@ -862,12 +900,17 @@ export function buildPersonalizedWelcome(pendingData, language = 'en') {
   return [
     `Hey${name ? ` *${name}*` : ''}! I'm Sofia, your dedicated account manager.`,
     ``,
-    `Your unique client code is: *${token}*`,
-    plan ? `Plan: *${plan}*` : '',
+    `Your client code: *${token}*`,
+    `Plan: *${planInfo.label}* (up to ${planInfo.modules} modules, ${planInfo.dailyMessages} messages/day)`,
     ``,
     fields.length > 0 ? `Here's what I have from your signup:\n${fieldsSummary}` : '',
     ``,
-    fields.length > 0 ? `Is all of this correct? Or would you like to change anything?` : `Let's get everything set up. First up — *what's your company name?*`,
+    `*Here's what happens next:*`,
+    `1. I'll ask you a few quick questions about your business to personalize your campaigns`,
+    `2. I'll need your brand materials (logo, brand guidelines, past creatives)`,
+    `3. I'll set up secure access to your ad accounts`,
+    ``,
+    fields.length > 0 ? `Is everything above correct? Or would you like to change anything?` : `Let's get started! *What's your company name?*`,
   ].filter(Boolean).join('\n');
 }
 
