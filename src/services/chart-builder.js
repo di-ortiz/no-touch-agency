@@ -100,11 +100,14 @@ export async function createChart(opts = {}) {
   };
 
   const result = await googleSheets.formatSheet(spreadsheetId, [addChartReq]);
+  if (!result) {
+    throw new Error('Failed to create chart — Google Sheets API returned no response. Check service account credentials.');
+  }
 
   // Extract the chart ID from the response
   const chartId = result?.replies?.[0]?.addChart?.chart?.chartId;
   if (!chartId) {
-    log.warn('Chart created but could not extract chartId', { spreadsheetId });
+    throw new Error('Chart was created in the spreadsheet but the chart ID could not be extracted. The chart may still be visible in the spreadsheet.');
   }
 
   log.info(`Chart created: ${title}`, { spreadsheetId, chartId, type: chartType });

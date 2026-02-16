@@ -18,8 +18,13 @@ function getAuth() {
         scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
       });
     } else {
-      log.warn('Google credentials not configured; Analytics operations will fail');
-      return null;
+      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set)';
+      log.error('Google credentials MISSING', { credPath });
+      throw new Error(
+        `Google service account credentials not found. ` +
+        `GOOGLE_APPLICATION_CREDENTIALS is set to "${credPath}" but the file does NOT exist. ` +
+        `To fix: download the service account JSON key from console.cloud.google.com and save it to ${credPath}`
+      );
     }
   }
   return auth;

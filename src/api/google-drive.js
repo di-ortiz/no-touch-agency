@@ -23,8 +23,16 @@ function getAuth() {
         ],
       });
     } else {
-      log.warn('Google credentials not configured; Drive operations will fail');
-      return null;
+      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set)';
+      const fileExists = config.GOOGLE_APPLICATION_CREDENTIALS ? fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS) : false;
+      log.error('Google credentials MISSING', { credPath, fileExists });
+      throw new Error(
+        `Google service account credentials not found. ` +
+        `GOOGLE_APPLICATION_CREDENTIALS is set to "${credPath}" but the file ${fileExists ? 'cannot be read' : 'does NOT exist'}. ` +
+        `To fix: 1) Go to console.cloud.google.com → IAM → Service Accounts, ` +
+        `2) Create a service account with Drive/Docs API access, ` +
+        `3) Download the JSON key and save it to ${credPath}`
+      );
     }
   }
   return auth;

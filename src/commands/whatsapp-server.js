@@ -451,12 +451,19 @@ const CSA_TOOLS = [
       series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
     }, required: ['title', 'chartType', 'labels', 'series'] },
   },
+  // --- Diagnostics ---
+  {
+    name: 'check_credentials',
+    description: 'Check which API credentials are configured and working. Use this FIRST when any Google operation fails to diagnose the exact problem and give the user step-by-step instructions to fix it.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
 
 /**
  * Unified tool executor for both WhatsApp and Telegram CSA agents.
  */
 async function executeCSATool(toolName, toolInput) {
+  try {
   switch (toolName) {
     // --- Direct Ad Library tools (no client required) ---
     case 'search_ad_library': {
@@ -1228,8 +1235,65 @@ Return ONLY the JSON array, no other text.`;
       return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
     }
 
+    // --- Diagnostics ---
+    case 'check_credentials': {
+      const fs = (await import('fs')).default;
+      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set in .env)';
+      const credFileExists = config.GOOGLE_APPLICATION_CREDENTIALS ? fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS) : false;
+
+      const checks = {
+        google_service_account: {
+          envVar: 'GOOGLE_APPLICATION_CREDENTIALS',
+          value: credPath,
+          fileExists: credFileExists,
+          status: credFileExists ? 'OK' : 'MISSING',
+          fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
+          affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
+        },
+        google_ads: {
+          status: config.GOOGLE_ADS_DEVELOPER_TOKEN ? 'CONFIGURED' : 'NOT SET',
+          hasDevToken: !!config.GOOGLE_ADS_DEVELOPER_TOKEN,
+          hasClientId: !!config.GOOGLE_ADS_CLIENT_ID,
+          hasRefreshToken: !!config.GOOGLE_ADS_REFRESH_TOKEN,
+          hasManagerId: !!config.GOOGLE_ADS_MANAGER_ACCOUNT_ID,
+          affects: ['Google Ads campaigns/performance', 'Keyword Planner'],
+        },
+        meta: {
+          status: config.META_USER_ACCESS_TOKEN ? 'CONFIGURED' : 'NOT SET',
+          hasUserToken: !!config.META_USER_ACCESS_TOKEN,
+          hasAppId: !!config.META_APP_ID,
+          affects: ['Meta Ad Library (competitor ads)', 'Meta Ads (campaign management)'],
+        },
+        dataforseo: {
+          status: config.DATAFORSEO_LOGIN ? 'CONFIGURED' : 'NOT SET',
+          affects: ['SERP analysis', 'SEO competitors', 'Keyword gap', 'On-page audits'],
+        },
+        ga4: {
+          propertyId: config.GA4_PROPERTY_ID || '(not set)',
+          status: config.GA4_PROPERTY_ID ? 'CONFIGURED' : 'NOT SET',
+          affects: ['Google Analytics metrics, pages, traffic, audience'],
+        },
+      };
+
+      const issues = [];
+      if (!credFileExists) issues.push('CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
+      if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
+      if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
+      if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
+
+      return {
+        checks,
+        issues,
+        summary: issues.length === 0 ? 'All credentials configured!' : `${issues.length} issue(s) found — see details above`,
+      };
+    }
+
     default:
       return { error: `Unknown tool: ${toolName}` };
+  }
+  } catch (err) {
+    log.error(`Tool ${toolName} failed`, { error: err.message });
+    return { error: err.message };
   }
 }
 
