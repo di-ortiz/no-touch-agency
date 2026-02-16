@@ -24,6 +24,21 @@ async function main() {
   // Ensure data directory exists
   if (!fs.existsSync('data')) fs.mkdirSync('data', { recursive: true });
   if (!fs.existsSync('logs')) fs.mkdirSync('logs', { recursive: true });
+  if (!fs.existsSync('config')) fs.mkdirSync('config', { recursive: true });
+
+  // Write Google service account JSON from env var if the file doesn't exist
+  // (Railway and other cloud platforms can't have gitignored files, so we store the JSON as an env var)
+  const saPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON && !fs.existsSync(saPath)) {
+    try {
+      // Validate it's valid JSON before writing
+      JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      fs.writeFileSync(saPath, process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      log.info('Wrote Google service account JSON from env var', { path: saPath });
+    } catch (e) {
+      log.error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON', { error: e.message });
+    }
+  }
 
   // 1. Start WhatsApp webhook server
   startServer();
