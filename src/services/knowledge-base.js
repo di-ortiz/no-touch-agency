@@ -210,6 +210,13 @@ function getDb() {
 
     // Safe migration: add channel column to onboarding_sessions if missing
     try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add location and channels columns to clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN location TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN channels_have TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN channels_need TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_brand_assets_folder_id TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -290,8 +297,9 @@ export function createClient(data) {
   d.prepare(`
     INSERT INTO clients (id, name, hubspot_id, industry, website, description, target_audience,
       competitors, brand_voice, monthly_budget_cents, target_roas, target_cpa_cents, primary_kpi, goals,
-      meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status,
+      location, channels_have, channels_need, product_service)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.name, data.hubspotId || null, data.industry || null, data.website || null,
     data.description || null, data.targetAudience || null, competitors, data.brandVoice || null,
@@ -300,6 +308,8 @@ export function createClient(data) {
     data.metaAdAccountId || null, data.googleAdsCustomerId || null,
     data.tiktokAdvertiserId || null, data.twitterAdsAccountId || null,
     data.status || 'active',
+    data.location || null, data.channelsHave || null, data.channelsNeed || null,
+    data.productService || null,
   );
 
   log.info(`Created client: ${data.name}`, { id });

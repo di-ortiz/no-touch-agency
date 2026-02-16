@@ -4,6 +4,7 @@ import {
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
   createClient, getClient, updateClient,
+  saveMessage,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as leadsie from '../api/leadsie.js';
@@ -104,7 +105,7 @@ IMPORTANT: Only output the JSON. No other text.`;
  * Handle an incoming message from a client during onboarding.
  * Returns the reply message to send back.
  */
-export async function handleOnboardingMessage(phone, message) {
+export async function handleOnboardingMessage(phone, message, channel = 'whatsapp') {
   // Check if there's an active onboarding session
   let session = getOnboardingSession(phone);
   const contact = getContactByPhone(phone);
@@ -112,7 +113,7 @@ export async function handleOnboardingMessage(phone, message) {
 
   if (!session) {
     // No active session — this shouldn't normally happen, but start one
-    session = createOnboardingSession(phone);
+    session = createOnboardingSession(phone, channel);
   }
 
   log.info('Onboarding message received', {
@@ -120,6 +121,9 @@ export async function handleOnboardingMessage(phone, message) {
     step: session.current_step,
     contactName,
   });
+
+  // Save the user's message to conversation history for long-term memory
+  saveMessage(phone, channel, 'user', message);
 
   // Build prompt and send to Claude for natural extraction
   const systemPrompt = buildOnboardingPrompt(session, contactName);
@@ -179,10 +183,13 @@ export async function handleOnboardingMessage(phone, message) {
     // If onboarding is complete, finalize
     if (nextStep === 'complete') {
       const result = await finalizeOnboarding(phone, session.id, answers);
+      saveMessage(phone, channel, 'assistant', result.message);
       return result.message;
     }
 
-    return parsed.message || "Thanks for that! Let me ask you the next question...";
+    const reply = parsed.message || "Thanks for that! Let me ask you the next question...";
+    saveMessage(phone, channel, 'assistant', reply);
+    return reply;
   } catch (error) {
     log.error('Onboarding flow error', { error: error.message, phone });
     return "Apologies, I had a small hiccup. Could you repeat your last answer?";
@@ -199,6 +206,7 @@ async function finalizeOnboarding(phone, sessionId, answers) {
   const errors = [];
   let clientId = null;
   let driveFolderUrl = null;
+  let brandAssetsFolderUrl = null;
   let leadsieUrl = null;
 
   // Step 1: Create client in knowledge base
@@ -214,6 +222,10 @@ async function finalizeOnboarding(phone, sessionId, answers) {
       description: answers.product_service || answers.business_description || null,
       targetAudience: answers.target_audience || null,
       competitors,
+      location: answers.location || null,
+      channelsHave: answers.channels_have || null,
+      channelsNeed: answers.channels_need || null,
+      productService: answers.product_service || null,
     });
     clientId = client.id;
 
@@ -241,12 +253,14 @@ async function finalizeOnboarding(phone, sessionId, answers) {
         drive_reports_folder_id: folders.reports?.id,
         drive_creatives_folder_id: folders.creatives?.id,
         drive_plans_folder_id: folders.strategic_plans?.id,
+        drive_brand_assets_folder_id: folders.brand_assets?.id,
       });
 
       // Make the Brand Assets folder publicly linkable so client can upload
       if (folders.brand_assets?.id) {
         try {
           await googleDrive.shareFolderWithAnyone(folders.brand_assets.id);
+          brandAssetsFolderUrl = `https://drive.google.com/drive/folders/${folders.brand_assets.id}`;
         } catch (shareErr) {
           log.warn('Could not share brand assets folder', { error: shareErr.message });
         }
@@ -380,9 +394,17 @@ async function finalizeOnboarding(phone, sessionId, answers) {
 
   if (driveFolderUrl) {
     completionParts.push(`\n📁 *Your Google Drive folder is ready!*`);
-    completionParts.push(`Please share your *logo, brand guidelines, ad creatives, and any brand materials* here:`);
     completionParts.push(driveFolderUrl);
-    completionParts.push(`\nThe more you share, the better I can create content that matches your brand perfectly!`);
+
+    if (brandAssetsFolderUrl) {
+      completionParts.push(`\n🎨 *Upload your brand materials here:*`);
+      completionParts.push(brandAssetsFolderUrl);
+      completionParts.push(`\nPlease share your *logo, brand book/guidelines, color palette, fonts, past ad creatives, copy examples* — anything that helps me understand your brand.`);
+      completionParts.push(`\nThe more you share, the better I can create content that matches your brand perfectly!`);
+    } else {
+      completionParts.push(`\nPlease share your *logo, brand guidelines, ad creatives, and any brand materials* in the Brand Assets folder.`);
+      completionParts.push(`\nThe more you share, the better I can create content that matches your brand perfectly!`);
+    }
   }
 
   if (leadsieUrl) {
@@ -499,6 +521,16 @@ export function getClientContextByPhone(phone) {
     clientName: client?.name,
     industry: client?.industry,
     website: client?.website,
+    description: client?.description,
+    productService: client?.product_service,
+    targetAudience: client?.target_audience,
+    location: client?.location,
+    competitors: client?.competitors,
+    channelsHave: client?.channels_have,
+    channelsNeed: client?.channels_need,
+    brandVoice: client?.brand_voice,
+    driveFolderId: client?.drive_root_folder_id,
+    driveBrandAssetsFolderId: client?.drive_brand_assets_folder_id,
     onboardingComplete: client?.onboarding_complete === 1,
   };
 }

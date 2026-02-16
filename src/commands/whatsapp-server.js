@@ -1684,7 +1684,7 @@ async function handleTelegramClientMessage(chatId, message) {
     // Check for active onboarding via Telegram (uses chatId as identifier)
     if (hasActiveOnboarding(chatId)) {
       log.info('Routing Telegram to onboarding flow', { chatId });
-      const reply = await handleOnboardingMessage(chatId, actualMessage);
+      const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
       await sendTelegram(reply, chatId);
       return;
     }
@@ -1707,7 +1707,7 @@ async function handleTelegramClientMessage(chatId, message) {
       // Auto-start onboarding for new Telegram contact
       log.info('New Telegram contact, auto-starting onboarding', { chatId });
       createOnboardingSession(chatId, 'telegram');
-      const reply = await handleOnboardingMessage(chatId, actualMessage);
+      const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
       await sendTelegram(reply, chatId);
 
       // Notify owner
@@ -1717,32 +1717,55 @@ async function handleTelegramClientMessage(chatId, message) {
       return;
     }
 
-    // Known client — greet by name and use context
+    // Known client — greet by name and use context with full conversation history
     const contactName = clientContext?.contactName;
 
-    const clients = getAllClients();
-    const memoryContext = clientContext
-      ? `\nYou are talking to <b>${contactName}</b>${clientContext.clientName ? ` from ${clientContext.clientName}` : ''}. Always greet them by name.`
+    // Build rich client context for Sofia
+    const contextParts = [];
+    if (contactName) contextParts.push(`<b>Name:</b> ${contactName}`);
+    if (clientContext.clientName) contextParts.push(`<b>Business:</b> ${clientContext.clientName}`);
+    if (clientContext.industry) contextParts.push(`<b>Industry:</b> ${clientContext.industry}`);
+    if (clientContext.website) contextParts.push(`<b>Website:</b> ${clientContext.website}`);
+    if (clientContext.productService) contextParts.push(`<b>Product/Service:</b> ${clientContext.productService}`);
+    if (clientContext.targetAudience) contextParts.push(`<b>Target Audience:</b> ${clientContext.targetAudience}`);
+    if (clientContext.location) contextParts.push(`<b>Location:</b> ${clientContext.location}`);
+    if (clientContext.competitors?.length) contextParts.push(`<b>Competitors:</b> ${Array.isArray(clientContext.competitors) ? clientContext.competitors.join(', ') : clientContext.competitors}`);
+    if (clientContext.channelsHave) contextParts.push(`<b>Active Channels:</b> ${clientContext.channelsHave}`);
+    if (clientContext.channelsNeed) contextParts.push(`<b>Channels Interested In:</b> ${clientContext.channelsNeed}`);
+    if (clientContext.brandVoice) contextParts.push(`<b>Brand Voice:</b> ${clientContext.brandVoice}`);
+
+    const memoryContext = contextParts.length > 0
+      ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
-    const response = await askClaude({
-      systemPrompt: `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
+    const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
 ${memoryContext}
+
 Your role:
+- You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
+- Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
 - Be professional, friendly, and concise — like a trusted team member
-- If they ask about specific metrics you don't have, offer to have the account manager follow up
+- If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
 - Never share other clients' data
 - Keep responses under 500 words
-- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
-${contactName ? `- ALWAYS address the client by their name (${contactName}) naturally` : ''}
+- Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>`;
 
-Current clients on file: ${clients.map(c => c.name).join(', ')}`,
-      userMessage: `Client chat ID: ${chatId}\nMessage: ${actualMessage}`,
+    // Load conversation history so Sofia remembers past conversations
+    const history = getHistory(chatId);
+    addToHistory(chatId, 'user', message, 'telegram');
+
+    const messages = [...history, { role: 'user', content: message }];
+
+    const response = await askClaude({
+      systemPrompt,
+      messages,
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'client-chat',
     });
+
+    addToHistory(chatId, 'assistant', response.text, 'telegram');
     await sendTelegram(response.text, chatId);
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message });
@@ -1909,7 +1932,7 @@ async function handleClientMessage(from, message) {
     // 1. Check if client has an active onboarding session
     if (hasActiveOnboarding(from)) {
       log.info('Routing to onboarding flow', { from });
-      const reply = await handleOnboardingMessage(from, message);
+      const reply = await handleOnboardingMessage(from, message, 'whatsapp');
       await sendWhatsApp(reply, from);
       return;
     }
@@ -1930,7 +1953,7 @@ async function handleClientMessage(from, message) {
       // Auto-start onboarding for any new person
       log.info('New contact detected, auto-starting onboarding via WhatsApp', { from });
       createOnboardingSession(from, 'whatsapp');
-      const reply = await handleOnboardingMessage(from, message);
+      const reply = await handleOnboardingMessage(from, message, 'whatsapp');
       await sendWhatsApp(reply, from);
 
       // Notify owner
@@ -1940,33 +1963,55 @@ async function handleClientMessage(from, message) {
       return;
     }
 
-    // 3. Known client — greet by name and use context
+    // 3. Known client — greet by name and use context with full conversation history
     const contactName = clientContext?.contactName;
 
-    const clients = getAllClients();
-    const memoryContext = clientContext
-      ? `\nYou are talking to *${contactName}*${clientContext.clientName ? ` from ${clientContext.clientName}` : ''}. Always greet them by name.${clientContext.industry ? ` Industry: ${clientContext.industry}.` : ''}${clientContext.website ? ` Website: ${clientContext.website}.` : ''}`
+    // Build rich client context for Sofia
+    const contextParts = [];
+    if (contactName) contextParts.push(`*Name:* ${contactName}`);
+    if (clientContext.clientName) contextParts.push(`*Business:* ${clientContext.clientName}`);
+    if (clientContext.industry) contextParts.push(`*Industry:* ${clientContext.industry}`);
+    if (clientContext.website) contextParts.push(`*Website:* ${clientContext.website}`);
+    if (clientContext.productService) contextParts.push(`*Product/Service:* ${clientContext.productService}`);
+    if (clientContext.targetAudience) contextParts.push(`*Target Audience:* ${clientContext.targetAudience}`);
+    if (clientContext.location) contextParts.push(`*Location:* ${clientContext.location}`);
+    if (clientContext.competitors?.length) contextParts.push(`*Competitors:* ${Array.isArray(clientContext.competitors) ? clientContext.competitors.join(', ') : clientContext.competitors}`);
+    if (clientContext.channelsHave) contextParts.push(`*Active Channels:* ${clientContext.channelsHave}`);
+    if (clientContext.channelsNeed) contextParts.push(`*Channels Interested In:* ${clientContext.channelsNeed}`);
+    if (clientContext.brandVoice) contextParts.push(`*Brand Voice:* ${clientContext.brandVoice}`);
+
+    const memoryContext = contextParts.length > 0
+      ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
-    const response = await askClaude({
-      systemPrompt: `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
+    const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
 ${memoryContext}
+
 Your role:
+- You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
+- Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
 - Be professional, friendly, and concise — like a trusted team member
-- If they ask about specific metrics you don't have, offer to have the account manager follow up
+- If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
 - Never share other clients' data
 - Keep responses under 500 words
-- Use WhatsApp formatting: *bold*, _italic_
-${contactName ? `- ALWAYS address the client by their name (${contactName}) naturally` : ''}
+- Use WhatsApp formatting: *bold*, _italic_`;
 
-Current clients on file: ${clients.map(c => c.name).join(', ')}`,
-      userMessage: `Client phone: ${from}\nMessage: ${message}`,
+    // Load conversation history so Sofia remembers past conversations
+    const history = getHistory(from);
+    addToHistory(from, 'user', message, 'whatsapp');
+
+    const messages = [...history, { role: 'user', content: message }];
+
+    const response = await askClaude({
+      systemPrompt,
+      messages,
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'client-chat',
     });
 
+    addToHistory(from, 'assistant', response.text, 'whatsapp');
     await sendWhatsApp(response.text, from);
   } catch (error) {
     log.error('Client message handling failed', { from, error: error.message });
