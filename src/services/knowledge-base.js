@@ -218,7 +218,8 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN drive_brand_assets_folder_id TEXT"); } catch (e) { /* already exists */ }
 
-    // Safe migrations: add fields to pending_clients for Lovable form data
+    // Safe migrations: add language + extra form fields to pending_clients
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE pending_clients ADD COLUMN phone TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE pending_clients ADD COLUMN website TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE pending_clients ADD COLUMN business_name TEXT"); } catch (e) { /* already exists */ }
@@ -228,6 +229,8 @@ function getDb() {
     // Safe migrations: add plan and conversation_log_doc_id to clients
     try { db.exec("ALTER TABLE clients ADD COLUMN plan TEXT DEFAULT 'smb'"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN conversation_log_doc_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE client_contacts ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -276,7 +279,7 @@ export function getOnboardingSession(phone) {
   return row;
 }
 
-export function createOnboardingSession(phone, channel = 'whatsapp', prePopulated = {}) {
+export function createOnboardingSession(phone, channel = 'whatsapp', language = 'en', prePopulated = {}) {
   const d = getDb();
   const id = uuid();
   const answers = { ...prePopulated };
@@ -291,8 +294,8 @@ export function createOnboardingSession(phone, channel = 'whatsapp', prePopulate
     }
   }
 
-  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel) VALUES (?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', startStep, JSON.stringify(answers), channel);
-  return { id, phone, status: 'in_progress', currentStep: startStep, answers, channel };
+  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel, language) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', startStep, JSON.stringify(answers), channel, language);
+  return { id, phone, status: 'in_progress', currentStep: startStep, answers, channel, language };
 }
 
 export function updateOnboardingSession(id, updates) {
@@ -523,13 +526,11 @@ export function createPendingClient(data) {
   const d = getDb();
   const id = uuid();
   d.prepare(`
-    INSERT INTO pending_clients (id, token, email, plan, name, status, phone, website, business_name, business_description, product_service)
-    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-  `).run(
-    id, data.token, data.email || null, data.plan || null, data.name || null,
-    data.phone || null, data.website || null, data.businessName || null,
-    data.businessDescription || null, data.productService || null,
-  );
+    INSERT INTO pending_clients (id, token, email, plan, name, language, phone, website, business_name, business_description, product_service, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+  `).run(id, data.token, data.email || null, data.plan || null, data.name || null,
+    data.language || 'en', data.phone || null, data.website || null,
+    data.business_name || null, data.business_description || null, data.product_service || null);
   log.info('Created pending client', { id, token: data.token });
   return { id, token: data.token, ...data };
 }
@@ -580,9 +581,6 @@ const PLAN_DAILY_LIMITS = {
   enterprise: 200,
 };
 
-/**
- * Get the number of user messages sent today by a specific chat.
- */
 export function getClientMessageCountToday(chatId) {
   const d = getDb();
   const row = d.prepare(`
@@ -592,10 +590,6 @@ export function getClientMessageCountToday(chatId) {
   return row?.count || 0;
 }
 
-/**
- * Check if a client has exceeded their daily message limit based on their plan.
- * Returns { allowed, remaining, limit, plan, used }
- */
 export function checkClientMessageLimit(chatId) {
   const contact = getContactByPhone(chatId);
   if (!contact?.client_id) return { allowed: true, remaining: 999, limit: 999, plan: 'unknown', used: 0 };
@@ -614,11 +608,40 @@ export function checkClientMessageLimit(chatId) {
   };
 }
 
-/**
- * Get plan limits configuration.
- */
 export function getPlanLimits() {
   return { ...PLAN_DAILY_LIMITS };
+}
+
+// --- Client Contact Queries (for proactive workflows) ---
+
+export function getAllClientContacts() {
+  const d = getDb();
+  return d.prepare(`
+    SELECT cc.*, c.name as client_name, c.status as client_status, c.onboarding_complete
+    FROM client_contacts cc
+    LEFT JOIN clients c ON cc.client_id = c.id
+    WHERE cc.client_id IS NOT NULL AND (c.status = 'active' OR c.status IS NULL)
+    ORDER BY c.name
+  `).all();
+}
+
+export function getLastClientMessageTime(chatId) {
+  const d = getDb();
+  const row = d.prepare(`
+    SELECT created_at FROM conversation_history
+    WHERE chat_id = ? AND role = 'user'
+    ORDER BY id DESC LIMIT 1
+  `).get(chatId);
+  return row?.created_at ? new Date(row.created_at) : null;
+}
+
+export function getContactChannel(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  const session = d.prepare("SELECT channel FROM onboarding_sessions WHERE phone = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
+  if (session?.channel) return session.channel;
+  const pending = d.prepare("SELECT channel FROM pending_clients WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
+  return pending?.channel || 'whatsapp';
 }
 
 export default {
@@ -633,4 +656,5 @@ export default {
   createPendingClient, getPendingClientByToken, getPendingClientByChatId, activatePendingClient,
   saveMessage, getMessages, clearMessages,
   getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
+  getAllClientContacts, getLastClientMessageTime, getContactChannel,
 };

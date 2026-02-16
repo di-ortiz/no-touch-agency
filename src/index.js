@@ -12,6 +12,8 @@ import { runCompetitorMonitor } from './workflows/competitor-monitor.js';
 import { runCrossDepartmentDetection } from './workflows/cross-department.js';
 import { runLandingPageAnalysis } from './workflows/landing-page-analysis.js';
 import { runTestManager } from './workflows/ab-test-manager.js';
+import { runClientCheckIn } from './workflows/client-check-in.js';
+import { runClientMorningBriefing } from './workflows/client-morning-briefing.js';
 import { sendAlert } from './api/whatsapp.js';
 import config from './config.js';
 import fs from 'fs';
@@ -54,6 +56,8 @@ async function main() {
     competitorMonitor: runCompetitorMonitor,
     crossDepartment: runCrossDepartmentDetection,
     landingPageAnalysis: runLandingPageAnalysis,
+    clientCheckIn: runClientCheckIn,
+    clientMorningBriefing: runClientMorningBriefing,
   });
 
   // 3. Run ClickUp monitor at startup and schedule it

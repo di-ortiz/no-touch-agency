@@ -80,6 +80,8 @@ export function initializeSchedule(workflows) {
     creativeFatigue,
     landingPageAnalysis,
     crossDepartment,
+    clientCheckIn,
+    clientMorningBriefing,
   } = workflows;
 
   // Workflow 1: Morning Intelligence Briefing - 8 AM
@@ -112,6 +114,12 @@ export function initializeSchedule(workflows) {
 
   // Workflow 15: Landing Page Analysis - Monday 10 AM
   if (landingPageAnalysis) registerJob('landing-page-analysis', '0 10 * * 1', landingPageAnalysis);
+
+  // Client morning briefing - 8:30 AM daily (after owner briefing at 8 AM)
+  if (clientMorningBriefing) registerJob('client-morning-briefing', '30 8 * * *', clientMorningBriefing);
+
+  // Client check-in - 9 AM daily (proactive follow-ups)
+  if (clientCheckIn) registerJob('client-check-in', '0 9 * * *', clientCheckIn);
 
   log.info(`Initialized ${jobs.size} scheduled jobs`);
 }

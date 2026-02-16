@@ -1,14 +1,14 @@
 import express from 'express';
 import { askClaude } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
-import { sendTelegram, sendAlert as sendTelegramAlert } from '../api/telegram.js';
+import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument } from '../api/whatsapp.js';
+import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, activatePendingClient,
-  saveMessage, getMessages, clearMessages, createOnboardingSession,
+  saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
 } from '../services/knowledge-base.js';
-import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone } from '../services/client-onboarding-flow.js';
+import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
 import crypto from 'crypto';
 import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
@@ -52,6 +52,46 @@ import rateLimit from 'express-rate-limit';
 
 const log = logger.child({ workflow: 'whatsapp-command' });
 
+// Helper: send a "thinking" indicator on the correct channel
+async function sendThinkingIndicator(channel, chatId, message) {
+  try {
+    if (channel === 'telegram') {
+      await sendTelegramThinking(chatId, message);
+    } else {
+      await sendWhatsAppThinking(chatId, message);
+    }
+  } catch (e) {
+    log.debug('Failed to send thinking indicator', { error: e.message });
+  }
+}
+
+// Helper: deliver generated media (images/videos) inline after tool execution
+async function deliverMediaInline(toolName, result, channel, chatId) {
+  try {
+    if (toolName === 'generate_ad_images' && result.images) {
+      for (const img of result.images) {
+        if (!img.url || img.error) continue;
+        const caption = img.label || img.format || 'Ad image';
+        if (channel === 'telegram') {
+          await sendTelegramPhoto(img.url, caption, chatId);
+        } else {
+          await sendWhatsAppImage(img.url, caption, chatId);
+        }
+      }
+    }
+    if (toolName === 'generate_ad_video' && result.videoUrl) {
+      const caption = `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim();
+      if (channel === 'telegram') {
+        await sendTelegramVideo(result.videoUrl, caption, chatId);
+      } else {
+        await sendWhatsAppVideo(result.videoUrl, caption, chatId);
+      }
+    }
+  } catch (e) {
+    log.warn('Failed to deliver media inline', { error: e.message, toolName });
+  }
+}
+
 const app = express();
 app.use(helmet());
 app.use(express.urlencoded({ extended: false }));
@@ -91,13 +131,13 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    const { email, plan, name, phone, website, business_name, business_description, product_service } = req.body || {};
+    const { email, plan, name, language, phone, website, business_name, business_description, product_service } = req.body || {};
 
     // Generate unique 12-char token
     const token = crypto.randomBytes(6).toString('hex');
 
-    // Store in DB with all Lovable form data
-    createPendingClient({ token, email, plan, name, phone, website, businessName: business_name, businessDescription: business_description, productService: product_service });
+    // Store in DB with all form fields
+    createPendingClient({ token, email, plan, name, language: language || 'en', phone, website, business_name, business_description, product_service });
 
     // Build WhatsApp deep link
     const waPhone = config.WHATSAPP_BUSINESS_PHONE || config.WHATSAPP_OWNER_PHONE;
@@ -119,7 +159,7 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    log.info('Client init created', { token, email, plan, name, website, business_name });
+    log.info('Client init created', { token, email, plan, name, language: language || 'en', website, business_name });
 
     res.json({
       success: true,
@@ -1608,9 +1648,17 @@ async function handleTelegramCommand(message, chatId) {
       for (const tool of response.toolUse) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
+
+        // Send thinking message before expensive tools
+        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
+        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
+        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
+
         try {
           const result = await executeCSATool(tool.name, tool.input);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          // Deliver generated media inline (images, videos)
+          await deliverMediaInline(tool.name, result, 'telegram', chatId);
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -1672,15 +1720,16 @@ async function handleTelegramClientMessage(chatId, message) {
   try {
     // Handle /start TOKEN from Telegram deep link
     let actualMessage = message;
-    let startPending = null;
+    let pendingData = null;
     const startMatch = message.match(/^\/start\s+([a-f0-9]{12})$/i);
     if (startMatch) {
-      startPending = getPendingClientByToken(startMatch[1]);
-      if (startPending) {
-        activatePendingClient(startPending.token, chatId, 'telegram');
-        log.info('Activated pending client from Telegram /start', { token: startPending.token, chatId });
+      const pending = getPendingClientByToken(startMatch[1]);
+      if (pending) {
+        activatePendingClient(pending.token, chatId, 'telegram');
+        pendingData = pending;
+        log.info('Activated pending client from Telegram /start', { token: pending.token, chatId });
       }
-      actualMessage = `Hi Sofia! I just signed up.${startPending?.name ? ` My name is ${startPending.name}` : ''}`;
+      actualMessage = `Hi Sofia! I just signed up.${pendingData?.name ? ` My name is ${pendingData.name}` : ''}`;
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)
@@ -1695,42 +1744,52 @@ async function handleTelegramClientMessage(chatId, message) {
     const clientContext = getClientContextByPhone(chatId);
     if (!clientContext) {
       // Check for token in message (non /start format)
-      let pending = startPending;
-      if (!startMatch) {
+      if (!startMatch && !pendingData) {
         const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
         if (tokenMatch) {
-          pending = getPendingClientByToken(tokenMatch[1]);
-          if (pending) {
-            activatePendingClient(pending.token, chatId, 'telegram');
-            log.info('Activated pending client from token (Telegram)', { token: pending.token, chatId });
+          const found = getPendingClientByToken(tokenMatch[1]);
+          if (found) {
+            activatePendingClient(found.token, chatId, 'telegram');
+            pendingData = found;
+            log.info('Activated pending client from token (Telegram)', { token: found.token, chatId });
           }
         }
       }
 
-      // Pre-populate onboarding with Lovable form data if available
-      const prePopulated = {};
-      if (pending) {
-        if (pending.name) prePopulated.name = pending.name;
-        if (pending.website) prePopulated.website = pending.website;
-        if (pending.business_name) prePopulated.business_name = pending.business_name;
-        if (pending.business_description) prePopulated.business_description = pending.business_description;
-        if (pending.product_service) prePopulated.product_service = pending.product_service;
+      const lang = pendingData?.language || 'en';
+      log.info('New Telegram contact, auto-starting onboarding', { chatId, language: lang });
+
+      if (pendingData && pendingData.name) {
+        // Client came from website — personalized welcome + confirmation
+        try {
+          createContact({ phone: chatId, name: pendingData.name, email: pendingData.email });
+        } catch (e) { /* might already exist */ }
+
+        const prefillAnswers = {};
+        if (pendingData.name) prefillAnswers.name = pendingData.name;
+        if (pendingData.website) prefillAnswers.website = pendingData.website;
+        if (pendingData.business_name) prefillAnswers.business_name = pendingData.business_name;
+        if (pendingData.business_description) prefillAnswers.business_description = pendingData.business_description;
+        if (pendingData.product_service) prefillAnswers.product_service = pendingData.product_service;
+        if (pendingData.email) prefillAnswers.email = pendingData.email;
+
+        const session = createOnboardingSession(chatId, 'telegram', lang, prefillAnswers);
+        const hasFormData = Object.keys(prefillAnswers).length > 1;
+        if (hasFormData) {
+          updateOnboardingSession(session.id, { currentStep: 'confirm_details' });
+        }
+
+        const welcome = buildPersonalizedWelcome(pendingData, lang);
+        await sendTelegram(welcome, chatId);
+      } else {
+        createOnboardingSession(chatId, 'telegram', lang);
+        const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
+        await sendTelegram(reply, chatId);
       }
-
-      // Auto-start onboarding for new Telegram contact (pre-populated with Lovable data)
-      log.info('New Telegram contact, auto-starting onboarding', { chatId, hasLovableData: !!pending });
-      createOnboardingSession(chatId, 'telegram', prePopulated);
-
-      if (pending?.name) {
-        createContact({ phone: chatId, name: pending.name });
-      }
-
-      const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
-      await sendTelegram(reply, chatId);
 
       // Notify owner
       try {
-        await sendWhatsApp(`📥 *New client started onboarding via Telegram*\nChat ID: ${chatId}${pending?.name ? `\nName: ${pending.name}` : ''}${pending?.plan ? `\nPlan: ${pending.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
+        await sendWhatsApp(`📥 *New client started onboarding via Telegram*\nChat ID: ${chatId}${pendingData?.name ? `\nName: ${pendingData.name}` : ''}${pendingData?.plan ? `\nPlan: ${pendingData.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
       } catch (e) { /* best effort */ }
       return;
     }
@@ -1922,9 +1981,17 @@ async function handleCommand(message) {
       for (const tool of response.toolUse) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
+
+        // Send thinking message before expensive tools
+        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', ownerChatId, 'Generating your ad images... This might take a minute.');
+        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', ownerChatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
+        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', ownerChatId, 'Building your full creative package... Give me a few minutes!');
+
         try {
           const result = await executeCSATool(tool.name, tool.input);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          // Deliver generated media inline (images, videos)
+          await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -1981,41 +2048,55 @@ async function handleClientMessage(from, message) {
     const clientContext = getClientContextByPhone(from);
     if (!clientContext) {
       // New person — check for a sign-up token in the message
-      let pending = null;
+      let pendingData = null;
       const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
       if (tokenMatch) {
-        pending = getPendingClientByToken(tokenMatch[1]);
-        if (pending) {
-          activatePendingClient(pending.token, from, 'whatsapp');
-          log.info('Activated pending client from token', { token: pending.token, from });
+        const found = getPendingClientByToken(tokenMatch[1]);
+        if (found) {
+          activatePendingClient(found.token, from, 'whatsapp');
+          pendingData = found;
+          log.info('Activated pending client from token', { token: found.token, from });
         }
       }
 
-      // Pre-populate onboarding with Lovable form data if available
-      const prePopulated = {};
-      if (pending) {
-        if (pending.name) prePopulated.name = pending.name;
-        if (pending.website) prePopulated.website = pending.website;
-        if (pending.business_name) prePopulated.business_name = pending.business_name;
-        if (pending.business_description) prePopulated.business_description = pending.business_description;
-        if (pending.product_service) prePopulated.product_service = pending.product_service;
+      const lang = pendingData?.language || 'en';
+      log.info('New contact detected, auto-starting onboarding via WhatsApp', { from, language: lang });
+
+      if (pendingData && pendingData.name) {
+        // Client came from website with form data — personalized welcome + confirmation
+        try {
+          createContact({ phone: from, name: pendingData.name, email: pendingData.email });
+        } catch (e) { /* might already exist */ }
+
+        // Pre-populate answers with all known form data
+        const prefillAnswers = {};
+        if (pendingData.name) prefillAnswers.name = pendingData.name;
+        if (pendingData.website) prefillAnswers.website = pendingData.website;
+        if (pendingData.business_name) prefillAnswers.business_name = pendingData.business_name;
+        if (pendingData.business_description) prefillAnswers.business_description = pendingData.business_description;
+        if (pendingData.product_service) prefillAnswers.product_service = pendingData.product_service;
+        if (pendingData.email) prefillAnswers.email = pendingData.email;
+
+        // Create session with pre-populated data, then override to confirm_details step
+        const session = createOnboardingSession(from, 'whatsapp', lang, prefillAnswers);
+        const hasFormData = Object.keys(prefillAnswers).length > 1;
+        if (hasFormData) {
+          updateOnboardingSession(session.id, { currentStep: 'confirm_details' });
+        }
+
+        // Send personalized welcome with all form data for confirmation
+        const welcome = buildPersonalizedWelcome(pendingData, lang);
+        await sendWhatsApp(welcome, from);
+      } else {
+        // No pending data — generic onboarding flow
+        createOnboardingSession(from, 'whatsapp', lang);
+        const reply = await handleOnboardingMessage(from, message, 'whatsapp');
+        await sendWhatsApp(reply, from);
       }
-
-      // Auto-start onboarding (pre-populated with Lovable data if token was provided)
-      log.info('New contact detected, auto-starting onboarding via WhatsApp', { from, hasLovableData: !!pending });
-      createOnboardingSession(from, 'whatsapp', prePopulated);
-
-      // If we have the name from Lovable, create the contact early so Sofia knows them
-      if (pending?.name) {
-        createContact({ phone: from, name: pending.name });
-      }
-
-      const reply = await handleOnboardingMessage(from, message, 'whatsapp');
-      await sendWhatsApp(reply, from);
 
       // Notify owner
       try {
-        await sendWhatsApp(`📥 *New client started onboarding via WhatsApp*\nPhone: ${from}${pending?.name ? `\nName: ${pending.name}` : ''}${pending?.plan ? `\nPlan: ${pending.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
+        await sendWhatsApp(`📥 *New client started onboarding via WhatsApp*\nPhone: ${from}${pendingData?.name ? `\nName: ${pendingData.name}` : ''}${pendingData?.plan ? `\nPlan: ${pendingData.plan}` : ''}\nFirst message: "${message.substring(0, 100)}"`);
       } catch (e) { /* best effort */ }
       return;
     }

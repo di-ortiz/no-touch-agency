@@ -123,6 +123,105 @@ export async function sendApprovalRequest(action) {
   return action.id;
 }
 
+/**
+ * Send a "thinking" message to indicate Sofia is working on something.
+ */
+export async function sendThinkingMessage(to, message) {
+  const text = message || 'Give me a moment... I\'m working on this for you.';
+  return sendWhatsApp(text, to);
+}
+
+/**
+ * Send a WhatsApp image message via Meta Cloud API.
+ * Falls back to sending the URL as text if media delivery fails.
+ */
+export async function sendWhatsAppImage(imageUrl, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  try {
+    await rateLimited('whatsapp', async () => {
+      return retry(async () => {
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'image',
+            image: { link: imageUrl, ...(caption ? { caption } : {}) },
+          },
+          { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+        log.debug('WhatsApp image sent', { to: recipient });
+        return result.data;
+      }, { retries: 2, label: 'WhatsApp image send' });
+    });
+  } catch (error) {
+    log.warn('WhatsApp image send failed, falling back to text URL', { error: error.message });
+    await sendWhatsApp(`${caption ? `${caption}\n` : ''}${imageUrl}`, to);
+  }
+}
+
+/**
+ * Send a WhatsApp video message via Meta Cloud API.
+ */
+export async function sendWhatsAppVideo(videoUrl, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  try {
+    await rateLimited('whatsapp', async () => {
+      return retry(async () => {
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'video',
+            video: { link: videoUrl, ...(caption ? { caption } : {}) },
+          },
+          { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+        log.debug('WhatsApp video sent', { to: recipient });
+        return result.data;
+      }, { retries: 2, label: 'WhatsApp video send' });
+    });
+  } catch (error) {
+    log.warn('WhatsApp video send failed, falling back to text URL', { error: error.message });
+    await sendWhatsApp(`${caption ? `${caption}\n` : ''}${videoUrl}`, to);
+  }
+}
+
+/**
+ * Send a WhatsApp document message via Meta Cloud API.
+ */
+export async function sendWhatsAppDocument(documentUrl, filename, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  try {
+    await rateLimited('whatsapp', async () => {
+      return retry(async () => {
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'document',
+            document: { link: documentUrl, filename: filename || 'document.pdf', ...(caption ? { caption } : {}) },
+          },
+          { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+        log.debug('WhatsApp document sent', { to: recipient, filename });
+        return result.data;
+      }, { retries: 2, label: 'WhatsApp document send' });
+    });
+  } catch (error) {
+    log.warn('WhatsApp document send failed, falling back to text URL', { error: error.message });
+    await sendWhatsApp(`${caption ? `${caption}\n` : ''}${documentUrl}`, to);
+  }
+}
+
 function splitMessage(text, maxLength) {
   if (text.length <= maxLength) return [text];
   const chunks = [];
@@ -143,4 +242,4 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendWhatsApp, sendAlert, sendMorningBriefing, sendApprovalRequest };
+export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };

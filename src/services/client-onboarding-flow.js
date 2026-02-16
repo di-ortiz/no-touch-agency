@@ -13,7 +13,18 @@ import { sendWhatsApp } from '../api/whatsapp.js';
 import { auditLog } from '../services/cost-tracker.js';
 import config from '../config.js';
 
+import { sendTelegram } from '../api/telegram.js';
+
 const log = logger.child({ workflow: 'onboarding-flow' });
+
+const LANGUAGE_NAMES = {
+  en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French',
+  de: 'German', it: 'Italian', nl: 'Dutch', ja: 'Japanese', zh: 'Chinese',
+};
+
+function getLanguageName(code) {
+  return LANGUAGE_NAMES[code] || 'English';
+}
 
 /**
  * Onboarding steps in order.
@@ -46,20 +57,39 @@ function getNextStep(currentStep) {
 /**
  * The Sofia onboarding system prompt — she guides the client conversationally.
  */
-function buildOnboardingPrompt(session, contactName) {
+function buildOnboardingPrompt(session, contactName, language = 'en') {
   const answers = session.answers || {};
   const currentStep = session.current_step;
 
   const collectedSoFar = Object.entries(answers)
+    .filter(([k]) => k !== 'confirm_details')
     .map(([k, v]) => `- ${k}: ${v}`)
     .join('\n');
 
-  return `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You are currently onboarding a new client through WhatsApp.
+  const langInstruction = language && language !== 'en'
+    ? `\n\nLANGUAGE: You MUST respond ENTIRELY in ${getLanguageName(language)}. All messages, questions, and acknowledgments must be in ${getLanguageName(language)}.\n`
+    : '';
 
+  // Determine which steps still need answers
+  const allStepKeys = ONBOARDING_STEPS.map(s => s.key);
+  const missingSteps = allStepKeys.filter(k => !answers[k]);
+
+  // Special handling for confirm_details step
+  const confirmDetailsInstruction = currentStep === 'confirm_details'
+    ? `\nSPECIAL STEP — CONFIRM DETAILS:
+The client just signed up through the website and we already have some of their information.
+Your job is to check if the client confirms or wants to change anything.
+- If they CONFIRM (yes, correct, looks good, etc.) → set next_step to "${missingSteps[0] || 'complete'}" and move on.
+- If they want to CHANGE something → extract the updated fields into "extracted", present the correction, and set next_step to "confirm_details" again until they confirm.
+- Do NOT re-ask for information already collected.\n`
+    : '';
+
+  return `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You are currently onboarding a new client through WhatsApp.
+${langInstruction}
 ${contactName ? `The client's name is *${contactName}*. Always address them by name naturally.` : ''}
 
 CURRENT ONBOARDING STEP: ${currentStep}
-
+${confirmDetailsInstruction}
 INFORMATION ALREADY COLLECTED:
 ${collectedSoFar || '(none yet)'}
 
@@ -86,6 +116,7 @@ RULES:
 - Keep your messages concise — 2-3 sentences max.
 - If they seem confused, clarify with an example.
 - NEVER ask for information you already have (check the collected info above).
+- SKIP any step that is already answered — jump to the next unanswered step.
 
 RESPONSE FORMAT:
 You MUST respond with valid JSON in this exact format:
@@ -96,7 +127,7 @@ You MUST respond with valid JSON in this exact format:
 }
 
 The "extracted" object should contain any NEW information you extracted from the client's latest message.
-The "next_step" should be the next field to ask about, or "complete" if all info is collected.
+The "next_step" should be the NEXT UNANSWERED field to ask about, or "complete" if all info is collected.
 The "message" is what gets sent to the client.
 
 IMPORTANT: Only output the JSON. No other text.`;
@@ -127,7 +158,8 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
   saveMessage(phone, channel, 'user', message);
 
   // Build prompt and send to Claude for natural extraction
-  const systemPrompt = buildOnboardingPrompt(session, contactName);
+  const sessionLang = session.language || 'en';
+  const systemPrompt = buildOnboardingPrompt(session, contactName, sessionLang);
 
   try {
     const response = await askClaude({
@@ -181,8 +213,16 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
       status: nextStep === 'complete' ? 'completed' : 'in_progress',
     });
 
-    // If onboarding is complete, finalize
+    // If onboarding is complete, send thinking message then finalize
     if (nextStep === 'complete') {
+      const channel = session.channel || 'whatsapp';
+      const thinkingMsg = sessionLang === 'es'
+        ? 'Casi listo! Estoy preparando tu carpeta de Google Drive, documentos y accesos... Dame un momento.'
+        : 'Almost there! Setting up your Google Drive, intake docs, and access requests... Give me a moment.';
+      try {
+        const send = channel === 'telegram' ? sendTelegram : sendWhatsApp;
+        await send(thinkingMsg, phone);
+      } catch (e) { /* best effort */ }
       const result = await finalizeOnboarding(phone, session.id, answers);
       saveMessage(phone, channel, 'assistant', result.message);
       return result.message;
@@ -578,9 +618,55 @@ export function getClientContextByPhone(phone) {
   };
 }
 
+/**
+ * Build the personalized welcome message that presents all form data for confirmation.
+ * Sent when a client arrives via token (already signed up on the website).
+ */
+export function buildPersonalizedWelcome(pendingData, language = 'en') {
+  const name = pendingData.name || '';
+  const token = pendingData.token || '';
+  const plan = pendingData.plan || '';
+
+  // Collect known fields for the summary
+  const fields = [];
+  if (pendingData.website) fields.push({ label: language === 'es' ? 'Sitio web' : 'Website', value: pendingData.website });
+  if (pendingData.business_name) fields.push({ label: language === 'es' ? 'Empresa' : 'Business', value: pendingData.business_name });
+  if (pendingData.business_description) fields.push({ label: language === 'es' ? 'Descripcion' : 'Description', value: pendingData.business_description });
+  if (pendingData.product_service) fields.push({ label: language === 'es' ? 'Producto/Servicio' : 'Product/Service', value: pendingData.product_service });
+  if (pendingData.email) fields.push({ label: 'Email', value: pendingData.email });
+
+  const fieldsSummary = fields.map(f => `- *${f.label}:* ${f.value}`).join('\n');
+
+  if (language === 'es') {
+    return [
+      `Hola${name ? ` *${name}*` : ''}! Soy Sofia, tu account manager dedicada.`,
+      ``,
+      `Tu codigo unico de cliente es: *${token}*`,
+      plan ? `Plan contratado: *${plan}*` : '',
+      ``,
+      fields.length > 0 ? `Esto es lo que tengo de tu registro:\n${fieldsSummary}` : '',
+      ``,
+      fields.length > 0 ? `Esta todo correcto? O quieres hacer algun cambio?` : `Vamos a configurar todo para ti. Para empezar, *como se llama tu empresa?*`,
+    ].filter(Boolean).join('\n');
+  }
+
+  // Default: English
+  return [
+    `Hey${name ? ` *${name}*` : ''}! I'm Sofia, your dedicated account manager.`,
+    ``,
+    `Your unique client code is: *${token}*`,
+    plan ? `Plan: *${plan}*` : '',
+    ``,
+    fields.length > 0 ? `Here's what I have from your signup:\n${fieldsSummary}` : '',
+    ``,
+    fields.length > 0 ? `Is all of this correct? Or would you like to change anything?` : `Let's get everything set up. First up — *what's your company name?*`,
+  ].filter(Boolean).join('\n');
+}
+
 export default {
   handleOnboardingMessage,
   initiateOnboarding,
   hasActiveOnboarding,
   getClientContextByPhone,
+  buildPersonalizedWelcome,
 };

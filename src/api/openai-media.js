@@ -190,10 +190,16 @@ export async function generateVideo(opts = {}) {
       const maxWaitMs = 300000; // 5 min max
       const pollIntervalMs = 10000;
       let waited = 0;
+      const onProgress = opts.onProgress;
 
       while (waited < maxWaitMs) {
         await sleep(pollIntervalMs);
         waited += pollIntervalMs;
+
+        // Send progress updates via callback (every ~60s)
+        if (onProgress && waited > 0 && waited % 60000 < pollIntervalMs) {
+          try { await onProgress({ waited, maxWait: maxWaitMs, status: 'generating' }); } catch (e) { /* ignore */ }
+        }
 
         try {
           const status = await openai.responses.retrieve(response.id);
@@ -208,16 +214,25 @@ export async function generateVideo(opts = {}) {
             o => o.type === 'video_generation_call' && o.status === 'failed'
           );
           if (failed) {
-            throw new Error(`Sora 2 video generation failed: ${failed.error || 'Unknown error'}`);
+            const errorDetail = failed.error?.message || failed.error || 'Unknown error';
+            throw new Error(`Sora 2 video generation failed: ${errorDetail}. This can happen due to content policy violations, high demand, or an unsupported prompt. Job ID: ${response.id}`);
           }
+          log.debug('Polling Sora 2 status...', { waited, jobId: response.id });
         } catch (e) {
           if (e.message.includes('failed')) throw e;
-          log.debug('Polling Sora 2 status...', { waited });
+          // Handle rate limiting during polling
+          if (e.status === 429 || e.response?.status === 429) {
+            log.warn('Rate limited while polling Sora 2, waiting longer...', { waited });
+            await sleep(30000);
+            waited += 30000;
+            continue;
+          }
+          log.debug('Polling Sora 2 status (transient error)...', { waited, error: e.message });
         }
       }
 
       if (!videoResult) {
-        throw new Error('Sora 2 video generation timed out after 5 minutes');
+        throw new Error(`Sora 2 video generation timed out after ${maxWaitMs / 60000} minutes. The video may still be generating. Job ID: ${response.id}. You can try again with a different prompt.`);
       }
 
       // Track cost (Sora 2 Standard: $0.10/sec = 10 cents/sec)
