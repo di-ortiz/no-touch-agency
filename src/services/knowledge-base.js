@@ -231,6 +231,17 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN conversation_log_doc_id TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE client_contacts ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: expanded onboarding fields on clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN pricing TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN pains TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN company_size TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN sales_cycle TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN avg_transaction_value TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN current_campaigns TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN sales_process TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN additional_info TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_profile_sheet_id TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -285,7 +296,12 @@ export function createOnboardingSession(phone, channel = 'whatsapp', language = 
   const answers = { ...prePopulated };
 
   // Determine the first step that still needs an answer
-  const allSteps = ['name', 'business_name', 'website', 'business_description', 'product_service', 'target_audience', 'location', 'competitors', 'channels_have', 'channels_need'];
+  const allSteps = [
+    'name', 'business_name', 'website', 'business_description', 'product_service',
+    'pricing', 'avg_transaction_value', 'target_audience', 'location', 'competitors',
+    'company_size', 'sales_process', 'sales_cycle', 'channels_have', 'channels_need',
+    'current_campaigns', 'monthly_budget', 'goals', 'pains', 'additional_info',
+  ];
   let startStep = 'name';
   for (const step of allSteps) {
     if (!answers[step]) {
@@ -324,8 +340,9 @@ export function createClient(data) {
     INSERT INTO clients (id, name, hubspot_id, industry, website, description, target_audience,
       competitors, brand_voice, monthly_budget_cents, target_roas, target_cpa_cents, primary_kpi, goals,
       meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status,
-      location, channels_have, channels_need, product_service, plan)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      location, channels_have, channels_need, product_service, plan,
+      pricing, pains, company_size, sales_cycle, avg_transaction_value, current_campaigns, sales_process, additional_info)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.name, data.hubspotId || null, data.industry || null, data.website || null,
     data.description || null, data.targetAudience || null, competitors, data.brandVoice || null,
@@ -336,6 +353,9 @@ export function createClient(data) {
     data.status || 'active',
     data.location || null, data.channelsHave || null, data.channelsNeed || null,
     data.productService || null, data.plan || 'smb',
+    data.pricing || null, data.pains || null, data.companySize || null,
+    data.salesCycle || null, data.avgTransactionValue || null,
+    data.currentCampaigns || null, data.salesProcess || null, data.additionalInfo || null,
   );
 
   log.info(`Created client: ${data.name}`, { id });
@@ -500,6 +520,14 @@ export function buildClientContext(clientId) {
   context += `Primary KPI: ${client.primary_kpi || 'N/A'}\n`;
   context += `Brand Voice: ${client.brand_voice || 'N/A'}\n`;
   context += `Competitors: ${(client.competitors || []).join(', ') || 'N/A'}\n`;
+  if (client.pricing) context += `Pricing: ${client.pricing}\n`;
+  if (client.avg_transaction_value) context += `Avg Transaction Value: ${client.avg_transaction_value}\n`;
+  if (client.company_size) context += `Company Size: ${client.company_size}\n`;
+  if (client.sales_process) context += `Sales Process: ${client.sales_process}\n`;
+  if (client.sales_cycle) context += `Sales Cycle: ${client.sales_cycle}\n`;
+  if (client.current_campaigns) context += `Current Campaigns: ${client.current_campaigns}\n`;
+  if (client.pains) context += `Pains/Gaps: ${client.pains}\n`;
+  if (client.additional_info) context += `Additional Info: ${client.additional_info}\n`;
 
   if (history.length > 0) {
     context += `\n## Recent Campaign History (last ${history.length}):\n`;
