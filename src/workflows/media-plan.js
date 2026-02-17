@@ -1,6 +1,6 @@
 import logger from '../utils/logger.js';
 import { deepAnalysis } from '../api/anthropic.js';
-import { sendWhatsApp } from '../api/whatsapp.js';
+import { notifyOwnerMessage as sendWhatsApp } from '../utils/notify-owner.js';
 import * as googleDrive from '../api/google-drive.js';
 import {
   getClient,

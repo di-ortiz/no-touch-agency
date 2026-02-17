@@ -1,5 +1,5 @@
 import logger from '../utils/logger.js';
-import { sendAlert, sendWhatsApp } from '../api/whatsapp.js';
+import { notifyOwnerAlert as sendAlert, notifyOwnerMessage as sendWhatsApp } from '../utils/notify-owner.js';
 import * as clickup from '../api/clickup.js';
 import config from '../config.js';
 

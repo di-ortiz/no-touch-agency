@@ -1,5 +1,5 @@
 import logger from '../utils/logger.js';
-import { sendAlert } from '../api/whatsapp.js';
+import { notifyOwnerAlert as sendAlert } from '../utils/notify-owner.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as googleAds from '../api/google-ads.js';
 import * as tiktokAds from '../api/tiktok-ads.js';
