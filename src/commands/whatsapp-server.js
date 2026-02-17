@@ -1565,7 +1565,30 @@ app.post('/webhook/telegram', async (req, res) => {
     log.info('Telegram message received', { chatId, body: body.substring(0, 100) });
 
     if (isOwner) {
-      // Owner gets full command access — reuse existing command handler, send via Telegram
+      // Check if owner has an active onboarding session (e.g., testing client flow)
+      if (hasActiveOnboarding(chatId)) {
+        log.info('Owner has active onboarding — routing to onboarding flow', { chatId });
+        const result = await handleOnboardingMessage(chatId, body, 'telegram');
+        if (Array.isArray(result)) {
+          for (const msg of result) await sendTelegram(msg, chatId);
+        } else if (result) {
+          await sendTelegram(result, chatId);
+        }
+        return;
+      }
+
+      // Check if this is a /start TOKEN deep link — owner may be testing as a client
+      const ownerStartMatch = body.match(/^\/start\s+([a-f0-9]{12})$/i);
+      if (ownerStartMatch) {
+        const pending = getPendingClientByToken(ownerStartMatch[1]);
+        if (pending) {
+          log.info('Owner triggered client onboarding via /start token', { chatId, token: pending.token });
+          await handleTelegramClientMessage(chatId, body);
+          return;
+        }
+      }
+
+      // Normal owner command access
       await handleTelegramCommand(body, chatId);
     } else {
       // Non-owner messages get AI-powered responses via Telegram
