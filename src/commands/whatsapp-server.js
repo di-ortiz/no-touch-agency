@@ -38,6 +38,7 @@ import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
+import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
 import * as googleTransparency from '../api/google-transparency.js';
@@ -52,6 +53,10 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
 const log = logger.child({ workflow: 'whatsapp-command' });
+
+// Token regex: matches both legacy 12-char hex tokens AND UUID v4 format
+const TOKEN_RE_START = /^\/start\s+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{12})$/i;
+const TOKEN_RE_INLINE = /\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{12})\b/i;
 
 // Helper: send a "thinking" indicator on the correct channel
 async function sendThinkingIndicator(channel, chatId, message) {
@@ -132,13 +137,30 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    const { email, plan, name, language, phone, website, business_name, business_description, product_service } = req.body || {};
+    const { email, plan, name, language, phone, website, business_name, business_description, product_service, submissionId } = req.body || {};
 
-    // Generate unique 12-char token
-    const token = crypto.randomBytes(6).toString('hex');
+    // Use Lovable UUID as token if provided, otherwise generate a new UUID
+    const token = submissionId || crypto.randomUUID();
+
+    // Build enriched data, optionally filling gaps from Supabase
+    let enrichedData = { email, plan, name, language: language || 'en', phone, website, business_name, business_description, product_service };
+    if (submissionId) {
+      try {
+        const supabaseData = await supabase.getOnboardingSubmission(submissionId);
+        if (supabaseData) {
+          for (const [key, value] of Object.entries(supabaseData)) {
+            if (key !== 'token' && !enrichedData[key] && value) {
+              enrichedData[key] = value;
+            }
+          }
+        }
+      } catch (e) {
+        log.warn('Supabase enrichment failed, continuing with provided data', { error: e.message });
+      }
+    }
 
     // Store in DB with all form fields
-    createPendingClient({ token, email, plan, name, language: language || 'en', phone, website, business_name, business_description, product_service });
+    createPendingClient({ token, ...enrichedData });
 
     // Build WhatsApp deep link
     const waPhone = config.WHATSAPP_BUSINESS_PHONE || config.WHATSAPP_OWNER_PHONE;
@@ -228,6 +250,35 @@ function tryLinkCrossChannel(token, chatId, channel) {
   }
 
   return getClientContextByPhone(chatId);
+}
+
+/**
+ * Look up a pending client by token, with Supabase fallback.
+ * If not found locally and token is a UUID, queries Supabase and creates
+ * a local pending_clients record from the submission data.
+ */
+async function getPendingClientWithFallback(token) {
+  // 1. Try local DB first (fast, synchronous)
+  const local = getPendingClientByToken(token);
+  if (local) return local;
+
+  // 2. If token looks like a UUID, try Supabase
+  const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+  if (!UUID_RE.test(token)) return null;
+
+  try {
+    const submission = await supabase.getOnboardingSubmission(token);
+    if (!submission) return null;
+
+    // Create local pending_clients record from Supabase data
+    createPendingClient(submission);
+    log.info('Created local pending client from Supabase submission', { token });
+
+    return getPendingClientByToken(token);
+  } catch (error) {
+    log.error('Supabase fallback failed', { token, error: error.message });
+    return null;
+  }
 }
 
 // Cache for Telegram bot username (fetched once at startup)
@@ -1578,9 +1629,9 @@ app.post('/webhook/telegram', async (req, res) => {
       }
 
       // Check if this is a /start TOKEN deep link — owner may be testing as a client
-      const ownerStartMatch = body.match(/^\/start\s+([a-f0-9]{12})$/i);
+      const ownerStartMatch = body.match(TOKEN_RE_START);
       if (ownerStartMatch) {
-        const pending = getPendingClientByToken(ownerStartMatch[1]);
+        const pending = await getPendingClientWithFallback(ownerStartMatch[1]);
         if (pending) {
           log.info('Owner triggered client onboarding via /start token', { chatId, token: pending.token });
           await handleTelegramClientMessage(chatId, body);
@@ -1790,9 +1841,9 @@ async function handleTelegramClientMessage(chatId, message) {
     let actualMessage = message;
     let pendingData = null;
     let crossLinked = false;
-    const startMatch = message.match(/^\/start\s+([a-f0-9]{12})$/i);
+    const startMatch = message.match(TOKEN_RE_START);
     if (startMatch) {
-      const pending = getPendingClientByToken(startMatch[1]);
+      const pending = await getPendingClientWithFallback(startMatch[1]);
       if (pending) {
         activatePendingClient(pending.token, chatId, 'telegram');
         pendingData = pending;
@@ -1830,9 +1881,9 @@ async function handleTelegramClientMessage(chatId, message) {
     if (!clientContext) {
       // Check for token in message (non /start format)
       if (!startMatch && !pendingData) {
-        const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
+        const tokenMatch = message.match(TOKEN_RE_INLINE);
         if (tokenMatch) {
-          const found = getPendingClientByToken(tokenMatch[1]);
+          const found = await getPendingClientWithFallback(tokenMatch[1]);
           if (found) {
             activatePendingClient(found.token, chatId, 'telegram');
             pendingData = found;
@@ -2266,9 +2317,9 @@ async function handleClientMessage(from, message) {
     if (!clientContext) {
       // New person — check for a sign-up token in the message
       let pendingData = null;
-      const tokenMatch = message.match(/\b([a-f0-9]{12})\b/i);
+      const tokenMatch = message.match(TOKEN_RE_INLINE);
       if (tokenMatch) {
-        const found = getPendingClientByToken(tokenMatch[1]);
+        const found = await getPendingClientWithFallback(tokenMatch[1]);
         if (found) {
           activatePendingClient(found.token, from, 'whatsapp');
           pendingData = found;

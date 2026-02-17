@@ -77,6 +77,10 @@ const envSchema = z.object({
   TELEGRAM_BOT_USERNAME: z.string().optional().default(''), // For t.me deep links
   CLIENT_INIT_API_KEY: z.string().optional().default(''), // Optional API key to protect /api/client-init
 
+  // Supabase (Lovable onboarding submissions)
+  SUPABASE_URL: z.string().optional().default(''),
+  SUPABASE_ANON_KEY: z.string().optional().default(''),
+
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
