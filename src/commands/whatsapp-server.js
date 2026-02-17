@@ -142,7 +142,7 @@ app.post('/api/client-init', async (req, res) => {
 
     // Build WhatsApp deep link
     const waPhone = config.WHATSAPP_BUSINESS_PHONE || config.WHATSAPP_OWNER_PHONE;
-    const waMessage = `Hi Sofia! I just signed up. My code is ${token}`;
+    const waMessage = `Hi Sofia, I am ${name || 'a new client'}${business_name ? `, representing ${business_name}` : ''}${website ? ` (${website})` : ''}. My Unique Client Code is ${token}.`;
     const whatsappLink = `https://wa.me/${waPhone}?text=${encodeURIComponent(waMessage)}`;
 
     // Build Telegram deep link
@@ -1787,14 +1787,18 @@ async function handleTelegramClientMessage(chatId, message) {
           return;
         }
       }
-      actualMessage = `Hi Sofia! I just signed up.${pendingData?.name ? ` My name is ${pendingData.name}` : ''}`;
+      actualMessage = `Hi Sofia, I am ${pendingData?.name || 'a new client'}${pendingData?.business_name ? `, representing ${pendingData.business_name}` : ''}${pendingData?.website ? ` (${pendingData.website})` : ''}. My Unique Client Code is ${pendingData?.token || startMatch[1]}.`;
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)
     if (hasActiveOnboarding(chatId)) {
       log.info('Routing Telegram to onboarding flow', { chatId });
-      const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
-      await sendTelegram(reply, chatId);
+      const result = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
+      if (Array.isArray(result)) {
+        for (const msg of result) await sendTelegram(msg, chatId);
+      } else if (result) {
+        await sendTelegram(result, chatId);
+      }
       return;
     }
 
@@ -1853,8 +1857,12 @@ async function handleTelegramClientMessage(chatId, message) {
         await sendTelegram(welcome, chatId);
       } else {
         createOnboardingSession(chatId, 'telegram', lang);
-        const reply = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
-        await sendTelegram(reply, chatId);
+        const result = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
+        if (Array.isArray(result)) {
+          for (const msg of result) await sendTelegram(msg, chatId);
+        } else if (result) {
+          await sendTelegram(result, chatId);
+        }
       }
 
       // Notify owner
@@ -2221,8 +2229,12 @@ async function handleClientMessage(from, message) {
     // 1. Check if client has an active onboarding session
     if (hasActiveOnboarding(from)) {
       log.info('Routing to onboarding flow', { from });
-      const reply = await handleOnboardingMessage(from, message, 'whatsapp');
-      await sendWhatsApp(reply, from);
+      const result = await handleOnboardingMessage(from, message, 'whatsapp');
+      if (Array.isArray(result)) {
+        for (const msg of result) await sendWhatsApp(msg, from);
+      } else if (result) {
+        await sendWhatsApp(result, from);
+      }
       return;
     }
 
@@ -2284,8 +2296,12 @@ async function handleClientMessage(from, message) {
       } else {
         // No pending data — generic onboarding flow
         createOnboardingSession(from, 'whatsapp', lang);
-        const reply = await handleOnboardingMessage(from, message, 'whatsapp');
-        await sendWhatsApp(reply, from);
+        const result = await handleOnboardingMessage(from, message, 'whatsapp');
+        if (Array.isArray(result)) {
+          for (const msg of result) await sendWhatsApp(msg, from);
+        } else if (result) {
+          await sendWhatsApp(result, from);
+        }
       }
 
       // Notify owner

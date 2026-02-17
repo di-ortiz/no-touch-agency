@@ -246,6 +246,42 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     // Determine next step
     const nextStep = parsed.next_step || getNextStep(session.current_step);
 
+    // --- Transition from confirm_details: send capabilities + Leadsie + brand request ---
+    if (session.current_step === 'confirm_details' && nextStep !== 'confirm_details' && nextStep !== 'complete') {
+      const ch = session.channel || channel;
+
+      // Generate Leadsie invite early (default: Facebook + Google)
+      let leadsieUrl = null;
+      try {
+        const invite = await leadsie.createInvite({
+          clientName: answers.business_name || answers.name,
+          clientEmail: answers.email || '',
+          platforms: ['facebook', 'google'],
+          message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts.`,
+        });
+        leadsieUrl = invite.inviteUrl;
+        answers._leadsie_url = leadsieUrl;
+        answers._leadsie_invite_id = invite.inviteId;
+      } catch (e) {
+        log.warn('Leadsie invite during onboarding failed', { error: e.message });
+      }
+
+      // Look up plan for capabilities message
+      const pendingClient = getPendingClientByChatId(phone);
+      const plan = (pendingClient?.plan || 'smb').toLowerCase();
+
+      const nextStepsMsg = buildNextStepsMessage(answers, plan, leadsieUrl, sessionLang, ch);
+
+      // Update session to next business question
+      updateOnboardingSession(session.id, { answers, currentStep: nextStep });
+
+      const reply = parsed.message || 'Great, everything looks good!';
+      saveMessage(phone, ch, 'assistant', reply);
+      saveMessage(phone, ch, 'assistant', nextStepsMsg);
+
+      return [reply, nextStepsMsg];
+    }
+
     // Update session
     updateOnboardingSession(session.id, {
       answers,
@@ -255,16 +291,18 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
 
     // If onboarding is complete, send thinking message then finalize
     if (nextStep === 'complete') {
-      const channel = session.channel || 'whatsapp';
+      const ch = session.channel || channel;
       const thinkingMsg = sessionLang === 'es'
         ? 'Casi listo! Estoy preparando tu carpeta de Google Drive, documentos y accesos... Dame un momento.'
-        : 'Almost there! Setting up your Google Drive, intake docs, and access requests... Give me a moment.';
+        : sessionLang === 'pt'
+          ? 'Quase lá! Configurando seu Google Drive, documentos e acessos... Me dê um momento.'
+          : 'Almost there! Setting up your Google Drive, intake docs, and access requests... Give me a moment.';
       try {
-        const send = channel === 'telegram' ? sendTelegram : sendWhatsApp;
+        const send = ch === 'telegram' ? sendTelegram : sendWhatsApp;
         await send(thinkingMsg, phone);
       } catch (e) { /* best effort */ }
-      const result = await finalizeOnboarding(phone, session.id, answers, channel);
-      saveMessage(phone, channel, 'assistant', result.message);
+      const result = await finalizeOnboarding(phone, session.id, answers, ch);
+      saveMessage(phone, ch, 'assistant', result.message);
       return result.message;
     }
 
@@ -459,44 +497,68 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
     errors.push(`Conversation log: ${e.message}`);
   }
 
-  // Step 5: Create Leadsie invite link
-  try {
-    const platformsToRequest = [];
+  // Step 5: Create Leadsie invite link (or reuse one already sent during onboarding)
+  if (answers._leadsie_url) {
+    leadsieUrl = answers._leadsie_url;
+    steps.push('Leadsie invite (sent during onboarding)');
+
+    // Check if client mentioned additional platforms — create a supplemental invite
     const channelsHave = (answers.channels_have || '').toLowerCase();
     const channelsNeed = (answers.channels_need || '').toLowerCase();
-
-    if (channelsHave.includes('facebook') || channelsHave.includes('instagram') || channelsHave.includes('meta') || channelsNeed.includes('facebook') || channelsNeed.includes('instagram') || channelsNeed.includes('meta')) {
-      platformsToRequest.push('facebook');
+    const needsTikTok = (channelsHave.includes('tiktok') || channelsNeed.includes('tiktok'));
+    if (needsTikTok) {
+      try {
+        const extra = await leadsie.createInvite({
+          clientName: answers.business_name || answers.name,
+          clientEmail: answers.email || '',
+          platforms: ['tiktok'],
+          message: `Hi ${answers.name}! We noticed you use TikTok — please also grant us access to your TikTok ad account.`,
+        });
+        leadsieUrl = extra.inviteUrl; // overwrite with the more complete invite
+        steps.push('TikTok Leadsie invite created');
+      } catch (e) {
+        log.warn('Supplemental TikTok Leadsie invite failed', { error: e.message });
+      }
     }
-    if (channelsHave.includes('google') || channelsNeed.includes('google')) {
-      platformsToRequest.push('google');
+  } else {
+    try {
+      const platformsToRequest = [];
+      const channelsHave = (answers.channels_have || '').toLowerCase();
+      const channelsNeed = (answers.channels_need || '').toLowerCase();
+
+      if (channelsHave.includes('facebook') || channelsHave.includes('instagram') || channelsHave.includes('meta') || channelsNeed.includes('facebook') || channelsNeed.includes('instagram') || channelsNeed.includes('meta')) {
+        platformsToRequest.push('facebook');
+      }
+      if (channelsHave.includes('google') || channelsNeed.includes('google')) {
+        platformsToRequest.push('google');
+      }
+      if (channelsHave.includes('tiktok') || channelsNeed.includes('tiktok')) {
+        platformsToRequest.push('tiktok');
+      }
+
+      // Default to facebook + google if none detected
+      if (platformsToRequest.length === 0) {
+        platformsToRequest.push('facebook', 'google');
+      }
+
+      const invite = await leadsie.createInvite({
+        clientName: answers.business_name || answers.name,
+        clientEmail: answers.email || '',
+        platforms: platformsToRequest,
+        message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts. It's a secure, one-click process — takes less than 2 minutes!`,
+      });
+
+      leadsieUrl = invite.inviteUrl;
+
+      if (clientId) {
+        updateOnboardingSession(sessionId, { leadsieInviteId: invite.inviteId });
+      }
+
+      steps.push('Leadsie invite created');
+    } catch (e) {
+      log.warn('Leadsie invite creation failed', { error: e.message });
+      errors.push(`Leadsie: ${e.message}`);
     }
-    if (channelsHave.includes('tiktok') || channelsNeed.includes('tiktok')) {
-      platformsToRequest.push('tiktok');
-    }
-
-    // Default to facebook + google if none detected
-    if (platformsToRequest.length === 0) {
-      platformsToRequest.push('facebook', 'google');
-    }
-
-    const invite = await leadsie.createInvite({
-      clientName: answers.business_name || answers.name,
-      clientEmail: answers.email || '',
-      platforms: platformsToRequest,
-      message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts. It's a secure, one-click process — takes less than 2 minutes!`,
-    });
-
-    leadsieUrl = invite.inviteUrl;
-
-    if (clientId) {
-      updateOnboardingSession(sessionId, { leadsieInviteId: invite.inviteId });
-    }
-
-    steps.push('Leadsie invite created');
-  } catch (e) {
-    log.warn('Leadsie invite creation failed', { error: e.message });
-    errors.push(`Leadsie: ${e.message}`);
   }
 
   // Update session as completed
@@ -856,75 +918,164 @@ export function buildPersonalizedWelcome(pendingData, language = 'en', channel =
   const plan = (pendingData.plan || 'smb').toLowerCase();
   const planInfo = PLAN_INFO[plan] || PLAN_INFO.smb;
 
-  // Collect known fields for the summary
+  // Translated labels for the data summary
   const labels = {
-    en: { website: 'Website', business: 'Business', description: 'Description', product: 'Product/Service', email: 'Email' },
-    es: { website: 'Sitio web', business: 'Empresa', description: 'Descripcion', product: 'Producto/Servicio', email: 'Email' },
-    pt: { website: 'Website', business: 'Empresa', description: 'Descricao', product: 'Produto/Servico', email: 'Email' },
+    en: { plan: 'Plan', website: 'Website', business: 'Business', description: 'Description', product: 'Product/Service', email: 'Email' },
+    es: { plan: 'Plan', website: 'Sitio web', business: 'Empresa', description: 'Descripción', product: 'Producto/Servicio', email: 'Email' },
+    pt: { plan: 'Plano', website: 'Website', business: 'Empresa', description: 'Descrição', product: 'Produto/Serviço', email: 'Email' },
   };
   const l = labels[language] || labels.en;
 
-  const fields = [];
-  if (pendingData.website) fields.push({ label: l.website, value: pendingData.website });
-  if (pendingData.business_name) fields.push({ label: l.business, value: pendingData.business_name });
-  if (pendingData.business_description) fields.push({ label: l.description, value: pendingData.business_description });
-  if (pendingData.product_service) fields.push({ label: l.product, value: pendingData.product_service });
-  if (pendingData.email) fields.push({ label: l.email, value: pendingData.email });
+  // Plan description in the correct language
+  const planDesc = {
+    en: `${planInfo.label} (${planInfo.modules} modules, ${planInfo.dailyMessages} messages/day)`,
+    es: `${planInfo.label} (${planInfo.modules} módulos, ${planInfo.dailyMessages} mensajes/día)`,
+    pt: `${planInfo.label} (${planInfo.modules} módulos, ${planInfo.dailyMessages} mensagens/dia)`,
+  };
 
-  const fieldsSummary = fields.map(f => `- ${b(f.label + ':')} ${f.value}`).join('\n');
+  // Build data summary lines
+  const dataLines = [];
+  dataLines.push(`  • ${b(l.plan + ':')} ${planDesc[language] || planDesc.en}`);
+  if (pendingData.website) dataLines.push(`  • ${b(l.website + ':')} ${pendingData.website}`);
+  if (pendingData.business_name) dataLines.push(`  • ${b(l.business + ':')} ${pendingData.business_name}`);
+  if (pendingData.business_description) dataLines.push(`  • ${b(l.description + ':')} ${pendingData.business_description}`);
+  if (pendingData.product_service) dataLines.push(`  • ${b(l.product + ':')} ${pendingData.product_service}`);
+  if (pendingData.email) dataLines.push(`  • ${b(l.email + ':')} ${pendingData.email}`);
+  const dataSummary = dataLines.join('\n');
 
   if (language === 'pt') {
     return [
-      `Oi${name ? ` ${b(name)}` : ''}! Eu sou a Sofia, sua gerente de conta dedicada.`,
+      `Oi${name ? `, ${b(name)}` : ''}! Eu sou a Sofia, Estrategista da Chama e agora sua e da sua equipe assistente de marketing pessoal 24/7. É ótimo ter você a bordo!`,
       ``,
-      `Seu codigo de cliente: ${b(token)}`,
-      `Plano: ${b(planInfo.label)} (ate ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensagens/dia)`,
+      `Seu código de cliente: ${b(token)}`,
       ``,
-      fields.length > 0 ? `Aqui esta o que tenho do seu cadastro:\n${fieldsSummary}` : '',
+      `Vejo que você se cadastrou recentemente com os seguintes dados:\n${dataSummary}`,
       ``,
-      `${b('Proximos passos:')}`,
-      `1. Vou fazer algumas perguntas rapidas sobre seu negocio para personalizar suas campanhas`,
-      `2. Vou pedir seus materiais de marca (logo, guia de identidade visual, criativos anteriores)`,
-      `3. Vou configurar o acesso as suas contas de anuncios de forma segura`,
-      ``,
-      fields.length > 0 ? `Tudo correto acima? Ou gostaria de alterar algo?` : `Vamos comecar! ${b('Qual e o nome da sua empresa?')}`,
-    ].filter(Boolean).join('\n');
+      `Está tudo correto?\n\n1️⃣ ✅ Correto — vamos continuar\n2️⃣ ❌ Incorreto — gostaria de fazer alterações`,
+    ].join('\n');
   }
 
   if (language === 'es') {
     return [
-      `Hola${name ? ` ${b(name)}` : ''}! Soy Sofia, tu account manager dedicada.`,
+      `¡Hola${name ? `, ${b(name)}` : ''}! Soy Sofia, Estratega de Chama y ahora tu asistente de marketing personal 24/7 y la de tu equipo. ¡Es genial tenerte a bordo!`,
       ``,
-      `Tu codigo de cliente: ${b(token)}`,
-      `Plan: ${b(planInfo.label)} (hasta ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensajes/dia)`,
+      `Tu código de cliente: ${b(token)}`,
       ``,
-      fields.length > 0 ? `Esto es lo que tengo de tu registro:\n${fieldsSummary}` : '',
+      `Veo que te has registrado recientemente con los siguientes datos:\n${dataSummary}`,
       ``,
-      `${b('Proximos pasos:')}`,
-      `1. Te hare unas preguntas rapidas sobre tu negocio para personalizar tus campanas`,
-      `2. Te pedire tus materiales de marca (logo, guia de marca, creativos anteriores)`,
-      `3. Configurare el acceso a tus cuentas publicitarias de forma segura`,
-      ``,
-      fields.length > 0 ? `Esta todo correcto? O quieres hacer algun cambio?` : `Vamos a configurar todo para ti. Para empezar, ${b('como se llama tu empresa?')}`,
-    ].filter(Boolean).join('\n');
+      `¿Está todo correcto?\n\n1️⃣ ✅ Correcto — continuemos\n2️⃣ ❌ Incorrecto — quiero hacer cambios`,
+    ].join('\n');
   }
 
   // Default: English
   return [
-    `Hey${name ? ` ${b(name)}` : ''}! I'm Sofia, your dedicated account manager.`,
+    `Hi${name ? `, ${b(name)}` : ''}! I am Sofia, Chama's Strategist and now yours and your team's personal 24/7 marketing assistant. It is great to have you onboard!`,
     ``,
     `Your client code: ${b(token)}`,
-    `Plan: ${b(planInfo.label)} (up to ${planInfo.modules} modules, ${planInfo.dailyMessages} messages/day)`,
     ``,
-    fields.length > 0 ? `Here's what I have from your signup:\n${fieldsSummary}` : '',
+    `I see you've recently signed up with the following details:\n${dataSummary}`,
     ``,
-    `${b("Here's what happens next:")}`,
-    `1. I'll ask you a few quick questions about your business to personalize your campaigns`,
-    `2. I'll need your brand materials (logo, brand guidelines, past creatives)`,
-    `3. I'll set up secure access to your ad accounts`,
-    ``,
-    fields.length > 0 ? `Is everything above correct? Or would you like to change anything?` : `Let's get started! ${b("What's your company name?")}`,
-  ].filter(Boolean).join('\n');
+    `Is this correct?\n\n1️⃣ ✅ Correct — let's continue\n2️⃣ ❌ Incorrect — I'd like to make changes`,
+  ].join('\n');
+}
+
+/**
+ * Build the "next steps" message sent after the client confirms their signup data.
+ * Explains capabilities based on plan, includes Leadsie link, and asks for brand materials.
+ */
+function buildNextStepsMessage(answers, plan, leadsieUrl, language = 'en', channel = 'whatsapp') {
+  const b = (text) => bold(text, channel);
+  const name = answers.name || '';
+
+  // Build capabilities list based on plan (progressively more features)
+  function capsList(lang) {
+    const c = {
+      en: {
+        strategic: `📊 ${b('Strategic Planning')} — Campaign briefs and media plans`,
+        competitor: `🔍 ${b('Competitor Intelligence')} — Analyze competitor ads and strategies`,
+        creative: `🎨 ${b('Creative Production')} — Ad images, copy, and video content`,
+        audience: `👥 ${b('Audience Analysis')} — Target audience research and segmentation`,
+        keyword: `📝 ${b('Keyword Research')} — Search volume, keyword ideas, and SEO opportunities`,
+        performance: `📈 ${b('Performance Tracking')} — Campaign reports and trend analysis`,
+        automation: `🔄 ${b('Automation')} — Scheduled monitoring, anomaly detection, and budget optimization`,
+        reporting: `📋 ${b('Advanced Reporting')} — Google Slides presentations and executive reviews`,
+      },
+      es: {
+        strategic: `📊 ${b('Planificación Estratégica')} — Briefings de campaña y planes de medios`,
+        competitor: `🔍 ${b('Inteligencia Competitiva')} — Análisis de anuncios y estrategias de la competencia`,
+        creative: `🎨 ${b('Producción Creativa')} — Imágenes, textos y vídeos para anuncios`,
+        audience: `👥 ${b('Análisis de Audiencia')} — Investigación y segmentación del público objetivo`,
+        keyword: `📝 ${b('Investigación de Keywords')} — Volumen de búsqueda, ideas y oportunidades SEO`,
+        performance: `📈 ${b('Seguimiento de Rendimiento')} — Informes de campañas y análisis de tendencias`,
+        automation: `🔄 ${b('Automatización')} — Monitoreo programado, detección de anomalías y optimización`,
+        reporting: `📋 ${b('Reportes Avanzados')} — Presentaciones en Google Slides y revisiones ejecutivas`,
+      },
+      pt: {
+        strategic: `📊 ${b('Planejamento Estratégico')} — Briefings de campanha e planos de mídia`,
+        competitor: `🔍 ${b('Inteligência Competitiva')} — Análise de anúncios e estratégias da concorrência`,
+        creative: `🎨 ${b('Produção Criativa')} — Imagens, textos e vídeos para anúncios`,
+        audience: `👥 ${b('Análise de Audiência')} — Pesquisa e segmentação do público-alvo`,
+        keyword: `📝 ${b('Pesquisa de Keywords')} — Volume de busca, ideias e oportunidades de SEO`,
+        performance: `📈 ${b('Acompanhamento de Performance')} — Relatórios de campanha e análise de tendências`,
+        automation: `🔄 ${b('Automação')} — Monitoramento agendado, detecção de anomalias e otimização`,
+        reporting: `📋 ${b('Relatórios Avançados')} — Apresentações em Google Slides e revisões executivas`,
+      },
+    };
+    const t = c[lang] || c.en;
+    const items = [t.strategic, t.competitor, t.creative];
+    if (plan !== 'smb') items.push(t.audience, t.keyword, t.performance);
+    if (plan === 'enterprise') items.push(t.automation, t.reporting);
+    return items.join('\n');
+  }
+
+  const caps = capsList(language);
+
+  if (language === 'pt') {
+    const parts = [
+      `Ótimo${name ? `, ${name}` : ''}! Agora deixa eu te contar o que posso fazer por você como sua assistente de marketing 24/7:\n`,
+      caps,
+      `\nPara começar a trabalhar nas suas campanhas, preciso de algumas coisas:`,
+    ];
+    if (leadsieUrl) {
+      parts.push(`\n1️⃣ 🔗 ${b('Conceda acesso às suas contas de anúncios:')}`);
+      parts.push(leadsieUrl);
+      parts.push(`É um processo seguro de um clique — leva menos de 2 minutos!`);
+    }
+    parts.push(`\n${leadsieUrl ? '2️⃣' : '1️⃣'} 🎨 ${b('Comece a reunir seus materiais de marca')} (logo, guia de marca, paleta de cores, fontes, criativos anteriores) — vou criar uma pasta dedicada para você em breve.`);
+    parts.push(`\nAgora, vou fazer mais algumas perguntas sobre seu negócio para personalizar suas campanhas...`);
+    return parts.join('\n');
+  }
+
+  if (language === 'es') {
+    const parts = [
+      `¡Genial${name ? `, ${name}` : ''}! Ahora déjame contarte lo que puedo hacer por ti como tu asistente de marketing 24/7:\n`,
+      caps,
+      `\nPara empezar a trabajar en tus campañas, necesito un par de cosas:`,
+    ];
+    if (leadsieUrl) {
+      parts.push(`\n1️⃣ 🔗 ${b('Concede acceso a tus cuentas publicitarias:')}`);
+      parts.push(leadsieUrl);
+      parts.push(`¡Es un proceso seguro de un clic — toma menos de 2 minutos!`);
+    }
+    parts.push(`\n${leadsieUrl ? '2️⃣' : '1️⃣'} 🎨 ${b('Empieza a reunir tus materiales de marca')} (logo, guía de marca, paleta de colores, fuentes, creativos anteriores) — te crearé una carpeta dedicada en breve.`);
+    parts.push(`\nAhora, déjame hacerte algunas preguntas más sobre tu negocio para personalizar tus campañas...`);
+    return parts.join('\n');
+  }
+
+  // English (default)
+  const parts = [
+    `Great${name ? `, ${name}` : ''}! Now let me tell you what I can help you with as your 24/7 marketing assistant:\n`,
+    caps,
+    `\nTo get started with your campaigns, I need a couple of things:`,
+  ];
+  if (leadsieUrl) {
+    parts.push(`\n1️⃣ 🔗 ${b('Grant us access to your ad accounts:')}`);
+    parts.push(leadsieUrl);
+    parts.push(`It's a secure one-click process — takes less than 2 minutes!`);
+  }
+  parts.push(`\n${leadsieUrl ? '2️⃣' : '1️⃣'} 🎨 ${b('Start gathering your brand materials')} (logo, brand guidelines, color palette, fonts, past ad creatives) — I'll set up a dedicated folder for you shortly.`);
+  parts.push(`\nNow, let me ask you a few more questions about your business to personalize your campaigns...`);
+  return parts.join('\n');
 }
 
 export default {
