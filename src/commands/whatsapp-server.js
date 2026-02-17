@@ -1849,7 +1849,7 @@ async function handleTelegramClientMessage(chatId, message) {
           updateOnboardingSession(session.id, { currentStep: 'confirm_details' });
         }
 
-        const welcome = buildPersonalizedWelcome(pendingData, lang);
+        const welcome = buildPersonalizedWelcome(pendingData, lang, 'telegram');
         await sendTelegram(welcome, chatId);
       } else {
         createOnboardingSession(chatId, 'telegram', lang);

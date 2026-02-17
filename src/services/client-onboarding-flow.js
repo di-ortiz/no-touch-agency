@@ -11,10 +11,10 @@ import * as googleDrive from '../api/google-drive.js';
 import * as googleSheets from '../api/google-sheets.js';
 import * as leadsie from '../api/leadsie.js';
 import { sendWhatsApp } from '../api/whatsapp.js';
+import { sendTelegram } from '../api/telegram.js';
+import { notifyOwnerMessage } from '../utils/notify-owner.js';
 import { auditLog } from '../services/cost-tracker.js';
 import config from '../config.js';
-
-import { sendTelegram } from '../api/telegram.js';
 
 const log = logger.child({ workflow: 'onboarding-flow' });
 
@@ -25,6 +25,11 @@ const LANGUAGE_NAMES = {
 
 function getLanguageName(code) {
   return LANGUAGE_NAMES[code] || 'English';
+}
+
+/** Return bold text in the correct format for the channel. */
+function bold(text, channel) {
+  return channel === 'telegram' ? `<b>${text}</b>` : `*${text}*`;
 }
 
 /**
@@ -102,9 +107,14 @@ Your job is to check if the client confirms or wants to change anything.
 - Do NOT re-ask for information already collected.\n`
     : '';
 
-  return `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You are currently onboarding a new client through WhatsApp.
+  const channelName = session.channel === 'telegram' ? 'Telegram' : 'WhatsApp';
+  const fmtHint = session.channel === 'telegram'
+    ? 'Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>'
+    : 'Use WhatsApp formatting: *bold*, _italic_';
+
+  return `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You are currently onboarding a new client through ${channelName}.
 ${langInstruction}
-${contactName ? `The client's name is *${contactName}*. Always address them by name naturally.` : ''}
+${contactName ? `The client's name is ${bold(contactName, session.channel)}. Always address them by name naturally.` : ''}
 
 CURRENT ONBOARDING STEP: ${currentStep}
 ${confirmDetailsInstruction}
@@ -139,7 +149,7 @@ RULES:
 - Ask ONE question at a time. Be natural and conversational — not like a form.
 - After they answer, acknowledge their response warmly before moving to the next question.
 - If they provide multiple answers in one message, acknowledge all of them and move ahead.
-- Use WhatsApp formatting: *bold*, _italic_
+- ${fmtHint}
 - Be friendly, use their name when you know it.
 - Keep your messages concise — 2-3 sentences max.
 - If they seem confused, clarify with an example.
@@ -151,7 +161,7 @@ RULES:
 RESPONSE FORMAT:
 You MUST respond with valid JSON in this exact format:
 {
-  "message": "Your WhatsApp message to the client",
+  "message": "Your message to the client (use ${channelName} formatting)",
   "extracted": { "field_name": "extracted value" },
   "next_step": "next_step_key_or_complete"
 }
@@ -525,7 +535,7 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
   ].filter(Boolean).join('\n');
 
   try {
-    await sendWhatsApp(ownerSummary);
+    await notifyOwnerMessage(ownerSummary);
   } catch (e) {
     log.warn('Failed to notify owner', { error: e.message });
   }
@@ -539,30 +549,31 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
     result: errors.length === 0 ? 'success' : 'partial',
   });
 
-  // Build the completion message for the client
+  // Build the completion message for the client (channel-aware formatting)
+  const b = (text) => bold(text, channel);
   const completionParts = [
-    `🎉 *Amazing, ${answers.name}!* Your onboarding is complete!\n`,
+    `🎉 ${b(`Amazing, ${answers.name}!`)} Your onboarding is complete!\n`,
     `I've set everything up for you. Here's what's ready:\n`,
     `✅ Your client profile is saved`,
   ];
 
   if (driveFolderUrl) {
-    completionParts.push(`\n📁 *Your Google Drive folder is ready!*`);
+    completionParts.push(`\n📁 ${b('Your Google Drive folder is ready!')}`);
     completionParts.push(driveFolderUrl);
 
     if (brandAssetsFolderUrl) {
-      completionParts.push(`\n🎨 *Upload your brand materials here:*`);
+      completionParts.push(`\n🎨 ${b('Upload your brand materials here:')}`);
       completionParts.push(brandAssetsFolderUrl);
-      completionParts.push(`\nPlease share your *logo, brand book/guidelines, color palette, fonts, past ad creatives, copy examples* — anything that helps me understand your brand.`);
+      completionParts.push(`\nPlease share your ${b('logo, brand book/guidelines, color palette, fonts, past ad creatives, copy examples')} — anything that helps me understand your brand.`);
       completionParts.push(`\nThe more you share, the better I can create content that matches your brand perfectly!`);
     } else {
-      completionParts.push(`\nPlease share your *logo, brand guidelines, ad creatives, and any brand materials* in the Brand Assets folder.`);
+      completionParts.push(`\nPlease share your ${b('logo, brand guidelines, ad creatives, and any brand materials')} in the Brand Assets folder.`);
       completionParts.push(`\nThe more you share, the better I can create content that matches your brand perfectly!`);
     }
   }
 
   if (leadsieUrl) {
-    completionParts.push(`\n🔗 *One more thing — grant us access to your ad accounts:*`);
+    completionParts.push(`\n🔗 ${b('One more thing — grant us access to your ad accounts:')}`);
     completionParts.push(leadsieUrl);
     completionParts.push(`\nIt's a secure one-click process. This lets us manage your campaigns without needing your login credentials.`);
   }
@@ -755,10 +766,11 @@ export async function initiateOnboarding(clientPhone, { channel = 'whatsapp', se
   const session = createOnboardingSession(normalized, channel);
 
   // Send the welcome message
+  const b = (text) => bold(text, channel);
   const welcomeMessage = [
-    `👋 *Welcome!* I'm Sofia, your dedicated account manager.\n`,
+    `👋 ${b('Welcome!')} I'm Sofia, your dedicated account manager.\n`,
     `I'm here to get you onboarded smoothly and make sure we have everything we need to run amazing campaigns for you.\n`,
-    `Let's start with the basics — *what's your name?*`,
+    `Let's start with the basics — ${b("what's your name?")}`,
   ].join('\n');
 
   try {
@@ -837,7 +849,8 @@ const PLAN_INFO = {
   enterprise: { modules: 8, dailyMessages: 200, label: 'Enterprise' },
 };
 
-export function buildPersonalizedWelcome(pendingData, language = 'en') {
+export function buildPersonalizedWelcome(pendingData, language = 'en', channel = 'whatsapp') {
+  const b = (text) => bold(text, channel);
   const name = pendingData.name || '';
   const token = pendingData.token || '';
   const plan = (pendingData.plan || 'smb').toLowerCase();
@@ -858,59 +871,59 @@ export function buildPersonalizedWelcome(pendingData, language = 'en') {
   if (pendingData.product_service) fields.push({ label: l.product, value: pendingData.product_service });
   if (pendingData.email) fields.push({ label: l.email, value: pendingData.email });
 
-  const fieldsSummary = fields.map(f => `- *${f.label}:* ${f.value}`).join('\n');
+  const fieldsSummary = fields.map(f => `- ${b(f.label + ':')} ${f.value}`).join('\n');
 
   if (language === 'pt') {
     return [
-      `Oi${name ? ` *${name}*` : ''}! Eu sou a Sofia, sua gerente de conta dedicada.`,
+      `Oi${name ? ` ${b(name)}` : ''}! Eu sou a Sofia, sua gerente de conta dedicada.`,
       ``,
-      `Seu codigo de cliente: *${token}*`,
-      `Plano: *${planInfo.label}* (ate ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensagens/dia)`,
+      `Seu codigo de cliente: ${b(token)}`,
+      `Plano: ${b(planInfo.label)} (ate ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensagens/dia)`,
       ``,
       fields.length > 0 ? `Aqui esta o que tenho do seu cadastro:\n${fieldsSummary}` : '',
       ``,
-      `*Proximos passos:*`,
+      `${b('Proximos passos:')}`,
       `1. Vou fazer algumas perguntas rapidas sobre seu negocio para personalizar suas campanhas`,
       `2. Vou pedir seus materiais de marca (logo, guia de identidade visual, criativos anteriores)`,
       `3. Vou configurar o acesso as suas contas de anuncios de forma segura`,
       ``,
-      fields.length > 0 ? `Tudo correto acima? Ou gostaria de alterar algo?` : `Vamos comecar! *Qual e o nome da sua empresa?*`,
+      fields.length > 0 ? `Tudo correto acima? Ou gostaria de alterar algo?` : `Vamos comecar! ${b('Qual e o nome da sua empresa?')}`,
     ].filter(Boolean).join('\n');
   }
 
   if (language === 'es') {
     return [
-      `Hola${name ? ` *${name}*` : ''}! Soy Sofia, tu account manager dedicada.`,
+      `Hola${name ? ` ${b(name)}` : ''}! Soy Sofia, tu account manager dedicada.`,
       ``,
-      `Tu codigo de cliente: *${token}*`,
-      `Plan: *${planInfo.label}* (hasta ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensajes/dia)`,
+      `Tu codigo de cliente: ${b(token)}`,
+      `Plan: ${b(planInfo.label)} (hasta ${planInfo.modules} modulos, ${planInfo.dailyMessages} mensajes/dia)`,
       ``,
       fields.length > 0 ? `Esto es lo que tengo de tu registro:\n${fieldsSummary}` : '',
       ``,
-      `*Proximos pasos:*`,
+      `${b('Proximos pasos:')}`,
       `1. Te hare unas preguntas rapidas sobre tu negocio para personalizar tus campanas`,
       `2. Te pedire tus materiales de marca (logo, guia de marca, creativos anteriores)`,
       `3. Configurare el acceso a tus cuentas publicitarias de forma segura`,
       ``,
-      fields.length > 0 ? `Esta todo correcto? O quieres hacer algun cambio?` : `Vamos a configurar todo para ti. Para empezar, *como se llama tu empresa?*`,
+      fields.length > 0 ? `Esta todo correcto? O quieres hacer algun cambio?` : `Vamos a configurar todo para ti. Para empezar, ${b('como se llama tu empresa?')}`,
     ].filter(Boolean).join('\n');
   }
 
   // Default: English
   return [
-    `Hey${name ? ` *${name}*` : ''}! I'm Sofia, your dedicated account manager.`,
+    `Hey${name ? ` ${b(name)}` : ''}! I'm Sofia, your dedicated account manager.`,
     ``,
-    `Your client code: *${token}*`,
-    `Plan: *${planInfo.label}* (up to ${planInfo.modules} modules, ${planInfo.dailyMessages} messages/day)`,
+    `Your client code: ${b(token)}`,
+    `Plan: ${b(planInfo.label)} (up to ${planInfo.modules} modules, ${planInfo.dailyMessages} messages/day)`,
     ``,
     fields.length > 0 ? `Here's what I have from your signup:\n${fieldsSummary}` : '',
     ``,
-    `*Here's what happens next:*`,
+    `${b("Here's what happens next:")}`,
     `1. I'll ask you a few quick questions about your business to personalize your campaigns`,
     `2. I'll need your brand materials (logo, brand guidelines, past creatives)`,
     `3. I'll set up secure access to your ad accounts`,
     ``,
-    fields.length > 0 ? `Is everything above correct? Or would you like to change anything?` : `Let's get started! *What's your company name?*`,
+    fields.length > 0 ? `Is everything above correct? Or would you like to change anything?` : `Let's get started! ${b("What's your company name?")}`,
   ].filter(Boolean).join('\n');
 }
 
