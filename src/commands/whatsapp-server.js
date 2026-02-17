@@ -4,7 +4,7 @@ import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, s
 import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
-  createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, activatePendingClient,
+  createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, getLatestPendingClient, activatePendingClient,
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
@@ -1873,7 +1873,28 @@ async function handleTelegramClientMessage(chatId, message) {
           return;
         }
       }
-      actualMessage = `Hi Sofia, I am ${pendingData?.name || 'a new client'}${pendingData?.business_name ? `, representing ${pendingData.business_name}` : ''}${pendingData?.website ? ` (${pendingData.website})` : ''}. My Unique Client Code is ${pendingData?.token || startMatch[1]}.`;
+    }
+
+    // Bare /start (no token) — look up the most recent unactivated pending client
+    if (!startMatch && /^\/start$/i.test(message.trim())) {
+      const latestPending = getLatestPendingClient();
+      if (latestPending) {
+        activatePendingClient(latestPending.token, chatId, 'telegram');
+        pendingData = latestPending;
+        log.info('Activated latest pending client from bare /start', { token: latestPending.token, chatId });
+      } else {
+        // No local pending client — try Supabase for recent submissions
+        try {
+          // Query Supabase without a specific UUID is not supported via REST,
+          // so just log and continue to generic onboarding
+          log.info('No pending client found for bare /start', { chatId });
+        } catch (e) { /* best effort */ }
+      }
+    }
+
+    // Build the formatted "Hi Sofia, I am..." message from pending data
+    if (pendingData) {
+      actualMessage = `Hi Sofia, I am ${pendingData.name || 'a new client'}${pendingData.business_name ? `, representing ${pendingData.business_name}` : ''}${pendingData.website ? ` (${pendingData.website})` : ''}. My Unique Client Code is ${pendingData.token}.`;
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)

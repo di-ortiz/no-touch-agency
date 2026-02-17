@@ -595,6 +595,15 @@ export function getPendingClientByChatId(chatId) {
   return d.prepare("SELECT * FROM pending_clients WHERE chat_id = ? ORDER BY activated_at DESC LIMIT 1").get(chatId);
 }
 
+/**
+ * Get the most recently created pending client that hasn't been activated yet.
+ * Used as a fallback when bare /start is received without a token.
+ */
+export function getLatestPendingClient() {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1").get();
+}
+
 export function activatePendingClient(token, chatId, channel) {
   const d = getDb();
   d.prepare(`
