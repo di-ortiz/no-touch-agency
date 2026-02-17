@@ -4,7 +4,7 @@ import {
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
   createClient, getClient, updateClient,
-  saveMessage, getMessages,
+  getMessages,
   getPendingClientByChatId, getContactsByClientId,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
@@ -194,8 +194,7 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     contactName,
   });
 
-  // Save the user's message to conversation history for long-term memory
-  saveMessage(phone, channel, 'user', message);
+  // Note: conversation history saving is handled by the callers (addToHistory)
 
   // Build prompt and send to Claude for natural extraction
   const sessionLang = session.language || 'en';
@@ -276,9 +275,6 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
       updateOnboardingSession(session.id, { answers, currentStep: nextStep });
 
       const reply = parsed.message || 'Great, everything looks good!';
-      saveMessage(phone, ch, 'assistant', reply);
-      saveMessage(phone, ch, 'assistant', nextStepsMsg);
-
       return [reply, nextStepsMsg];
     }
 
@@ -302,12 +298,10 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
         await send(thinkingMsg, phone);
       } catch (e) { /* best effort */ }
       const result = await finalizeOnboarding(phone, session.id, answers, ch);
-      saveMessage(phone, ch, 'assistant', result.message);
       return result.message;
     }
 
     const reply = parsed.message || "Thanks for that! Let me ask you the next question...";
-    saveMessage(phone, channel, 'assistant', reply);
     return reply;
   } catch (error) {
     log.error('Onboarding flow error', { error: error.message, phone });
