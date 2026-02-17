@@ -1619,10 +1619,15 @@ app.post('/webhook/telegram', async (req, res) => {
       // Check if owner has an active onboarding session (e.g., testing client flow)
       if (hasActiveOnboarding(chatId)) {
         log.info('Owner has active onboarding — routing to onboarding flow', { chatId });
+        addToHistory(chatId, 'user', body, 'telegram');
         const result = await handleOnboardingMessage(chatId, body, 'telegram');
         if (Array.isArray(result)) {
-          for (const msg of result) await sendTelegram(msg, chatId);
+          for (const msg of result) {
+            addToHistory(chatId, 'assistant', msg, 'telegram');
+            await sendTelegram(msg, chatId);
+          }
         } else if (result) {
+          addToHistory(chatId, 'assistant', result, 'telegram');
           await sendTelegram(result, chatId);
         }
         return;
@@ -1637,6 +1642,13 @@ app.post('/webhook/telegram', async (req, res) => {
           await handleTelegramClientMessage(chatId, body);
           return;
         }
+      }
+
+      // Bare /start (no token) — route to client handler to start/resume onboarding
+      if (/^\/start$/i.test(body.trim())) {
+        log.info('Owner sent bare /start, routing to client onboarding handler', { chatId });
+        await handleTelegramClientMessage(chatId, body);
+        return;
       }
 
       // Normal owner command access
@@ -1867,10 +1879,15 @@ async function handleTelegramClientMessage(chatId, message) {
     // Check for active onboarding via Telegram (uses chatId as identifier)
     if (hasActiveOnboarding(chatId)) {
       log.info('Routing Telegram to onboarding flow', { chatId });
+      addToHistory(chatId, 'user', actualMessage, 'telegram');
       const result = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
       if (Array.isArray(result)) {
-        for (const msg of result) await sendTelegram(msg, chatId);
+        for (const msg of result) {
+          addToHistory(chatId, 'assistant', msg, 'telegram');
+          await sendTelegram(msg, chatId);
+        }
       } else if (result) {
+        addToHistory(chatId, 'assistant', result, 'telegram');
         await sendTelegram(result, chatId);
       }
       return;
@@ -1928,13 +1945,20 @@ async function handleTelegramClientMessage(chatId, message) {
         }
 
         const welcome = buildPersonalizedWelcome(pendingData, lang, 'telegram');
+        addToHistory(chatId, 'user', actualMessage, 'telegram');
+        addToHistory(chatId, 'assistant', welcome, 'telegram');
         await sendTelegram(welcome, chatId);
       } else {
         createOnboardingSession(chatId, 'telegram', lang);
+        addToHistory(chatId, 'user', actualMessage, 'telegram');
         const result = await handleOnboardingMessage(chatId, actualMessage, 'telegram');
         if (Array.isArray(result)) {
-          for (const msg of result) await sendTelegram(msg, chatId);
+          for (const msg of result) {
+            addToHistory(chatId, 'assistant', msg, 'telegram');
+            await sendTelegram(msg, chatId);
+          }
         } else if (result) {
+          addToHistory(chatId, 'assistant', result, 'telegram');
           await sendTelegram(result, chatId);
         }
       }
@@ -2303,10 +2327,15 @@ async function handleClientMessage(from, message) {
     // 1. Check if client has an active onboarding session
     if (hasActiveOnboarding(from)) {
       log.info('Routing to onboarding flow', { from });
+      addToHistory(from, 'user', message, 'whatsapp');
       const result = await handleOnboardingMessage(from, message, 'whatsapp');
       if (Array.isArray(result)) {
-        for (const msg of result) await sendWhatsApp(msg, from);
+        for (const msg of result) {
+          addToHistory(from, 'assistant', msg, 'whatsapp');
+          await sendWhatsApp(msg, from);
+        }
       } else if (result) {
+        addToHistory(from, 'assistant', result, 'whatsapp');
         await sendWhatsApp(result, from);
       }
       return;
@@ -2366,14 +2395,21 @@ async function handleClientMessage(from, message) {
 
         // Send personalized welcome with all form data for confirmation
         const welcome = buildPersonalizedWelcome(pendingData, lang);
+        addToHistory(from, 'user', message, 'whatsapp');
+        addToHistory(from, 'assistant', welcome, 'whatsapp');
         await sendWhatsApp(welcome, from);
       } else {
         // No pending data — generic onboarding flow
         createOnboardingSession(from, 'whatsapp', lang);
+        addToHistory(from, 'user', message, 'whatsapp');
         const result = await handleOnboardingMessage(from, message, 'whatsapp');
         if (Array.isArray(result)) {
-          for (const msg of result) await sendWhatsApp(msg, from);
+          for (const msg of result) {
+            addToHistory(from, 'assistant', msg, 'whatsapp');
+            await sendWhatsApp(msg, from);
+          }
         } else if (result) {
+          addToHistory(from, 'assistant', result, 'whatsapp');
           await sendWhatsApp(result, from);
         }
       }
