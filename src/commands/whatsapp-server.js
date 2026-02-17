@@ -1913,11 +1913,19 @@ Your role:
 - Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
 - When they ask for creatives, images, or videos — USE YOUR TOOLS to generate them. Never just describe what you would create.
+- When they ask for keyword research, SEO analysis, competitor ads, or market research — USE YOUR TOOLS immediately.
 - Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
 - Never share other clients' data or internal cost information
 - Keep responses under 500 words
 - Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>
+
+CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
+- ALWAYS follow through and complete the task. When the client asks you to do something, DO IT using your tools. Deliver actual results.
+- NEVER abandon a task to show a generic menu or list of capabilities. If you were working on something, FINISH IT.
+- If a follow-up message arrives (like "any success?" or "how's it going?"), CONTINUE the task you were working on — do not restart or change topic.
+- NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
+- If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
@@ -1925,10 +1933,16 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
 3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
 
-    // Client-facing tools (safe subset — no campaign management, no cost reports)
+    // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
       'generate_text_ads', 'browse_website',
+      'search_ad_library', 'search_facebook_pages', 'get_page_ads',
+      'get_search_volume', 'get_keyword_ideas',
+      'get_keyword_planner_volume', 'get_keyword_planner_ideas',
+      'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
+      'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
+      'search_google_ads_transparency',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -1955,13 +1969,14 @@ When the client asks for ads, visuals, creatives, or mockups:
       messages,
       tools: CLIENT_TOOLS,
       model: 'claude-haiku-4-5-20251001',
-      maxTokens: 2048,
+      maxTokens: 4096,
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 5 rounds for client safety)
+    // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
-    while (response.stopReason === 'tool_use' && rounds < 5) {
+    const toolsSummary = [];
+    while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
       if (rounds === 1 && response.text) {
@@ -1971,10 +1986,17 @@ When the client asks for ads, visuals, creatives, or mockups:
       const toolResults = [];
       for (const tool of response.toolUse) {
         log.info('Client tool execution (Telegram)', { tool: tool.name, client: contactName, round: rounds });
+        toolsSummary.push(tool.name);
 
         if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
         if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video... This will take a few minutes.');
         if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
+        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
+          await sendThinkingIndicator('telegram', chatId, 'Researching keywords... This might take a minute.');
+        }
+        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
+          await sendThinkingIndicator('telegram', chatId, 'Running analysis... Give me a moment.');
+        }
 
         try {
           if (clientContext.clientId && tool.input) {
@@ -1997,16 +2019,22 @@ When the client asks for ads, visuals, creatives, or mockups:
         messages,
         tools: CLIENT_TOOLS,
         model: 'claude-haiku-4-5-20251001',
-        maxTokens: 2048,
+        maxTokens: 4096,
         workflow: 'client-chat',
       });
     }
 
     const finalText = response.text || (rounds > 0
-      ? 'Your creatives are ready! Check them out above. Let me know if you\'d like any adjustments.'
+      ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    addToHistory(chatId, 'assistant', finalText, 'telegram');
+    // Save tool-use summary to history so context persists across messages
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      addToHistory(chatId, 'assistant', `${toolContext}\n${finalText}`, 'telegram');
+    } else {
+      addToHistory(chatId, 'assistant', finalText, 'telegram');
+    }
     await sendTelegram(finalText, chatId);
 
     // Append to live conversation log on Google Drive (best effort, non-blocking)
@@ -2316,11 +2344,19 @@ Your role:
 - Reference their business context when relevant (their audience, competitors, channels, etc.)
 - Answer questions about their campaigns, performance, and strategy
 - When they ask for creatives, images, or videos — USE YOUR TOOLS to generate them. Never just describe what you would create.
+- When they ask for keyword research, SEO analysis, competitor ads, or market research — USE YOUR TOOLS immediately.
 - Be professional, friendly, and concise — like a trusted team member
 - If they ask about specific metrics you don't have, offer to pull a report or have the account manager follow up
 - Never share other clients' data or internal cost information
 - Keep responses under 500 words
 - Use WhatsApp formatting: *bold*, _italic_
+
+CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
+- ALWAYS follow through and complete the task. When the client asks you to do something, DO IT using your tools. Deliver actual results.
+- NEVER abandon a task to show a generic menu or list of capabilities. If you were working on something, FINISH IT.
+- If a follow-up message arrives (like "any success?" or "how's it going?"), CONTINUE the task you were working on — do not restart or change topic.
+- NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
+- If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
@@ -2328,10 +2364,16 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
 3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
 
-    // Client-facing tools (safe subset — no campaign management, no cost reports)
+    // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
       'generate_text_ads', 'browse_website',
+      'search_ad_library', 'search_facebook_pages', 'get_page_ads',
+      'get_search_volume', 'get_keyword_ideas',
+      'get_keyword_planner_volume', 'get_keyword_planner_ideas',
+      'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
+      'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
+      'search_google_ads_transparency',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -2358,13 +2400,14 @@ When the client asks for ads, visuals, creatives, or mockups:
       messages,
       tools: CLIENT_TOOLS,
       model: 'claude-haiku-4-5-20251001',
-      maxTokens: 2048,
+      maxTokens: 4096,
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 5 rounds for client safety)
+    // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
-    while (response.stopReason === 'tool_use' && rounds < 5) {
+    const toolsSummary = [];
+    while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
       if (rounds === 1 && response.text) {
@@ -2374,11 +2417,18 @@ When the client asks for ads, visuals, creatives, or mockups:
       const toolResults = [];
       for (const tool of response.toolUse) {
         log.info('Client tool execution', { tool: tool.name, client: contactName, round: rounds });
+        toolsSummary.push(tool.name);
 
         // Send thinking messages for slow tools
         if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', from, 'Generating your ad images... This might take a minute.');
         if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', from, 'Creating your video... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
         if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', from, 'Building your full creative package... Give me a few minutes!');
+        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
+          await sendThinkingIndicator('whatsapp', from, 'Researching keywords... This might take a minute.');
+        }
+        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
+          await sendThinkingIndicator('whatsapp', from, 'Running analysis... Give me a moment.');
+        }
 
         try {
           // Inject clientId for cost tracking
@@ -2403,17 +2453,23 @@ When the client asks for ads, visuals, creatives, or mockups:
         messages,
         tools: CLIENT_TOOLS,
         model: 'claude-haiku-4-5-20251001',
-        maxTokens: 2048,
+        maxTokens: 4096,
         workflow: 'client-chat',
       });
     }
 
     // Send final response
     const finalText = response.text || (rounds > 0
-      ? 'Your creatives are ready! Check them out above. Let me know if you\'d like any adjustments.'
+      ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    addToHistory(from, 'assistant', finalText, 'whatsapp');
+    // Save tool-use summary to history so context persists across messages
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      addToHistory(from, 'assistant', `${toolContext}\n${finalText}`, 'whatsapp');
+    } else {
+      addToHistory(from, 'assistant', finalText, 'whatsapp');
+    }
     await sendWhatsApp(finalText, from);
 
     // Append to live conversation log on Google Drive (best effort, non-blocking)
