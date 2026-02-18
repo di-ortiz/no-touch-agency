@@ -45,6 +45,7 @@ import * as googleTransparency from '../api/google-transparency.js';
 import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
+import * as campaignRecord from '../services/campaign-record.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -1060,7 +1061,24 @@ Return ONLY the JSON array, no other text.`;
         angle: toolInput.concept,
         variations: Math.min(toolInput.variations || 5, 10),
       });
-      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const client = getClient(toolInput.clientName);
+        const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const sheet = await campaignRecord.createTextAdsRecord({
+          clientName: toolInput.clientName,
+          platform: toolInput.platform,
+          ads,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create text ads record sheet', { error: e.message });
+      }
+
+      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length, sheetUrl };
     }
     case 'generate_ad_images': {
       if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable image generation.' };
@@ -1094,18 +1112,38 @@ Return ONLY the JSON array, no other text.`;
         clientId: client?.id,
       });
 
+      const mappedImages = images.map(img => ({
+        format: img.format,
+        label: img.dimensions?.label || img.format,
+        url: img.url,
+        error: img.error,
+      }));
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const sheet = await campaignRecord.createAdImagesRecord({
+          clientName: toolInput.clientName,
+          platform: toolInput.platform,
+          concept: toolInput.concept,
+          imagePrompt,
+          images: mappedImages,
+          folderId: imgFolderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create ad images record sheet', { error: e.message });
+      }
+
       return {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
         concept: toolInput.concept,
         imagePrompt,
-        images: images.map(img => ({
-          format: img.format,
-          label: img.dimensions?.label || img.format,
-          url: img.url,
-          error: img.error,
-        })),
+        images: mappedImages,
         totalGenerated: images.filter(i => !i.error).length,
+        sheetUrl,
       };
     }
     case 'generate_ad_video': {
@@ -1161,6 +1199,27 @@ Return ONLY the JSON array, no other text.`;
         buildDeck: true,
       });
 
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const client = getClient(toolInput.clientName);
+        const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const sheet = await campaignRecord.createCreativeRecord({
+          clientName: pkg.clientName,
+          platform: pkg.platform,
+          campaignName: pkg.campaignName,
+          textAds: pkg.textAds,
+          images: pkg.images,
+          videos: pkg.videos,
+          summary: pkg.summary,
+          presentationUrl: pkg.presentation?.url,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create creative record sheet', { error: e.message });
+      }
+
       return {
         clientName: pkg.clientName,
         platform: pkg.platform,
@@ -1172,9 +1231,10 @@ Return ONLY the JSON array, no other text.`;
         imageUrls: pkg.images.filter(i => !i.error).map(i => i.url),
         videosCount: pkg.videos.filter(v => !v.error).length,
         presentationUrl: pkg.presentation?.url || null,
+        sheetUrl,
         status: 'awaiting_approval',
         message: pkg.presentation?.url
-          ? `Creative deck ready for review: ${pkg.presentation.url}`
+          ? `Creative deck ready for review: ${pkg.presentation.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '')
           : 'Creative package generated (Google Slides not configured for deck)',
       };
     }
@@ -1382,7 +1442,28 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Media plan deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createMediaPlanRecord({
+          clientName: toolInput.clientName,
+          campaignName: toolInput.campaignName,
+          mediaPlan: toolInput.mediaPlan,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create media plan record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
     case 'build_competitor_deck': {
       const client = getClient(toolInput.clientName);
@@ -1400,7 +1481,32 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Competitor research deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createCompetitorRecord({
+          clientName: toolInput.clientName,
+          competitors: toolInput.competitors,
+          keywordGap: toolInput.keywordGap,
+          competitorAds: toolInput.competitorAds,
+          domainOverview: toolInput.domainOverview,
+          summary: toolInput.summary,
+          recommendations: toolInput.recommendations,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create competitor record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
     case 'build_performance_deck': {
       const client = getClient(toolInput.clientName);
@@ -1421,7 +1527,35 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Performance report deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createPerformanceRecord({
+          clientName: toolInput.clientName,
+          reportType: toolInput.reportType,
+          dateRange: toolInput.dateRange,
+          metrics: toolInput.metrics,
+          analytics: toolInput.analytics,
+          campaigns: toolInput.campaigns,
+          topKeywords: toolInput.topKeywords,
+          audienceData: toolInput.audienceData,
+          analysis: toolInput.analysis,
+          recommendations: toolInput.recommendations,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create performance record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
 
     // --- PDF Reports ---
