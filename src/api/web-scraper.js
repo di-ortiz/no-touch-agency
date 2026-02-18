@@ -1,12 +1,14 @@
 import axios from 'axios';
 import logger from '../utils/logger.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
+import * as firecrawl from './firecrawl.js';
 
 const log = logger.child({ platform: 'web-scraper' });
 
 /**
  * Fetch a webpage and extract useful content.
- * Strips HTML to return clean text, meta info, headings, images, and links.
+ * Uses Firecrawl when available (better JS rendering, cleaner markdown),
+ * falls back to direct HTML fetch + regex extraction.
  *
  * @param {string} url - URL to fetch
  * @param {object} opts
@@ -17,12 +19,98 @@ const log = logger.child({ platform: 'web-scraper' });
  */
 export async function fetchWebpage(url, opts = {}) {
   if (!url) throw new Error('URL is required');
-
-  // Normalize URL
   if (!url.startsWith('http')) url = `https://${url}`;
 
+  // Try Firecrawl first (handles JS rendering, returns clean markdown)
+  if (firecrawl.isConfigured()) {
+    try {
+      return await fetchWithFirecrawl(url, opts);
+    } catch (e) {
+      log.warn('Firecrawl scrape failed, falling back to direct fetch', { url, error: e.message });
+    }
+  }
+
+  return fetchWithAxios(url, opts);
+}
+
+/**
+ * Firecrawl-powered fetch: scrapes the URL and converts markdown back
+ * to the structured format the rest of the codebase expects.
+ */
+async function fetchWithFirecrawl(url, opts = {}) {
+  const formats = ['markdown'];
+  if (opts.includeLinks) formats.push('links');
+
+  const result = await firecrawl.scrape(url, { formats });
+  const md = result.markdown || '';
+  const meta = result.metadata || {};
+
+  // Extract headings from markdown
+  const h1s = [...md.matchAll(/^# (.+)$/gm)].map(m => m[1].trim()).slice(0, 5);
+  const h2s = [...md.matchAll(/^## (.+)$/gm)].map(m => m[1].trim()).slice(0, 10);
+  const h3s = [...md.matchAll(/^### (.+)$/gm)].map(m => m[1].trim()).slice(0, 10);
+
+  // Extract images from markdown ![alt](url)
+  let images = [];
+  if (opts.includeImages !== false) {
+    images = [...md.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)].slice(0, 20).map(m => ({
+      src: m[2],
+      alt: m[1] || '',
+    }));
+  }
+
+  // Extract links from Firecrawl response or markdown
+  let links = [];
+  if (opts.includeLinks) {
+    if (result.links?.length) {
+      links = result.links.slice(0, 30).map(l => (typeof l === 'string' ? { href: l, text: '' } : l));
+    } else {
+      links = [...md.matchAll(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/g)].slice(0, 30).map(m => ({
+        href: m[2],
+        text: m[1]?.slice(0, 100) || '',
+      }));
+    }
+  }
+
+  // Convert markdown to plain text for bodyText
+  let bodyText = md
+    .replace(/^#{1,6}\s+/gm, '')          // Remove heading markers
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')  // Remove images
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links → text only
+    .replace(/[*_~`]/g, '')                // Remove formatting
+    .replace(/\n{3,}/g, '\n\n')            // Collapse blank lines
+    .trim();
+
+  const maxLength = opts.maxLength || 8000;
+  if (bodyText.length > maxLength) {
+    bodyText = bodyText.slice(0, maxLength) + '... [truncated]';
+  }
+
+  return {
+    url: result.url || url,
+    statusCode: 200,
+    title: meta.title || meta.ogTitle || h1s[0] || '',
+    description: meta.description || meta.ogDescription || '',
+    ogImage: meta.ogImage || '',
+    canonical: meta.canonical || '',
+    headings: { h1: h1s, h2: h2s, h3: h3s },
+    bodyText,
+    markdown: md,
+    images,
+    links,
+    brandColors: [],  // Firecrawl doesn't extract CSS colors
+    wordCount: bodyText.split(/\s+/).length,
+    source: 'firecrawl',
+  };
+}
+
+/**
+ * Legacy axios-based fetch: directly fetches HTML and extracts content via regex.
+ * Used as fallback when Firecrawl is not available.
+ */
+async function fetchWithAxios(url, opts = {}) {
   return retry(async () => {
-    log.info('Fetching webpage', { url });
+    log.info('Fetching webpage (direct)', { url });
 
     const response = await axios.get(url, {
       timeout: 15000,
@@ -56,7 +144,6 @@ export async function fetchWebpage(url, opts = {}) {
     // Extract images
     let images = [];
     if (opts.includeImages !== false) {
-      const imgMatches = extractAll(html, /<img[^>]+src=["']([^"']+)["'][^>]*/gi);
       const imgSrcRegex = /src=["']([^"']+)["']/i;
       const imgAltRegex = /alt=["']([^"']*?)["']/i;
 
@@ -89,18 +176,14 @@ export async function fetchWebpage(url, opts = {}) {
 
     // Extract clean body text
     let bodyText = html
-      // Remove script, style, nav, footer, header
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<nav[\s\S]*?<\/nav>/gi, '')
       .replace(/<footer[\s\S]*?<\/footer>/gi, '')
       .replace(/<header[\s\S]*?<\/header>/gi, '')
-      // Remove HTML tags
       .replace(/<[^>]+>/g, ' ')
-      // Decode common entities
       .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-      // Clean whitespace
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -109,7 +192,6 @@ export async function fetchWebpage(url, opts = {}) {
       bodyText = bodyText.slice(0, maxLength) + '... [truncated]';
     }
 
-    // Extract colors from CSS (for brand color detection)
     const colors = extractColors(html);
 
     const result = {
@@ -129,6 +211,7 @@ export async function fetchWebpage(url, opts = {}) {
       links: links.slice(0, 20),
       brandColors: colors.slice(0, 10),
       wordCount: bodyText.split(/\s+/).length,
+      source: 'direct',
     };
 
     log.info('Webpage fetched', { url, wordCount: result.wordCount, images: images.length });

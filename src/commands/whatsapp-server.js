@@ -39,6 +39,7 @@ import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
+import * as firecrawlApi from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
@@ -663,6 +664,36 @@ const CSA_TOOLS = [
     name: 'browse_website',
     description: 'Visit a website and extract its content, headings, images, brand colors, and metadata. Perfect for researching competitor websites, getting creative inspiration, analyzing landing pages, or understanding a brand before creating ads. Works on any public URL.',
     input_schema: { type: 'object', properties: { url: { type: 'string', description: 'URL to visit (e.g. "https://example.com" or "example.com")' }, purpose: { type: 'string', description: 'Why you\'re visiting: "creative_inspiration", "competitor_research", "brand_analysis", or "general"' } }, required: ['url'] },
+  },
+  {
+    name: 'crawl_website',
+    description: 'Crawl an entire website and extract clean content from multiple pages. Great for understanding a competitor\'s full site structure, analyzing all blog posts, or auditing a client\'s website content. Returns markdown content for each page found. Requires Firecrawl.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'Starting URL to crawl (e.g. "https://example.com")' },
+      limit: { type: 'number', description: 'Max pages to crawl (default: 10, max: 50)' },
+      maxDepth: { type: 'number', description: 'Max link depth to follow (default: 2)' },
+      includePaths: { type: 'string', description: 'Comma-separated path patterns to include (e.g. "/blog/*,/products/*")' },
+      excludePaths: { type: 'string', description: 'Comma-separated path patterns to exclude (e.g. "/admin/*,/login")' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'search_web',
+    description: 'Search the web and return full page content from top results. Like Google search but returns the actual scraped content of each result page as clean markdown. Great for market research, finding competitor info, industry trends, or any topic research.',
+    input_schema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Search query (e.g. "best PPC strategies for e-commerce 2025")' },
+      limit: { type: 'number', description: 'Max results to return (default: 5, max: 10)' },
+      lang: { type: 'string', description: 'Language code (default: "en")' },
+      country: { type: 'string', description: 'Country code (default: "us")' },
+    }, required: ['query'] },
+  },
+  {
+    name: 'map_website',
+    description: 'Quickly discover all URLs on a website without scraping their content. Returns a list of every page/URL found on the domain. Useful for understanding site structure, finding specific pages, or planning a crawl. Much faster than crawl_website.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'Website URL to map (e.g. "https://example.com")' },
+      search: { type: 'string', description: 'Optional: filter URLs by keyword (e.g. "blog" or "pricing")' },
+      limit: { type: 'number', description: 'Max URLs to return (default: 100)' },
+    }, required: ['url'] },
   },
   // --- SEO & Content Management ---
   {
@@ -1456,6 +1487,67 @@ Return ONLY the JSON array, no other text.`;
         links: page.links?.slice(0, 15),
         brandColors: page.brandColors,
         wordCount: page.wordCount,
+      };
+    }
+
+    case 'crawl_website': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Website crawling is not available — Firecrawl API key is not configured.' };
+      }
+      const limit = Math.min(toolInput.limit || 10, 50);
+      const crawlOpts = {
+        limit,
+        maxDepth: toolInput.maxDepth || 2,
+      };
+      if (toolInput.includePaths) crawlOpts.includePaths = toolInput.includePaths.split(',').map(p => p.trim());
+      if (toolInput.excludePaths) crawlOpts.excludePaths = toolInput.excludePaths.split(',').map(p => p.trim());
+
+      const result = await firecrawlApi.crawl(toolInput.url, crawlOpts);
+      return {
+        totalPages: result.totalPages,
+        pages: result.pages.map(p => ({
+          url: p.url,
+          title: p.metadata?.title || '',
+          description: p.metadata?.description || '',
+          contentPreview: p.markdown?.slice(0, 2000) || '',
+          wordCount: p.markdown ? p.markdown.split(/\s+/).length : 0,
+        })),
+      };
+    }
+
+    case 'search_web': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Web search is not available — Firecrawl API key is not configured.' };
+      }
+      const searchResult = await firecrawlApi.search(toolInput.query, {
+        limit: Math.min(toolInput.limit || 5, 10),
+        lang: toolInput.lang || 'en',
+        country: toolInput.country || 'us',
+      });
+      return {
+        query: toolInput.query,
+        totalResults: searchResult.totalResults,
+        results: searchResult.results.map(r => ({
+          url: r.url,
+          title: r.title,
+          description: r.description,
+          contentPreview: r.markdown?.slice(0, 1500) || '',
+        })),
+      };
+    }
+
+    case 'map_website': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Website mapping is not available — Firecrawl API key is not configured.' };
+      }
+      const mapResult = await firecrawlApi.map(toolInput.url, {
+        limit: toolInput.limit || 100,
+        search: toolInput.search || undefined,
+      });
+      return {
+        url: toolInput.url,
+        totalUrls: mapResult.totalUrls,
+        urls: mapResult.urls,
       };
     }
 
@@ -2854,7 +2946,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website',
+      'generate_text_ads', 'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',
@@ -3428,7 +3520,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website',
+      'generate_text_ads', 'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',
