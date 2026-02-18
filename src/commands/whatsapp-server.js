@@ -83,11 +83,25 @@ async function sendThinkingIndicator(channel, chatId, message) {
  * Falls back to URL-based sending if buffer is not available.
  */
 async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chatId) {
+  const effectiveMime = mimeType || 'image/png';
+  // Match filename extension to actual MIME type to avoid silent rejection
+  const extMap = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+  const ext = extMap[effectiveMime] || '.png';
+
   try {
     if (imageBuffer) {
-      // Direct upload: buffer → WhatsApp Media API → send with media_id
-      const mediaId = await uploadWhatsAppMedia(imageBuffer, mimeType || 'image/png', `image-${Date.now()}.png`);
-      await axios.post(
+      // Validate buffer before upload
+      if (!Buffer.isBuffer(imageBuffer)) {
+        throw new Error(`Expected Buffer, got ${typeof imageBuffer}`);
+      }
+      if (imageBuffer.length < 100) {
+        throw new Error(`Image buffer too small (${imageBuffer.length} bytes) — likely corrupt or empty`);
+      }
+
+      log.info('Uploading image buffer to WhatsApp Media API', { bufferSize: imageBuffer.length, mimeType: effectiveMime, to: chatId });
+      const mediaId = await uploadWhatsAppMedia(imageBuffer, effectiveMime, `image-${Date.now()}${ext}`);
+
+      const sendResult = await axios.post(
         `https://graph.facebook.com/v21.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: 'whatsapp',
@@ -98,17 +112,19 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
         },
         { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
       );
-      log.debug('WhatsApp image sent via native upload', { to: chatId, mediaId });
+      const msgId = sendResult.data?.messages?.[0]?.id;
+      log.info('WhatsApp image sent via native upload', { to: chatId, mediaId, messageId: msgId });
     } else {
       // No buffer available — use sendWhatsAppImage (tries direct download + upload first)
       await sendWhatsAppImage(url, caption, chatId);
     }
   } catch (e) {
-    log.warn('WhatsApp native image send failed, trying URL fallback', { error: e.message });
+    log.warn('WhatsApp native image send failed, trying URL fallback', { error: e.message, url: url?.slice(0, 80) });
     try {
       await sendWhatsAppImage(url, caption, chatId);
     } catch (e2) {
-      log.warn('WhatsApp image send failed completely', { error: e2.message });
+      // Throw so caller knows ALL delivery methods failed
+      throw new Error(`All image delivery failed: native=${e.message}, url=${e2.message}`);
     }
   }
 }
@@ -118,6 +134,21 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
 function stripBinaryBuffers(key, value) {
   if (key === '_imageBuffers') return undefined;
   return value;
+}
+
+// Tool execution timeout: prevent any single tool from hanging forever
+const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation
+const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+
+async function executeCSAToolWithTimeout(toolName, toolInput) {
+  const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
+  return Promise.race([
+    executeCSATool(toolName, toolInput),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Tool "${toolName}" timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    ),
+  ]);
 }
 
 // Helper: safely send a single media item, logging failures without throwing
@@ -140,19 +171,64 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
 
   // Generated ad images — use native buffer upload for WhatsApp
   if (toolName === 'generate_ad_images' && result.images) {
+    const validImages = result.images.filter(i => i.url && !i.error);
+    const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
+    log.info('Delivering ad images inline', {
+      total: result.images.length,
+      valid: validImages.length,
+      hasBuffers,
+      channel,
+    });
+
+    let deliveredCount = 0;
     for (let i = 0; i < result.images.length; i++) {
       const img = result.images[i];
       if (!img.url || img.error) continue;
       const caption = img.label || img.format || 'Ad image';
-      if (channel === 'whatsapp' && result._imageBuffers?.[i]?.buffer) {
-        try {
-          await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, img.url, caption, chatId);
-        } catch (e) {
-          log.warn('Native image delivery failed', { error: e.message, format: img.format });
+
+      if (channel === 'whatsapp') {
+        let sent = false;
+
+        // Try 1: Native buffer upload (fastest, most reliable when buffer available)
+        if (result._imageBuffers?.[i]?.buffer) {
+          try {
+            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, img.url, caption, chatId);
+            sent = true;
+            deliveredCount++;
+          } catch (e) {
+            log.warn('Native image delivery failed at deliverMediaInline', { error: e.message, format: img.format });
+          }
+        }
+
+        // Try 2: URL-based fallback (if native wasn't available or failed completely)
+        if (!sent) {
+          log.info('Trying URL-based image delivery fallback', { format: img.format, url: img.url?.slice(0, 80) });
+          try {
+            await sendWhatsAppImage(img.url, caption, chatId);
+            sent = true;
+            deliveredCount++;
+          } catch (e) {
+            log.error('All image delivery methods failed for format', { error: e.message, format: img.format });
+          }
         }
       } else {
+        // Telegram / other channels
         await safeSendMedia(sendImage, img.url, caption, toolName);
+        deliveredCount++;
       }
+    }
+
+    // If we had valid images but couldn't deliver any, notify the user
+    if (deliveredCount === 0 && validImages.length > 0) {
+      log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
+      const driveUrl = validImages.find(i => i.driveId)?.url;
+      const fallbackMsg = driveUrl
+        ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
+        : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
+      try {
+        if (channel === 'whatsapp') await sendWhatsApp(fallbackMsg, chatId);
+        else await sendTelegram(fallbackMsg, chatId);
+      } catch (_) { /* best effort */ }
     }
   }
   // Generated ad video (Sora 2)
@@ -165,11 +241,18 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       const url = result.imageUrls[i];
       if (!url) continue;
       const caption = 'Creative package image';
-      if (channel === 'whatsapp' && result._imageBuffers?.[i]?.buffer) {
-        try {
-          await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
-        } catch (e) {
-          log.warn('Native image delivery failed', { error: e.message });
+      if (channel === 'whatsapp') {
+        let sent = false;
+        if (result._imageBuffers?.[i]?.buffer) {
+          try {
+            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
+            sent = true;
+          } catch (e) {
+            log.warn('Native creative package image delivery failed', { error: e.message });
+          }
+        }
+        if (!sent) {
+          await safeSendMedia(sendImage, url, caption, toolName);
         }
       } else {
         await safeSendMedia(sendImage, url, caption, toolName);
@@ -2747,9 +2830,11 @@ async function handleTelegramCommand(message, chatId) {
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call
+      // Send a natural "working on it" message on first tool call, progress on later rounds
       if (rounds === 1 && response.text) {
         await reply(response.text);
+      } else if (rounds >= 3) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it... almost there.');
       }
 
       // Execute all tool calls
@@ -2764,7 +2849,7 @@ async function handleTelegramCommand(message, chatId) {
         if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
 
         try {
-          const result = await executeCSATool(tool.name, tool.input);
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
@@ -3186,6 +3271,8 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
 
       if (rounds === 1 && response.text) {
         await sendTelegram(response.text, chatId);
+      } else if (rounds >= 3) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it... almost there.');
       }
 
       const toolResults = [];
@@ -3207,7 +3294,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
           if (clientContext.clientId && tool.input) {
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
-          const result = await executeCSATool(tool.name, tool.input);
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
@@ -3426,9 +3513,11 @@ async function handleCommand(message) {
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call
+      // Send a natural "working on it" message on first tool call, progress on later rounds
       if (rounds === 1 && response.text) {
         await sendWhatsApp(response.text);
+      } else if (rounds >= 3) {
+        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it... almost there.');
       }
 
       // Execute all tool calls
@@ -3443,7 +3532,7 @@ async function handleCommand(message) {
         if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', ownerChatId, 'Building your full creative package... Give me a few minutes!');
 
         try {
-          const result = await executeCSATool(tool.name, tool.input);
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
@@ -3763,6 +3852,8 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
 
       if (rounds === 1 && response.text) {
         await sendWhatsApp(response.text, from);
+      } else if (rounds >= 3) {
+        await sendThinkingIndicator('whatsapp', from, 'Still working on it... almost there.');
       }
 
       const toolResults = [];
@@ -3786,7 +3877,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
           if (clientContext.clientId && tool.input) {
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
-          const result = await executeCSATool(tool.name, tool.input);
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
