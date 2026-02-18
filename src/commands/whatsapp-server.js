@@ -243,6 +243,60 @@ function clearHistory(chatId) {
 }
 
 /**
+ * Summarize tool results for persistent conversation history.
+ * Extracts key deliverables (URLs, counts, ad copy previews) so Sofia
+ * retains awareness of what she generated/shared across messages.
+ */
+function summarizeToolDeliverables(toolResults) {
+  const lines = [];
+  for (const result of toolResults) {
+    try {
+      const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+      const data = JSON.parse(content);
+      if (data.error) continue;
+
+      // Creative package
+      if (data.presentationUrl) lines.push(`Presentation: ${data.presentationUrl}`);
+      if (data.sheetUrl) lines.push(`Data sheet: ${data.sheetUrl}`);
+      if (data.imageUrls?.length) lines.push(`Generated ${data.imageUrls.length} images`);
+      if (data.textAdsCount) lines.push(`Generated ${data.textAdsCount} ad copy variations`);
+      if (data.textAdPreview?.length) {
+        lines.push(`Ad preview: ${data.textAdPreview.map(a => `"${a.headline}" [${a.cta}]`).join(' | ')}`);
+      }
+      if (data.videosCount) lines.push(`Generated ${data.videosCount} video(s)`);
+      if (data.videoUrl) lines.push(`Video: ${data.videoUrl}`);
+
+      // Standalone text ads
+      if (data.ads?.length && !data.textAdsCount) {
+        lines.push(`Generated ${data.ads.length} ad copy variations`);
+        const preview = data.ads.slice(0, 3).map(a => `"${a.headline}" [${a.cta}]`).join(' | ');
+        if (preview) lines.push(`Ad preview: ${preview}`);
+      }
+
+      // Standalone images
+      if (data.images?.length && !data.imageUrls) {
+        const ok = data.images.filter(i => !i.error);
+        if (ok.length) lines.push(`Generated ${ok.length} images: ${ok.map(i => i.label || i.format).join(', ')}`);
+      }
+
+      // Keyword / SERP research
+      if (data.keywords?.length) lines.push(`Found ${data.keywords.length} keywords`);
+      if (data.results?.length) lines.push(`Returned ${data.results.length} results`);
+
+      // Competitor research
+      if (data.competitors?.length) lines.push(`Analyzed ${data.competitors.length} competitors`);
+
+      // Campaign summary
+      if (data.summary && typeof data.summary === 'string') lines.push(`Summary: ${data.summary.slice(0, 300)}`);
+      if (data.message && typeof data.message === 'string' && !lines.length) lines.push(data.message.slice(0, 300));
+    } catch (e) {
+      // Skip unparseable results
+    }
+  }
+  return lines.length ? lines.join('\n') : '';
+}
+
+/**
  * Try to link a second channel (e.g. Telegram) to an existing client
  * that was already onboarded via another channel (e.g. WhatsApp).
  * Returns the client context if linking succeeded, null otherwise.
@@ -1927,6 +1981,7 @@ async function handleTelegramCommand(message, chatId) {
     // Handle tool use loop (max 10 rounds to allow multi-step tasks)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
@@ -1948,7 +2003,9 @@ async function handleTelegramCommand(message, chatId) {
 
         try {
           const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const resultJson = JSON.stringify(result);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
         } catch (e) {
@@ -1971,15 +2028,18 @@ async function handleTelegramCommand(message, chatId) {
       });
     }
 
-    // Send final response and save assistant reply to history
-    if (response.text) {
-      addToHistory(chatId, 'assistant', response.text);
-      await reply(response.text);
+    // Send final response and save rich context to history
+    const tgFinalText = response.text || `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(chatId, 'assistant', `${contextBlock}\n${tgFinalText}`);
     } else {
-      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
-      addToHistory(chatId, 'assistant', msg);
-      await reply(msg);
+      addToHistory(chatId, 'assistant', tgFinalText);
     }
+    await reply(tgFinalText);
   } catch (error) {
     log.error('Telegram command loop failed', { error: error.message, stack: error.stack });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
@@ -2271,6 +2331,7 @@ When the client asks for ads, visuals, creatives, or mockups:
     // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
@@ -2298,7 +2359,9 @@ When the client asks for ads, visuals, creatives, or mockups:
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const resultJson = JSON.stringify(result);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
         } catch (e) {
           log.error('Client tool failed (Telegram)', { tool: tool.name, error: e.message });
@@ -2323,10 +2386,12 @@ When the client asks for ads, visuals, creatives, or mockups:
       ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    // Save tool-use summary to history so context persists across messages
+    // Save rich tool context to history so Sofia remembers what she generated across messages
     if (rounds > 0 && toolsSummary.length > 0) {
-      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
-      addToHistory(chatId, 'assistant', `${toolContext}\n${finalText}`, 'telegram');
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(chatId, 'assistant', `${contextBlock}\n${finalText}`, 'telegram');
     } else {
       addToHistory(chatId, 'assistant', finalText, 'telegram');
     }
@@ -2452,6 +2517,7 @@ async function handleCommand(message) {
     // Handle tool use loop (max 10 rounds to allow multi-step tasks)
     let rounds = 0;
     const toolsSummary = []; // track what tools ran for history context
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
@@ -2473,7 +2539,9 @@ async function handleCommand(message) {
 
         try {
           const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const resultJson = JSON.stringify(result);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
           await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
         } catch (e) {
@@ -2496,16 +2564,18 @@ async function handleCommand(message) {
       });
     }
 
-    // Send final response and save to history
-    if (response.text) {
-      addToHistory(ownerChatId, 'assistant', response.text);
-      await sendWhatsApp(response.text);
+    // Send final response and save rich context to history
+    const ownerFinalText = response.text || `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(ownerChatId, 'assistant', `${contextBlock}\n${ownerFinalText}`);
     } else {
-      // If no final text (e.g. hit max rounds), let user know
-      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
-      addToHistory(ownerChatId, 'assistant', msg);
-      await sendWhatsApp(msg);
+      addToHistory(ownerChatId, 'assistant', ownerFinalText);
     }
+    await sendWhatsApp(ownerFinalText);
   } catch (error) {
     log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
@@ -2743,6 +2813,7 @@ When the client asks for ads, visuals, creatives, or mockups:
     // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
@@ -2772,7 +2843,9 @@ When the client asks for ads, visuals, creatives, or mockups:
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const resultJson = JSON.stringify(result);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline
           await deliverMediaInline(tool.name, result, 'whatsapp', from);
         } catch (e) {
@@ -2799,10 +2872,12 @@ When the client asks for ads, visuals, creatives, or mockups:
       ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    // Save tool-use summary to history so context persists across messages
+    // Save rich tool context to history so Sofia remembers what she generated across messages
     if (rounds > 0 && toolsSummary.length > 0) {
-      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
-      addToHistory(from, 'assistant', `${toolContext}\n${finalText}`, 'whatsapp');
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(from, 'assistant', `${contextBlock}\n${finalText}`, 'whatsapp');
     } else {
       addToHistory(from, 'assistant', finalText, 'whatsapp');
     }

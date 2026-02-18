@@ -194,16 +194,21 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     contactName,
   });
 
-  // Note: conversation history saving is handled by the callers (addToHistory)
+  // Load conversation history so Claude can resolve references like "same as above"
+  // History is saved to DB by callers (addToHistory in whatsapp-server.js)
+  const conversationHistory = getMessages(phone, 40);
 
   // Build prompt and send to Claude for natural extraction
   const sessionLang = session.language || 'en';
   const systemPrompt = buildOnboardingPrompt(session, contactName, sessionLang);
 
+  // Build messages array: full conversation history + current message
+  const messages = [...conversationHistory, { role: 'user', content: message }];
+
   try {
     const response = await askClaude({
       systemPrompt,
-      userMessage: message,
+      messages,
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'onboarding-flow',
