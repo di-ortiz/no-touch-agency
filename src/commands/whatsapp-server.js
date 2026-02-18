@@ -113,6 +113,13 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
   }
 }
 
+// JSON replacer: strip binary image buffers from tool results before sending to Claude.
+// _imageBuffers are only needed by deliverMediaInline for native WhatsApp upload, not by the AI.
+function stripBinaryBuffers(key, value) {
+  if (key === '_imageBuffers') return undefined;
+  return value;
+}
+
 // Helper: safely send a single media item, logging failures without throwing
 async function safeSendMedia(sendFn, url, caption, toolName) {
   try {
@@ -2758,7 +2765,7 @@ async function handleTelegramCommand(message, chatId) {
 
         try {
           const result = await executeCSATool(tool.name, tool.input);
-          const resultJson = JSON.stringify(result);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -3201,7 +3208,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSATool(tool.name, tool.input);
-          const resultJson = JSON.stringify(result);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
@@ -3437,7 +3444,7 @@ async function handleCommand(message) {
 
         try {
           const result = await executeCSATool(tool.name, tool.input);
-          const resultJson = JSON.stringify(result);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -3780,7 +3787,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSATool(tool.name, tool.input);
-          const resultJson = JSON.stringify(result);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline
