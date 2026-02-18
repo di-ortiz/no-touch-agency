@@ -99,6 +99,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
 }
 
 const app = express();
+app.set('trust proxy', 1); // Trust first proxy (Railway, Render, etc.)
 app.use(helmet());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
