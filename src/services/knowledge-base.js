@@ -256,7 +256,7 @@ function getDb() {
 export function getContactByPhone(phone) {
   const d = getDb();
   const normalized = phone?.replace(/[^0-9]/g, '');
-  return d.prepare('SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?').get(normalized);
+  return d.prepare(`SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).get(normalized);
 }
 
 export function createContact(data) {
@@ -280,7 +280,7 @@ export function updateContact(phone, updates) {
     values.push(value);
   }
   values.push(normalized);
-  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?`).run(...values);
+  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).run(...values);
 }
 
 /**
