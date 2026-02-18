@@ -77,6 +77,32 @@ async function sendThinkingIndicator(channel, chatId, message) {
   }
 }
 
+/**
+ * Persist a temporary image URL to Google Drive, returning a stable public URL.
+ * Falls back to the original URL if Drive upload fails.
+ */
+async function persistImageUrl(tempUrl, label) {
+  try {
+    const fileName = `${label || 'ad-image'}-${Date.now()}.png`;
+    const driveResult = await googleDrive.uploadImageFromUrl(tempUrl, fileName);
+    if (driveResult?.webContentLink) {
+      return driveResult.webContentLink;
+    }
+  } catch (e) {
+    log.warn('Image persistence failed, using original URL', { error: e.message });
+  }
+  return tempUrl; // fallback to original
+}
+
+// Helper: safely send a single media item, logging failures without throwing
+async function safeSendMedia(sendFn, url, caption, toolName) {
+  try {
+    await sendFn(url, caption);
+  } catch (e) {
+    log.warn('Failed to deliver media item', { error: e.message, toolName, url: url?.slice(0, 100) });
+  }
+}
+
 // Helper: deliver generated media (images/videos) inline after tool execution
 async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendImage = (url, caption) =>
@@ -84,45 +110,44 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  try {
-    // Generated ad images (DALL-E 3)
-    if (toolName === 'generate_ad_images' && result.images) {
-      for (const img of result.images) {
-        if (!img.url || img.error) continue;
-        await sendImage(img.url, img.label || img.format || 'Ad image');
+  // Generated ad images (DALL-E 3 / Flux Pro / Imagen 3)
+  if (toolName === 'generate_ad_images' && result.images) {
+    for (const img of result.images) {
+      if (!img.url || img.error) continue;
+      const stableUrl = await persistImageUrl(img.url, img.label || img.format);
+      await safeSendMedia(sendImage, stableUrl, img.label || img.format || 'Ad image', toolName);
+    }
+  }
+  // Generated ad video (Sora 2)
+  if (toolName === 'generate_ad_video' && result.videoUrl) {
+    await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
+  }
+  // Creative package (images + optional video)
+  if (toolName === 'generate_creative_package' && result.imageUrls) {
+    for (const url of result.imageUrls) {
+      if (!url) continue;
+      const stableUrl = await persistImageUrl(url, 'creative-package');
+      await safeSendMedia(sendImage, stableUrl, 'Creative package image', toolName);
+    }
+  }
+  // Ad library search results — send snapshot previews (already persistent URLs, no need to re-upload)
+  if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
+    for (const ad of result.ads) {
+      if (!ad.snapshotUrl) continue;
+      const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
+      await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
+    }
+  }
+  // Google Ads Transparency — send creative previews (already persistent URLs)
+  if (toolName === 'search_google_ads_transparency' && result.creatives) {
+    for (const creative of result.creatives) {
+      if (!creative.previewUrl) continue;
+      if (creative.format === 'VIDEO') {
+        await safeSendMedia(sendVideo, creative.previewUrl, `Google Ad — ${creative.format}`, toolName);
+      } else {
+        await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
       }
     }
-    // Generated ad video (Sora 2)
-    if (toolName === 'generate_ad_video' && result.videoUrl) {
-      await sendVideo(result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim());
-    }
-    // Creative package (images + optional video)
-    if (toolName === 'generate_creative_package' && result.imageUrls) {
-      for (const url of result.imageUrls) {
-        if (url) await sendImage(url, 'Creative package image');
-      }
-    }
-    // Ad library search results — send snapshot previews
-    if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
-      for (const ad of result.ads) {
-        if (!ad.snapshotUrl) continue;
-        const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
-        await sendImage(ad.snapshotUrl, caption);
-      }
-    }
-    // Google Ads Transparency — send creative previews
-    if (toolName === 'search_google_ads_transparency' && result.creatives) {
-      for (const creative of result.creatives) {
-        if (!creative.previewUrl) continue;
-        if (creative.format === 'VIDEO') {
-          await sendVideo(creative.previewUrl, `Google Ad — ${creative.format}`);
-        } else {
-          await sendImage(creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`);
-        }
-      }
-    }
-  } catch (e) {
-    log.warn('Failed to deliver media inline', { error: e.message, toolName });
   }
 }
 
@@ -454,31 +479,17 @@ CRITICAL RULES:
 - If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
-When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you *would* create — actually create it.
 
-1. *Gather the Creative Brief* — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
-   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
-   - Who is the target audience? (demographics, interests, pain points)
-   - What's the offer or value proposition? (discount, free trial, unique benefit?)
-   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
-   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
-   - What platforms? (Meta, Google, TikTok, Instagram?)
-   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
-   - Any competitors to reference or differentiate from?
-   - Specific products/services to feature?
-   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+RULE: ALWAYS call generate_ad_images, generate_ad_video, or generate_creative_package. Text descriptions of images are NEVER acceptable.
 
-2. *Research First* — Before generating, use your tools:
-   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
-   - Search competitor ads (search_ad_library) to see what's working in the space
-   - Check brand files if they have a Drive folder (list_client_files)
+PROCESS:
+1. *Quick Context Check* — If the request is missing critical info (you don't know the product/brand at all), ask at most 1-2 quick questions. But if you already have client context (brand, website, industry) from the knowledge base, SKIP questions and generate immediately.
+2. *Generate First, Iterate Later* — Call the generation tool right away with whatever context you have. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill gaps. It's better to generate something real and iterate than to ask questions.
+3. *Use Rich Prompts* — Pass ALL available context (brand colors, audience, references, style, mood) to the generation tools. Browse the client's website if you need visual inspiration, but do this IN PARALLEL with generation, not as a blocker.
+4. *Present & Iterate* — After delivering the actual images, ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
 
-3. *Generate with Full Context* — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
-
-4. *Present & Iterate* — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
-
-EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
-EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
+IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -2571,31 +2582,17 @@ CRITICAL RULES:
 - If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
-When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you <i>would</i> create — actually create it.
 
-1. <b>Gather the Creative Brief</b> — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
-   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
-   - Who is the target audience? (demographics, interests, pain points)
-   - What's the offer or value proposition? (discount, free trial, unique benefit?)
-   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
-   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
-   - What platforms? (Meta, Google, TikTok, Instagram?)
-   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
-   - Any competitors to reference or differentiate from?
-   - Specific products/services to feature?
-   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+RULE: ALWAYS call generate_ad_images, generate_ad_video, or generate_creative_package. Text descriptions of images are NEVER acceptable.
 
-2. <b>Research First</b> — Before generating, use your tools:
-   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
-   - Search competitor ads (search_ad_library) to see what's working in the space
-   - Check brand files if they have a Drive folder (list_client_files)
+PROCESS:
+1. <b>Quick Context Check</b> — If the request is missing critical info (you don't know the product/brand at all), ask at most 1-2 quick questions. But if you already have client context (brand, website, industry) from the knowledge base, SKIP questions and generate immediately.
+2. <b>Generate First, Iterate Later</b> — Call the generation tool right away with whatever context you have. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill gaps. It's better to generate something real and iterate than to ask questions.
+3. <b>Use Rich Prompts</b> — Pass ALL available context (brand colors, audience, references, style, mood) to the generation tools. Browse the client's website if you need visual inspiration, but do this IN PARALLEL with generation, not as a blocker.
+4. <b>Present & Iterate</b> — After delivering the actual images, ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
 
-3. <b>Generate with Full Context</b> — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
-
-4. <b>Present & Iterate</b> — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
-
-EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
-EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
+IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -3016,9 +3013,10 @@ If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
-1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
-2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions
+1. ALWAYS call generate_ad_images or generate_creative_package — NEVER substitute with text descriptions of what you would create
+2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
+3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
+4. After delivering real images, ask if they want adjustments
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
@@ -3591,9 +3589,10 @@ If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
-1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
-2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions
+1. ALWAYS call generate_ad_images or generate_creative_package — NEVER substitute with text descriptions of what you would create
+2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
+3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
+4. After delivering real images, ask if they want adjustments
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:

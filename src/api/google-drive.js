@@ -1,4 +1,6 @@
 import { google } from 'googleapis';
+import axios from 'axios';
+import { Readable } from 'stream';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
@@ -290,9 +292,67 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
   );
 }
 
+/**
+ * Download an image from a URL and upload it to Google Drive, returning a public viewable link.
+ * Used to persist temporary AI-generated image URLs (DALL-E, Flux, Imagen) before sending to WhatsApp.
+ *
+ * @param {string} imageUrl - The temporary image URL to persist
+ * @param {string} fileName - Filename for the uploaded image
+ * @param {string} [folderId] - Google Drive folder to upload to
+ * @returns {object|null} { id, webViewLink, webContentLink } or null on failure
+ */
+export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  try {
+    // Download image as stream
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    const contentType = response.headers['content-type'] || 'image/png';
+    const stream = Readable.from(Buffer.from(response.data));
+
+    // Upload to Drive
+    const uploaded = await rateLimited('google', () =>
+      retry(async () => {
+        const res = await drive.files.create({
+          requestBody: {
+            name: fileName,
+            parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
+          },
+          media: {
+            mimeType: contentType,
+            body: stream,
+          },
+          fields: 'id, name, webViewLink, webContentLink',
+        });
+        return res.data;
+      }, { retries: 2, label: 'Google Drive upload image from URL' })
+    );
+
+    // Make publicly viewable so WhatsApp can fetch it
+    await rateLimited('google', () =>
+      retry(async () => {
+        await drive.permissions.create({
+          fileId: uploaded.id,
+          requestBody: { type: 'anyone', role: 'reader' },
+        });
+      }, { retries: 2, label: 'Google Drive set image public' })
+    );
+
+    // Build direct content link
+    const webContentLink = `https://drive.google.com/uc?export=view&id=${uploaded.id}`;
+
+    log.info('Image persisted to Google Drive', { id: uploaded.id, fileName });
+    return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink };
+  } catch (e) {
+    log.warn('Failed to persist image to Google Drive', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
+    return null;
+  }
+}
+
 export default {
   listFiles, getFile, downloadFile, exportDocument,
-  createFolder, createDocument, appendToDocument, uploadFile,
+  createFolder, createDocument, appendToDocument, uploadFile, uploadImageFromUrl,
   ensureClientFolders,
   shareFolderWithAnyone, shareFolderWithEmail,
 };

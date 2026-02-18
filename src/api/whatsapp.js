@@ -157,8 +157,14 @@ export async function sendWhatsAppImage(imageUrl, caption, to) {
       }, { retries: 2, label: 'WhatsApp image send' });
     });
   } catch (error) {
-    log.warn('WhatsApp image send failed, falling back to text URL', { error: error.message });
-    await sendWhatsApp(`${caption ? `${caption}\n` : ''}${imageUrl}`, to);
+    log.warn('WhatsApp image send failed', { error: error.message, url: imageUrl?.slice(0, 100) });
+    // Only send the URL as text if it's a persistent URL (Google Drive, etc.), not a temporary AI-generated URL
+    const isTemporaryUrl = imageUrl?.includes('oaidalleapiprodscus') || imageUrl?.includes('dall-e') || imageUrl?.includes('fal.run') || imageUrl?.includes('fal.ai');
+    if (isTemporaryUrl) {
+      await sendWhatsApp(`${caption ? `${caption}\n` : ''}[Image could not be delivered — the image was generated but the temporary URL expired. Please try generating again.]`, to);
+    } else {
+      await sendWhatsApp(`${caption ? `${caption}\n` : ''}${imageUrl}`, to);
+    }
   }
 }
 
