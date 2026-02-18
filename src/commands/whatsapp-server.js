@@ -225,6 +225,49 @@ app.post('/api/client-init', async (req, res) => {
   }
 });
 
+// --- GET /api/leadsie-connect --- (redirect client to Leadsie access grant page)
+// Lovable redirects clients here after checkout. We look up their pending record,
+// create a Leadsie invite on the fly, and redirect them to the Leadsie URL.
+app.get('/api/leadsie-connect', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).json({ error: 'Missing token parameter. Usage: /api/leadsie-connect?token=<client-token>' });
+    }
+
+    // Look up pending client by token
+    const pending = getPendingClientByToken(token) || getPendingClientByTokenAny(token);
+    if (!pending) {
+      return res.status(404).json({ error: 'Client not found. Please complete checkout first.' });
+    }
+
+    const clientName = pending.business_name || pending.name || pending.email || 'New Client';
+
+    // Determine platforms — default to ad accounts + WordPress + HubSpot
+    const platforms = ['facebook', 'google', 'wordpress', 'hubspot'];
+    if (pending.website) platforms.push('wordpress'); // ensure wordpress if they have a site
+
+    // Deduplicate
+    const uniquePlatforms = [...new Set(platforms)];
+
+    // Create Leadsie invite via API
+    const invite = await leadsie.createInvite({
+      clientName,
+      clientEmail: pending.email || '',
+      platforms: uniquePlatforms,
+      message: `Hi ${pending.name || clientName}! Welcome aboard. Please grant us access to your accounts below — it's a secure, one-click process. This lets us manage your ad campaigns and optimize your results right away.`,
+    });
+
+    log.info('Leadsie connect redirect', { token, clientName, inviteUrl: invite.inviteUrl, platforms: uniquePlatforms });
+
+    // Redirect client directly to the Leadsie invite page
+    return res.redirect(invite.inviteUrl);
+  } catch (error) {
+    log.error('Leadsie connect failed', { error: error.message, token: req.query.token });
+    return res.status(500).json({ error: 'Failed to create access request. Please contact support.' });
+  }
+});
+
 // Pending approval actions
 const pendingApprovals = new Map();
 
@@ -3713,6 +3756,7 @@ export function startServer(port) {
     console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
     console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
     console.log(`Client init API: http://your-server:${p}/api/client-init`);
+    console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
     console.log(`Health check: http://your-server:${p}/health`);
 
     // Fetch Telegram bot username if not configured
