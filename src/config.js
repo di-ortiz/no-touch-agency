@@ -36,6 +36,9 @@ const envSchema = z.object({
   META_USER_ACCESS_TOKEN: z.string().optional().default(''),
   META_BUSINESS_ID: z.string().optional().default(''),
 
+  // Google Analytics
+  GA4_PROPERTY_ID: z.string().optional().default(''),
+
   // Google Ads
   GOOGLE_ADS_DEVELOPER_TOKEN: z.string().optional().default(''),
   GOOGLE_ADS_CLIENT_ID: z.string().optional().default(''),
@@ -60,6 +63,23 @@ const envSchema = z.object({
 
   // Canva
   CANVA_API_KEY: z.string().optional().default(''),
+
+  // DataForSEO
+  DATAFORSEO_LOGIN: z.string().optional().default(''),
+  DATAFORSEO_PASSWORD: z.string().optional().default(''),
+
+  // Leadsie
+  LEADSIE_API_KEY: z.string().optional().default(''),
+  LEADSIE_WEBHOOK_SECRET: z.string().optional().default(''),
+
+  // Client onboarding
+  WHATSAPP_BUSINESS_PHONE: z.string().optional().default(''), // The actual phone number for wa.me links
+  TELEGRAM_BOT_USERNAME: z.string().optional().default(''), // For t.me deep links
+  CLIENT_INIT_API_KEY: z.string().optional().default(''), // Optional API key to protect /api/client-init
+
+  // Supabase (Lovable onboarding submissions)
+  SUPABASE_URL: z.string().optional().default(''),
+  SUPABASE_ANON_KEY: z.string().optional().default(''),
 
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

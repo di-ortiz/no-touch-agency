@@ -14,17 +14,24 @@ let docsClient;
 
 function getAuth() {
   if (!auth) {
-    if (config.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS)) {
+    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+    if (fs.existsSync(credPath)) {
       auth = new google.auth.GoogleAuth({
-        keyFile: config.GOOGLE_APPLICATION_CREDENTIALS,
+        keyFile: credPath,
         scopes: [
           'https://www.googleapis.com/auth/drive',
           'https://www.googleapis.com/auth/documents',
         ],
       });
     } else {
-      log.warn('Google credentials not configured; Drive operations will fail');
-      return null;
+      log.error('Google credentials MISSING', { credPath });
+      throw new Error(
+        `Google service account credentials not found. ` +
+        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
+        `To fix: 1) Go to console.cloud.google.com → IAM → Service Accounts, ` +
+        `2) Create a service account with Drive/Docs API access, ` +
+        `3) Download the JSON key and save it to ${credPath}`
+      );
     }
   }
   return auth;
@@ -189,6 +196,31 @@ export async function uploadFile(name, content, mimeType, folderId) {
   );
 }
 
+/**
+ * Append text to the end of an existing Google Doc.
+ */
+export async function appendToDocument(documentId, text) {
+  const docs = getDocs();
+  if (!docs) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      // Get current document length
+      const doc = await docs.documents.get({ documentId });
+      const endIndex = doc.data.body.content
+        .reduce((max, el) => Math.max(max, el.endIndex || 0), 0) - 1;
+
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [{ insertText: { location: { index: Math.max(1, endIndex) }, text: '\n' + text } }],
+        },
+      });
+      return { documentId, appended: true };
+    }, { retries: 3, label: 'Google Drive append doc' })
+  );
+}
+
 // --- Client Folder Structure ---
 
 export async function ensureClientFolders(clientName) {
@@ -209,8 +241,58 @@ export async function ensureClientFolders(clientName) {
   return folders;
 }
 
+// --- Sharing ---
+
+/**
+ * Share a folder (or file) with "anyone with the link" as a writer.
+ * This allows clients to upload brand assets via a shared link.
+ */
+export async function shareFolderWithAnyone(folderId, role = 'writer') {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      await drive.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          type: 'anyone',
+          role,
+        },
+      });
+      log.info(`Shared folder ${folderId} with anyone (${role})`);
+      return { folderId, shared: true, role };
+    }, { retries: 3, label: 'Google Drive share folder' })
+  );
+}
+
+/**
+ * Share a folder with a specific email address.
+ */
+export async function shareFolderWithEmail(folderId, email, role = 'writer') {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      await drive.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          type: 'user',
+          role,
+          emailAddress: email,
+        },
+        sendNotificationEmail: true,
+      });
+      log.info(`Shared folder ${folderId} with ${email} (${role})`);
+      return { folderId, email, shared: true, role };
+    }, { retries: 3, label: 'Google Drive share with email' })
+  );
+}
+
 export default {
   listFiles, getFile, downloadFile, exportDocument,
-  createFolder, createDocument, uploadFile,
+  createFolder, createDocument, appendToDocument, uploadFile,
   ensureClientFolders,
+  shareFolderWithAnyone, shareFolderWithEmail,
 };

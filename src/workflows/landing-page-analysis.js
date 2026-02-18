@@ -1,6 +1,6 @@
 import logger from '../utils/logger.js';
 import { deepAnalysis } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
+import { notifyOwnerMessage as sendWhatsApp, notifyOwnerAlert as sendAlert } from '../utils/notify-owner.js';
 import * as hubspot from '../api/hubspot.js';
 import { getAllClients, getClient } from '../services/knowledge-base.js';
 

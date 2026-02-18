@@ -31,25 +31,39 @@ export async function sendTelegram(message, chatId) {
 
   for (const chunk of chunks) {
     await rateLimited('telegram', async () => {
-      return retry(async () => {
-        const result = await axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
-          chat_id: recipient,
-          text: chunk,
-          parse_mode: 'HTML',
+      try {
+        const result = await retry(async () => {
+          return axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
+            chat_id: recipient,
+            text: chunk,
+            parse_mode: 'HTML',
+          });
+        }, {
+          retries: 2,
+          label: 'Telegram send',
+          shouldRetry: (err) => {
+            const status = err.response?.status;
+            if (status === 400) return false; // Don't retry HTML parse errors
+            return !status || status === 429 || status >= 500;
+          },
         });
 
-        recordCost({
-          platform: 'telegram',
-          workflow: 'telegram',
-          costCentsOverride: 0, // Telegram Bot API is free
-        });
-
+        recordCost({ platform: 'telegram', workflow: 'telegram', costCentsOverride: 0 });
         log.debug('Telegram sent', { messageId: result.data?.result?.message_id, to: recipient });
         return result.data;
-      }, {
-        retries: 3,
-        label: 'Telegram send',
-      });
+      } catch (htmlError) {
+        // If HTML parsing failed (400), retry without parse_mode
+        if (htmlError.response?.status === 400) {
+          log.debug('Telegram HTML parse failed, retrying without parse_mode', { to: recipient });
+          const fallback = await axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
+            chat_id: recipient,
+            text: chunk,
+          });
+          recordCost({ platform: 'telegram', workflow: 'telegram', costCentsOverride: 0 });
+          return fallback.data;
+        }
+        throw htmlError;
+      }
     });
   }
 }
@@ -149,6 +163,100 @@ export async function getMe() {
   return result.data?.result;
 }
 
+/**
+ * Send a typing action indicator via Telegram.
+ */
+export async function sendTypingAction(chatId) {
+  if (!config.TELEGRAM_BOT_TOKEN) return;
+  const recipient = chatId || config.TELEGRAM_OWNER_CHAT_ID;
+  try {
+    await axios.post(`${TELEGRAM_API_BASE}/sendChatAction`, { chat_id: recipient, action: 'typing' });
+  } catch (e) {
+    log.debug('Failed to send typing action', { error: e.message });
+  }
+}
+
+/**
+ * Send a "thinking" message with typing indicator.
+ */
+export async function sendThinkingMessage(chatId, message) {
+  await sendTypingAction(chatId);
+  const text = message || 'Give me a moment... I\'m working on this for you.';
+  return sendTelegram(text, chatId);
+}
+
+/**
+ * Send a Telegram photo via Bot API. Falls back to text URL on failure.
+ */
+export async function sendTelegramPhoto(photoUrl, caption, chatId) {
+  if (!config.TELEGRAM_BOT_TOKEN) return null;
+  const recipient = chatId || config.TELEGRAM_OWNER_CHAT_ID;
+  try {
+    await rateLimited('telegram', async () => {
+      return retry(async () => {
+        const result = await axios.post(`${TELEGRAM_API_BASE}/sendPhoto`, {
+          chat_id: recipient,
+          photo: photoUrl,
+          ...(caption ? { caption, parse_mode: 'HTML' } : {}),
+        });
+        log.debug('Telegram photo sent', { to: recipient });
+        return result.data;
+      }, { retries: 2, label: 'Telegram photo send' });
+    });
+  } catch (error) {
+    log.warn('Telegram photo send failed, falling back to text URL', { error: error.message });
+    await sendTelegram(`${caption ? `${caption}\n` : ''}${photoUrl}`, chatId);
+  }
+}
+
+/**
+ * Send a Telegram video via Bot API.
+ */
+export async function sendTelegramVideo(videoUrl, caption, chatId) {
+  if (!config.TELEGRAM_BOT_TOKEN) return null;
+  const recipient = chatId || config.TELEGRAM_OWNER_CHAT_ID;
+  try {
+    await rateLimited('telegram', async () => {
+      return retry(async () => {
+        const result = await axios.post(`${TELEGRAM_API_BASE}/sendVideo`, {
+          chat_id: recipient,
+          video: videoUrl,
+          ...(caption ? { caption, parse_mode: 'HTML' } : {}),
+        });
+        log.debug('Telegram video sent', { to: recipient });
+        return result.data;
+      }, { retries: 2, label: 'Telegram video send' });
+    });
+  } catch (error) {
+    log.warn('Telegram video send failed, falling back to text URL', { error: error.message });
+    await sendTelegram(`${caption ? `${caption}\n` : ''}${videoUrl}`, chatId);
+  }
+}
+
+/**
+ * Send a Telegram document via Bot API.
+ */
+export async function sendTelegramDocument(documentUrl, caption, chatId) {
+  if (!config.TELEGRAM_BOT_TOKEN) return null;
+  const recipient = chatId || config.TELEGRAM_OWNER_CHAT_ID;
+  try {
+    await rateLimited('telegram', async () => {
+      return retry(async () => {
+        const result = await axios.post(`${TELEGRAM_API_BASE}/sendDocument`, {
+          chat_id: recipient,
+          document: documentUrl,
+          ...(caption ? { caption, parse_mode: 'HTML' } : {}),
+        });
+        log.debug('Telegram document sent', { to: recipient });
+        return result.data;
+      }, { retries: 2, label: 'Telegram document send' });
+    });
+  } catch (error) {
+    log.warn('Telegram document send failed, falling back to text URL', { error: error.message });
+    await sendTelegram(`${caption ? `${caption}\n` : ''}${documentUrl}`, chatId);
+  }
+}
+
 function splitMessage(text, maxLength) {
   if (text.length <= maxLength) return [text];
   const chunks = [];
@@ -169,4 +277,4 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendTelegram, sendAlert, sendMorningBriefing, sendApprovalRequest, setWebhook, getMe };
+export default { sendTelegram, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument, sendAlert, sendMorningBriefing, sendApprovalRequest, setWebhook, getMe, sendTypingAction, sendThinkingMessage };

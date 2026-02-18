@@ -12,6 +12,9 @@ import { runCompetitorMonitor } from './workflows/competitor-monitor.js';
 import { runCrossDepartmentDetection } from './workflows/cross-department.js';
 import { runLandingPageAnalysis } from './workflows/landing-page-analysis.js';
 import { runTestManager } from './workflows/ab-test-manager.js';
+import { runClientCheckIn } from './workflows/client-check-in.js';
+import { runClientMorningBriefing } from './workflows/client-morning-briefing.js';
+import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost-alert.js';
 import { sendAlert } from './api/whatsapp.js';
 import config from './config.js';
 import fs from 'fs';
@@ -24,6 +27,21 @@ async function main() {
   // Ensure data directory exists
   if (!fs.existsSync('data')) fs.mkdirSync('data', { recursive: true });
   if (!fs.existsSync('logs')) fs.mkdirSync('logs', { recursive: true });
+  if (!fs.existsSync('config')) fs.mkdirSync('config', { recursive: true });
+
+  // Write Google service account JSON from env var if the file doesn't exist
+  // (Railway and other cloud platforms can't have gitignored files, so we store the JSON as an env var)
+  const saPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON && !fs.existsSync(saPath)) {
+    try {
+      // Validate it's valid JSON before writing
+      JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      fs.writeFileSync(saPath, process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      log.info('Wrote Google service account JSON from env var', { path: saPath });
+    } catch (e) {
+      log.error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON', { error: e.message });
+    }
+  }
 
   // 1. Start WhatsApp webhook server
   startServer();
@@ -39,6 +57,10 @@ async function main() {
     competitorMonitor: runCompetitorMonitor,
     crossDepartment: runCrossDepartmentDetection,
     landingPageAnalysis: runLandingPageAnalysis,
+    clientCheckIn: runClientCheckIn,
+    clientMorningBriefing: runClientMorningBriefing,
+    morningCostAlert: runMorningCostAlert,
+    eveningCostAlert: runEveningCostAlert,
   });
 
   // 3. Run ClickUp monitor at startup and schedule it

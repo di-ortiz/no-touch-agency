@@ -1,7 +1,7 @@
 import logger from '../utils/logger.js';
 import { deepAnalysis } from '../api/anthropic.js';
 import { searchAds, getPageAds, parseAdLibraryResults, formatAdsForWhatsApp } from '../api/meta-ad-library.js';
-import { sendWhatsApp } from '../api/whatsapp.js';
+import { notifyOwnerMessage as sendWhatsApp } from '../utils/notify-owner.js';
 import { getClient, buildClientContext } from '../services/knowledge-base.js';
 import { auditLog } from '../services/cost-tracker.js';
 import { SYSTEM_PROMPTS, USER_PROMPTS } from '../prompts/templates.js';

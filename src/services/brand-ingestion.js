@@ -109,7 +109,7 @@ Analyze the provided documents and extract the following information in JSON for
 }
 Only include fields where you find clear information. Return valid JSON only.`,
     userMessage: `Extract brand guidelines from these documents for client "${client.name}":\n\n${docSummary}`,
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-haiku-4-5-20251001',
     maxTokens: 2048,
     workflow: 'brand-ingestion',
     clientId,

@@ -26,9 +26,13 @@ export async function retry(fn, opts = {}) {
       if (attempt >= retries || !shouldRetry(error)) {
         break;
       }
-      const delay = baseDelay * Math.pow(2, attempt);
+      // Use longer delay for rate limits (429) since they're per-minute
+      const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
+      const effectiveBase = isRateLimit ? Math.max(baseDelay, 15000) : baseDelay;
+      const delay = effectiveBase * Math.pow(2, attempt);
       logger.warn(`${label} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms`, {
         error: error.message,
+        isRateLimit,
       });
       await sleep(delay);
     }
@@ -44,7 +48,7 @@ export function sleep(ms) {
  * Check if an HTTP error is retryable (network errors, 429, 5xx).
  */
 export function isRetryableHttpError(error) {
-  if (!error.response) return true; // network error
-  const status = error.response?.status || error.status;
-  return status === 429 || status >= 500;
+  const status = error.status || error.response?.status;
+  if (status) return status === 429 || status >= 500;
+  return !error.response; // network error (no response at all)
 }

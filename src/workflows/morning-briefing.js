@@ -1,6 +1,6 @@
 import logger from '../utils/logger.js';
 import { askClaude } from '../api/anthropic.js';
-import { sendMorningBriefing, sendAlert } from '../api/whatsapp.js';
+import { notifyOwnerBriefing as sendMorningBriefing, notifyOwnerAlert as sendAlert } from '../utils/notify-owner.js';
 import * as clickup from '../api/clickup.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as googleAds from '../api/google-ads.js';

@@ -1,5 +1,5 @@
 import logger from '../utils/logger.js';
-import { sendAlert } from '../api/whatsapp.js';
+import { notifyOwnerAlert as sendAlert } from '../utils/notify-owner.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as clickup from '../api/clickup.js';
 import { getAllClients, saveCreative, getTopCreatives } from '../services/knowledge-base.js';

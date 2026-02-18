@@ -1,6 +1,6 @@
 import logger from '../utils/logger.js';
 import { askClaude, deepAnalysis } from '../api/anthropic.js';
-import { sendWhatsApp, sendApprovalRequest } from '../api/whatsapp.js';
+import { notifyOwnerMessage as sendWhatsApp, notifyOwnerApproval as sendApprovalRequest } from '../utils/notify-owner.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as clickup from '../api/clickup.js';
 import { getClient, buildClientContext, getTopCreatives, saveCreative } from '../services/knowledge-base.js';

@@ -150,13 +150,195 @@ function getDb() {
         updated_at TEXT DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS client_contacts (
+        id TEXT PRIMARY KEY,
+        client_id TEXT,
+        phone TEXT UNIQUE,
+        name TEXT,
+        email TEXT,
+        role TEXT DEFAULT 'owner',
+        channel TEXT DEFAULT 'whatsapp',
+        language TEXT DEFAULT 'en',
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS onboarding_sessions (
+        id TEXT PRIMARY KEY,
+        phone TEXT NOT NULL,
+        status TEXT DEFAULT 'in_progress',
+        current_step TEXT DEFAULT 'name',
+        answers TEXT DEFAULT '{}',
+        client_id TEXT,
+        leadsie_invite_id TEXT,
+        drive_folder_url TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS pending_clients (
+        id TEXT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        email TEXT,
+        plan TEXT,
+        name TEXT,
+        status TEXT DEFAULT 'pending',
+        channel TEXT,
+        chat_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        activated_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        channel TEXT NOT NULL DEFAULT 'whatsapp',
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
       CREATE INDEX IF NOT EXISTS idx_campaign_client ON campaign_history(client_id);
       CREATE INDEX IF NOT EXISTS idx_creative_client ON creative_library(client_id);
       CREATE INDEX IF NOT EXISTS idx_test_client ON test_results(client_id);
       CREATE INDEX IF NOT EXISTS idx_competitor_client ON competitor_intel(client_id);
+      CREATE INDEX IF NOT EXISTS idx_contact_phone ON client_contacts(phone);
+      CREATE INDEX IF NOT EXISTS idx_contact_client ON client_contacts(client_id);
+      CREATE INDEX IF NOT EXISTS idx_onboarding_phone ON onboarding_sessions(phone);
+      CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_clients(token);
+      CREATE INDEX IF NOT EXISTS idx_convo_chat ON conversation_history(chat_id);
     `);
+
+    // Safe migration: add channel column to onboarding_sessions if missing
+    try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add location and channels columns to clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN location TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN channels_have TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN channels_need TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_brand_assets_folder_id TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add language + extra form fields to pending_clients
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN phone TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN website TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN business_name TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN business_description TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: add plan and conversation_log_doc_id to clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN plan TEXT DEFAULT 'smb'"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN conversation_log_doc_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE onboarding_sessions ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE client_contacts ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: expanded onboarding fields on clients
+    try { db.exec("ALTER TABLE clients ADD COLUMN pricing TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN pains TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN company_size TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN sales_cycle TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN avg_transaction_value TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN current_campaigns TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN sales_process TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN additional_info TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_profile_sheet_id TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migration: add channel to client_contacts for cross-channel identity
+    try { db.exec("ALTER TABLE client_contacts ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
   }
   return db;
+}
+
+// --- Client Contacts ---
+
+export function getContactByPhone(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  return d.prepare('SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?').get(normalized);
+}
+
+export function createContact(data) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`
+    INSERT INTO client_contacts (id, client_id, phone, name, email, role, channel, language)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.clientId || null, data.phone, data.name || null, data.email || null, data.role || 'owner', data.channel || 'whatsapp', data.language || 'en');
+  return { id, ...data };
+}
+
+export function updateContact(phone, updates) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(value);
+  }
+  values.push(normalized);
+  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?`).run(...values);
+}
+
+/**
+ * Get all contact entries for a given client_id (supports cross-channel identity).
+ */
+export function getContactsByClientId(clientId) {
+  const d = getDb();
+  return d.prepare('SELECT * FROM client_contacts WHERE client_id = ?').all(clientId);
+}
+
+// --- Onboarding Sessions ---
+
+export function getOnboardingSession(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  const row = d.prepare("SELECT * FROM onboarding_sessions WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ? AND status = 'in_progress' ORDER BY created_at DESC LIMIT 1").get(normalized);
+  if (row) {
+    row.answers = row.answers ? JSON.parse(row.answers) : {};
+  }
+  return row;
+}
+
+export function createOnboardingSession(phone, channel = 'whatsapp', language = 'en', prePopulated = {}) {
+  const d = getDb();
+  const id = uuid();
+  const answers = { ...prePopulated };
+
+  // Determine the first step that still needs an answer
+  const allSteps = [
+    'name', 'business_name', 'website', 'business_description', 'product_service',
+    'pricing', 'avg_transaction_value', 'target_audience', 'location', 'competitors',
+    'company_size', 'sales_process', 'sales_cycle', 'channels_have', 'channels_need',
+    'current_campaigns', 'monthly_budget', 'goals', 'pains', 'additional_info',
+  ];
+  let startStep = 'name';
+  for (const step of allSteps) {
+    if (!answers[step]) {
+      startStep = step;
+      break;
+    }
+  }
+
+  d.prepare('INSERT INTO onboarding_sessions (id, phone, status, current_step, answers, channel, language) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, phone, 'in_progress', startStep, JSON.stringify(answers), channel, language);
+  return { id, phone, status: 'in_progress', currentStep: startStep, answers, channel, language };
+}
+
+export function updateOnboardingSession(id, updates) {
+  const d = getDb();
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
+  }
+  fields.push("updated_at = datetime('now')");
+  values.push(id);
+  d.prepare(`UPDATE onboarding_sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
 
 // --- Client CRUD ---
@@ -170,8 +352,10 @@ export function createClient(data) {
   d.prepare(`
     INSERT INTO clients (id, name, hubspot_id, industry, website, description, target_audience,
       competitors, brand_voice, monthly_budget_cents, target_roas, target_cpa_cents, primary_kpi, goals,
-      meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      meta_ad_account_id, google_ads_customer_id, tiktok_advertiser_id, twitter_ads_account_id, status,
+      location, channels_have, channels_need, product_service, plan,
+      pricing, pains, company_size, sales_cycle, avg_transaction_value, current_campaigns, sales_process, additional_info)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.name, data.hubspotId || null, data.industry || null, data.website || null,
     data.description || null, data.targetAudience || null, competitors, data.brandVoice || null,
@@ -180,6 +364,11 @@ export function createClient(data) {
     data.metaAdAccountId || null, data.googleAdsCustomerId || null,
     data.tiktokAdvertiserId || null, data.twitterAdsAccountId || null,
     data.status || 'active',
+    data.location || null, data.channelsHave || null, data.channelsNeed || null,
+    data.productService || null, data.plan || 'smb',
+    data.pricing || null, data.pains || null, data.companySize || null,
+    data.salesCycle || null, data.avgTransactionValue || null,
+    data.currentCampaigns || null, data.salesProcess || null, data.additionalInfo || null,
   );
 
   log.info(`Created client: ${data.name}`, { id });
@@ -344,6 +533,14 @@ export function buildClientContext(clientId) {
   context += `Primary KPI: ${client.primary_kpi || 'N/A'}\n`;
   context += `Brand Voice: ${client.brand_voice || 'N/A'}\n`;
   context += `Competitors: ${(client.competitors || []).join(', ') || 'N/A'}\n`;
+  if (client.pricing) context += `Pricing: ${client.pricing}\n`;
+  if (client.avg_transaction_value) context += `Avg Transaction Value: ${client.avg_transaction_value}\n`;
+  if (client.company_size) context += `Company Size: ${client.company_size}\n`;
+  if (client.sales_process) context += `Sales Process: ${client.sales_process}\n`;
+  if (client.sales_cycle) context += `Sales Cycle: ${client.sales_cycle}\n`;
+  if (client.current_campaigns) context += `Current Campaigns: ${client.current_campaigns}\n`;
+  if (client.pains) context += `Pains/Gaps: ${client.pains}\n`;
+  if (client.additional_info) context += `Additional Info: ${client.additional_info}\n`;
 
   if (history.length > 0) {
     context += `\n## Recent Campaign History (last ${history.length}):\n`;
@@ -364,6 +561,193 @@ export function buildClientContext(clientId) {
   return context;
 }
 
+// --- Pending Clients (from website payment) ---
+
+export function createPendingClient(data) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`
+    INSERT INTO pending_clients (id, token, email, plan, name, language, phone, website, business_name, business_description, product_service, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+  `).run(id, data.token, data.email || null, data.plan || null, data.name || null,
+    data.language || 'en', data.phone || null, data.website || null,
+    data.business_name || null, data.business_description || null, data.product_service || null);
+  log.info('Created pending client', { id, token: data.token });
+  return { id, token: data.token, ...data };
+}
+
+export function getPendingClientByToken(token) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE token = ? AND status = 'pending'").get(token);
+}
+
+/**
+ * Look up a pending client by token regardless of status.
+ * Used for cross-channel linking when a token was already activated on another channel.
+ */
+export function getPendingClientByTokenAny(token) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE token = ?").get(token);
+}
+
+export function getPendingClientByChatId(chatId) {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE chat_id = ? ORDER BY activated_at DESC LIMIT 1").get(chatId);
+}
+
+/**
+ * Get the most recently created pending client that hasn't been activated yet.
+ * Used as a fallback when bare /start is received without a token.
+ */
+export function getLatestPendingClient() {
+  const d = getDb();
+  return d.prepare("SELECT * FROM pending_clients WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1").get();
+}
+
+export function activatePendingClient(token, chatId, channel) {
+  const d = getDb();
+  d.prepare(`
+    UPDATE pending_clients
+    SET status = 'activated', chat_id = ?, channel = ?, activated_at = datetime('now')
+    WHERE token = ?
+  `).run(chatId, channel, token);
+  log.info('Activated pending client', { token, chatId, channel });
+}
+
+// --- Persistent Conversation History ---
+
+export function saveMessage(chatId, channel, role, content) {
+  const d = getDb();
+  d.prepare('INSERT INTO conversation_history (chat_id, channel, role, content) VALUES (?, ?, ?, ?)').run(chatId, channel, role, content);
+}
+
+export function getMessages(chatId, limit = 40) {
+  const d = getDb();
+  const rows = d.prepare('SELECT role, content FROM conversation_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?').all(chatId, limit);
+  return rows.reverse(); // oldest first
+}
+
+/**
+ * Get conversation history across ALL channels for a client.
+ * Merges messages from all contact identifiers linked to this client_id.
+ */
+export function getCrossChannelHistory(clientId, limit = 40) {
+  const d = getDb();
+  const contacts = d.prepare('SELECT phone, channel FROM client_contacts WHERE client_id = ?').all(clientId);
+  if (contacts.length === 0) return [];
+
+  if (contacts.length === 1) {
+    return d.prepare('SELECT role, content, channel, created_at FROM conversation_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?')
+      .all(contacts[0].phone, limit)
+      .reverse();
+  }
+
+  const chatIds = contacts.map(c => c.phone);
+  const placeholders = chatIds.map(() => '?').join(', ');
+  const rows = d.prepare(`
+    SELECT role, content, channel, created_at FROM conversation_history
+    WHERE chat_id IN (${placeholders})
+    ORDER BY id DESC LIMIT ?
+  `).all(...chatIds, limit);
+
+  return rows.reverse();
+}
+
+export function clearMessages(chatId) {
+  const d = getDb();
+  d.prepare('DELETE FROM conversation_history WHERE chat_id = ?').run(chatId);
+}
+
+// --- Plan-based daily message limits ---
+
+const PLAN_DAILY_LIMITS = {
+  smb: 20,
+  medium: 50,
+  enterprise: 200,
+};
+
+export function getClientMessageCountToday(chatId) {
+  const d = getDb();
+  const row = d.prepare(`
+    SELECT COUNT(*) as count FROM conversation_history
+    WHERE chat_id = ? AND role = 'user' AND created_at >= date('now')
+  `).get(chatId);
+  return row?.count || 0;
+}
+
+export function checkClientMessageLimit(chatId) {
+  const contact = getContactByPhone(chatId);
+  if (!contact?.client_id) return { allowed: true, remaining: 999, limit: 999, plan: 'unknown', used: 0 };
+
+  const client = getClient(contact.client_id);
+  const plan = (client?.plan || 'smb').toLowerCase();
+  const limit = PLAN_DAILY_LIMITS[plan] || PLAN_DAILY_LIMITS.smb;
+
+  // Count across ALL channels for this client (prevents limit bypass via channel switching)
+  const allContacts = getContactsByClientId(contact.client_id);
+  let used;
+  if (allContacts.length > 1) {
+    const chatIds = allContacts.map(c => c.phone);
+    const d = getDb();
+    const placeholders = chatIds.map(() => '?').join(', ');
+    const row = d.prepare(`
+      SELECT COUNT(*) as count FROM conversation_history
+      WHERE chat_id IN (${placeholders}) AND role = 'user' AND created_at >= date('now')
+    `).get(...chatIds);
+    used = row?.count || 0;
+  } else {
+    used = getClientMessageCountToday(chatId);
+  }
+
+  return {
+    allowed: used < limit,
+    remaining: Math.max(0, limit - used),
+    limit,
+    plan,
+    used,
+  };
+}
+
+export function getPlanLimits() {
+  return { ...PLAN_DAILY_LIMITS };
+}
+
+// --- Client Contact Queries (for proactive workflows) ---
+
+export function getAllClientContacts() {
+  const d = getDb();
+  return d.prepare(`
+    SELECT cc.*, c.name as client_name, c.status as client_status, c.onboarding_complete
+    FROM client_contacts cc
+    LEFT JOIN clients c ON cc.client_id = c.id
+    WHERE cc.client_id IS NOT NULL AND (c.status = 'active' OR c.status IS NULL)
+    ORDER BY c.name
+  `).all();
+}
+
+export function getLastClientMessageTime(chatId) {
+  const d = getDb();
+  const row = d.prepare(`
+    SELECT created_at FROM conversation_history
+    WHERE chat_id = ? AND role = 'user'
+    ORDER BY id DESC LIMIT 1
+  `).get(chatId);
+  return row?.created_at ? new Date(row.created_at) : null;
+}
+
+export function getContactChannel(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  // Check the contact's own channel field first (most reliable after cross-channel linking)
+  const contact = d.prepare("SELECT channel FROM client_contacts WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?").get(normalized);
+  if (contact?.channel) return contact.channel;
+  // Fallback to existing logic for older contacts
+  const session = d.prepare("SELECT channel FROM onboarding_sessions WHERE phone = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
+  if (session?.channel) return session.channel;
+  const pending = d.prepare("SELECT channel FROM pending_clients WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1").get(normalized);
+  return pending?.channel || 'whatsapp';
+}
+
 export default {
   createClient, getClient, getAllClients, updateClient, searchClients,
   recordCampaignPerformance, getClientCampaignHistory,
@@ -371,4 +755,10 @@ export default {
   recordTestResult,
   getBenchmark, setBenchmark,
   buildClientContext,
+  getContactByPhone, createContact, updateContact,
+  getOnboardingSession, createOnboardingSession, updateOnboardingSession,
+  createPendingClient, getPendingClientByToken, getPendingClientByChatId, activatePendingClient,
+  saveMessage, getMessages, clearMessages,
+  getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
+  getAllClientContacts, getLastClientMessageTime, getContactChannel,
 };

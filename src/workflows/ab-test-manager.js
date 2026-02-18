@@ -1,6 +1,6 @@
 import logger from '../utils/logger.js';
 import { deepAnalysis, quickAnalysis } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert } from '../api/whatsapp.js';
+import { notifyOwnerMessage as sendWhatsApp, notifyOwnerAlert as sendAlert } from '../utils/notify-owner.js';
 import * as clickup from '../api/clickup.js';
 import * as metaAds from '../api/meta-ads.js';
 import { getAllClients, getClient, recordTestResult, getClientCampaignHistory } from '../services/knowledge-base.js';
