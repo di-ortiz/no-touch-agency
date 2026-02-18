@@ -1442,46 +1442,71 @@ Return ONLY the JSON array, no other text.`;
 
       if (post.error) return post;
 
-      const result = { ...post, action: toolInput.action || 'generate_only' };
-
-      // Publish to WordPress if requested and connected
-      if (toolInput.action && toolInput.action !== 'generate_only') {
-        const wp = seoEngine.getWordPressClient(client);
-        if (!wp) {
-          result.wpStatus = 'not_connected';
-          result.message = `Blog post generated but WordPress is not connected for ${client.name}. Send them a Leadsie link with WordPress access to enable publishing.`;
-        } else {
-          try {
-            const status = toolInput.action === 'schedule' ? 'future' : 'draft';
-            const wpPost = await wp.createPost({
-              title: post.title,
-              content: post.content,
-              excerpt: post.excerpt,
-              slug: post.slug,
-              status,
-              date: toolInput.publishDate,
-              meta: {
-                _yoast_wpseo_title: post.seoTitle,
-                _yoast_wpseo_metadesc: post.seoDescription,
-                _yoast_wpseo_focuskw: post.focusKeyword,
-              },
-            });
-            result.wpPost = wpPost;
-            result.wpStatus = status;
-            result.message = status === 'future'
-              ? `Blog post "${post.title}" scheduled for ${toolInput.publishDate} on WordPress! Link: ${wpPost.link}`
-              : `Blog post "${post.title}" saved as draft on WordPress! Link: ${wpPost.link}`;
-          } catch (e) {
-            result.wpStatus = 'failed';
-            result.wpError = e.message;
-            result.message = `Blog post generated but WordPress publish failed: ${e.message}`;
-          }
-        }
-      } else {
-        result.message = `Blog post "${post.title}" generated (${post.content?.length || 0} chars). Ready to review before publishing.`;
+      // Always save to Google Doc for client review
+      let docUrl = null;
+      try {
+        const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const docContent = `${post.title}\n\n` +
+          `SEO Title: ${post.seoTitle || ''}\n` +
+          `Meta Description: ${post.seoDescription || ''}\n` +
+          `Focus Keyword: ${post.focusKeyword || ''}\n` +
+          `Slug: ${post.slug || ''}\n` +
+          `Tags: ${(post.suggestedTags || []).join(', ')}\n` +
+          `Category: ${post.suggestedCategory || ''}\n` +
+          `---\n\n` +
+          (post.content || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        const doc = await googleDrive.createDocument(
+          `Blog Post — ${post.title}`,
+          docContent,
+          folderId,
+        );
+        if (doc) docUrl = doc.webViewLink;
+      } catch (e) {
+        log.warn('Failed to save blog post to Google Doc', { error: e.message });
       }
 
-      return result;
+      // Create pending approval so client can approve publishing or self-post
+      const approvalId = `blog-${Date.now()}`;
+      const wpConnected = !!seoEngine.getWordPressClient(client);
+      pendingApprovals.set(approvalId, {
+        type: 'publish_blog',
+        clientId: client.id,
+        clientName: client.name,
+        postData: {
+          title: post.title,
+          content: post.content,
+          excerpt: post.excerpt,
+          slug: post.slug,
+          seoTitle: post.seoTitle,
+          seoDescription: post.seoDescription,
+          focusKeyword: post.focusKeyword,
+          publishDate: toolInput.publishDate,
+        },
+        docUrl,
+        wpConnected,
+      });
+
+      return {
+        title: post.title,
+        seoTitle: post.seoTitle,
+        seoDescription: post.seoDescription,
+        focusKeyword: post.focusKeyword,
+        excerpt: post.excerpt,
+        suggestedTags: post.suggestedTags,
+        suggestedCategory: post.suggestedCategory,
+        imagePrompt: post.imagePrompt,
+        docUrl,
+        approvalId,
+        wpConnected,
+        status: 'pending_client_review',
+        deliveryOptions: {
+          option1: `I can publish this directly to your website — just reply APPROVE ${approvalId}`,
+          option2: docUrl
+            ? `Review and edit the Google Doc here: ${docUrl} — then either post it yourself or reply APPROVE ${approvalId} when ready`
+            : 'I can send you the content to post yourself',
+        },
+        message: `Blog post "${post.title}" is ready for your review!${docUrl ? ` Google Doc: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I publish it to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and post it yourself (or approve after review)`,
+      };
     }
 
     case 'fix_meta_tags': {
@@ -1504,23 +1529,65 @@ Return ONLY the JSON array, no other text.`;
           businessDescription: client.description,
         });
 
-        if (toolInput.applyChanges && wp && toolInput.pageId) {
-          try {
-            await wp.updatePageSEO(toolInput.pageId, newMeta, toolInput.pageType || 'posts');
-            newMeta.applied = true;
-            newMeta.message = `Meta tags updated on WordPress for page #${toolInput.pageId}!`;
-          } catch (e) {
-            newMeta.applied = false;
-            newMeta.message = `Meta tags generated but update failed: ${e.message}`;
-          }
-        } else {
-          newMeta.applied = false;
-          newMeta.message = wp
-            ? `Meta tags generated. Set applyChanges=true to push to WordPress.`
-            : `Meta tags generated. Connect WordPress via Leadsie to auto-apply.`;
+        // Save proposed changes to Google Doc for review
+        let docUrl = null;
+        try {
+          const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+          const docContent = `Meta Tag Changes — ${currentMeta.title || toolInput.url || 'Page'}\n\n` +
+            `Page: ${toolInput.url || currentMeta.link || 'N/A'}\n` +
+            `Page ID: ${toolInput.pageId || 'N/A'}\n\n` +
+            `--- CURRENT ---\n` +
+            `Title: ${currentMeta.seoTitle || '(missing)'}\n` +
+            `Description: ${currentMeta.seoDescription || '(missing)'}\n` +
+            `Focus Keyword: ${currentMeta.focusKeyword || '(none)'}\n\n` +
+            `--- PROPOSED ---\n` +
+            `Title: ${newMeta.seoTitle || ''}\n` +
+            `Description: ${newMeta.seoDescription || ''}\n` +
+            `Focus Keyword: ${newMeta.focusKeyword || ''}\n\n` +
+            `Reasoning: ${newMeta.reasoning || ''}`;
+          const doc = await googleDrive.createDocument(
+            `Meta Tags — ${currentMeta.title || toolInput.url || client.name}`,
+            docContent,
+            folderId,
+          );
+          if (doc) docUrl = doc.webViewLink;
+        } catch (e) {
+          log.warn('Failed to save meta tag changes to Google Doc', { error: e.message });
         }
 
-        return newMeta;
+        // Create pending approval
+        const approvalId = `meta-${Date.now()}`;
+        pendingApprovals.set(approvalId, {
+          type: 'apply_meta',
+          clientId: client.id,
+          clientName: client.name,
+          pageId: toolInput.pageId,
+          pageType: toolInput.pageType || 'posts',
+          seoData: {
+            seoTitle: newMeta.seoTitle,
+            seoDescription: newMeta.seoDescription,
+            focusKeyword: newMeta.focusKeyword,
+          },
+          docUrl,
+          wpConnected: !!wp,
+        });
+
+        return {
+          ...newMeta,
+          currentTitle: currentMeta.seoTitle || '(missing)',
+          currentDescription: currentMeta.seoDescription || '(missing)',
+          docUrl,
+          approvalId,
+          applied: false,
+          status: 'pending_client_review',
+          deliveryOptions: {
+            option1: `I can apply these changes to your website — reply APPROVE ${approvalId}`,
+            option2: docUrl
+              ? `Review the proposed changes here: ${docUrl} — then approve or apply them yourself`
+              : 'I can send you the proposed changes to apply yourself',
+          },
+          message: `Meta tag improvements generated!${docUrl ? ` Review: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I apply the changes to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
+        };
       }
 
       // Audit ALL pages if no specific page
@@ -1613,24 +1680,66 @@ Return ONLY the JSON array, no other text.`;
       const wp = seoEngine.getWordPressClient(client);
       if (!wp) return { error: `WordPress not connected for ${client.name}.` };
 
-      const updates = {};
-      if (toolInput.title) updates.title = toolInput.title;
-      if (toolInput.content) updates.content = toolInput.content;
-      if (toolInput.status) updates.status = toolInput.status;
+      // Build a summary of proposed changes for the client
+      const changesList = [];
+      if (toolInput.title) changesList.push(`Title → "${toolInput.title}"`);
+      if (toolInput.content) changesList.push(`Content updated (${toolInput.content.length} chars)`);
+      if (toolInput.status) changesList.push(`Status → ${toolInput.status}`);
+      if (toolInput.seoTitle) changesList.push(`SEO Title → "${toolInput.seoTitle}"`);
+      if (toolInput.seoDescription) changesList.push(`Meta Description → "${toolInput.seoDescription}"`);
+      if (toolInput.focusKeyword) changesList.push(`Focus Keyword → "${toolInput.focusKeyword}"`);
 
-      // Update post content
-      const postResult = await wp.updatePost(toolInput.postId, updates);
+      // Save proposed changes to Google Doc
+      let docUrl = null;
+      try {
+        const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const docContent = `Proposed Changes — Post #${toolInput.postId}\n\n` +
+          `Changes:\n${changesList.map(c => `• ${c}`).join('\n')}\n\n` +
+          (toolInput.content ? `--- UPDATED CONTENT ---\n${toolInput.content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()}` : '');
+        const doc = await googleDrive.createDocument(
+          `Post Update — #${toolInput.postId} (${client.name})`,
+          docContent,
+          folderId,
+        );
+        if (doc) docUrl = doc.webViewLink;
+      } catch (e) {
+        log.warn('Failed to save post update to Google Doc', { error: e.message });
+      }
 
-      // Update SEO meta separately if provided
-      if (toolInput.seoTitle || toolInput.seoDescription || toolInput.focusKeyword) {
-        await wp.updatePageSEO(toolInput.postId, {
+      // Create pending approval — never push changes without client consent
+      const approvalId = `update-${Date.now()}`;
+      pendingApprovals.set(approvalId, {
+        type: 'update_post',
+        clientId: client.id,
+        clientName: client.name,
+        postId: toolInput.postId,
+        updates: {
+          title: toolInput.title,
+          content: toolInput.content,
+          status: toolInput.status,
+        },
+        seoUpdates: (toolInput.seoTitle || toolInput.seoDescription || toolInput.focusKeyword) ? {
           seoTitle: toolInput.seoTitle,
           seoDescription: toolInput.seoDescription,
           focusKeyword: toolInput.focusKeyword,
-        });
-      }
+        } : null,
+        docUrl,
+      });
 
-      return { ...postResult, message: `Post #${toolInput.postId} updated successfully on WordPress.` };
+      return {
+        postId: toolInput.postId,
+        proposedChanges: changesList,
+        docUrl,
+        approvalId,
+        status: 'pending_client_review',
+        deliveryOptions: {
+          option1: `I can apply these changes to your website — reply APPROVE ${approvalId}`,
+          option2: docUrl
+            ? `Review the proposed changes here: ${docUrl} — then approve or apply them yourself`
+            : 'I can send you the changes to apply yourself',
+        },
+        message: `Changes prepared for post #${toolInput.postId}!${docUrl ? ` Review: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I apply the changes — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
+      };
     }
 
     case 'generate_schema_markup': {
@@ -2380,6 +2489,54 @@ async function handleTelegramApproval(action, approvalId, chatId) {
       pendingApprovals.delete(approvalId);
       return reply(`✅ Campaign ${pending.campaignId} paused on Meta.`);
     }
+
+    // --- Content publishing approvals ---
+    if (pending.type === 'publish_blog') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected for ${pending.clientName}. The blog post is available in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can post it manually.`);
+      }
+      const { postData } = pending;
+      const wpPost = await wp.createPost({
+        title: postData.title, content: postData.content, excerpt: postData.excerpt,
+        slug: postData.slug, status: postData.publishDate ? 'future' : 'publish', date: postData.publishDate,
+        meta: { _yoast_wpseo_title: postData.seoTitle, _yoast_wpseo_metadesc: postData.seoDescription, _yoast_wpseo_focuskw: postData.focusKeyword },
+      });
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Blog post <b>"${postData.title}"</b> published to your website!\n${wpPost.link}`);
+    }
+
+    if (pending.type === 'apply_meta') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp || !pending.pageId) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected or page ID missing. The proposed changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''}.`);
+      }
+      await wp.updatePageSEO(pending.pageId, pending.seoData, pending.pageType || 'posts');
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Meta tags updated on your website for page #${pending.pageId}!`);
+    }
+
+    if (pending.type === 'update_post') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected for ${pending.clientName}. Changes available in Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''}.`);
+      }
+      const updates = {};
+      if (pending.updates.title) updates.title = pending.updates.title;
+      if (pending.updates.content) updates.content = pending.updates.content;
+      if (pending.updates.status) updates.status = pending.updates.status;
+      await wp.updatePost(pending.postId, updates);
+      if (pending.seoUpdates) await wp.updatePageSEO(pending.postId, pending.seoUpdates);
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Post #${pending.postId} updated on your website!`);
+    }
+
     pendingApprovals.delete(approvalId);
     return reply(`✅ Action approved and executed.`);
   } catch (error) { return reply(`❌ Action failed: ${error.message}`); }
@@ -2603,7 +2760,19 @@ CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
 1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
 2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+3. ALWAYS deliver real images/videos — never substitute with text descriptions
+
+SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
+When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
+1. NEVER publish or change anything on their website without explicit written approval
+2. ALWAYS present exactly TWO options:
+   - *Option 1: "I can publish this to your website"* — they reply APPROVE [ID] and you push it live
+   - *Option 2: "Here's a Google Doc for you to review"* — share the doc link so they can review, edit, and either post it themselves or come back to approve
+3. Share the Google Doc link so the client can see exactly what will be posted
+4. Wait for their explicit approval (APPROVE) before touching their website
+5. If they choose to post themselves, that's perfectly fine — just confirm you're available if they need changes
+
+NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
@@ -3119,7 +3288,19 @@ CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
 1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
 2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+3. ALWAYS deliver real images/videos — never substitute with text descriptions
+
+SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
+When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
+1. NEVER publish or change anything on their website without explicit written approval
+2. ALWAYS present exactly TWO options:
+   - *Option 1: "I can publish this to your website"* — they reply APPROVE [ID] and you push it live
+   - *Option 2: "Here's a Google Doc for you to review"* — share the doc link so they can review, edit, and either post it themselves or come back to approve
+3. Share the Google Doc link so the client can see exactly what will be posted
+4. Wait for their explicit approval (APPROVE) before touching their website
+5. If they choose to post themselves, that's perfectly fine — just confirm you're available if they need changes
+
+NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
@@ -3456,6 +3637,63 @@ async function handleApproval(action, approvalId) {
       await metaAds.pauseCampaign(pending.campaignId);
       pendingApprovals.delete(approvalId);
       return sendWhatsApp(`✅ Campaign ${pending.campaignId} paused on Meta.`);
+    }
+
+    // --- Content publishing approvals ---
+    if (pending.type === 'publish_blog') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected for ${pending.clientName}. The blog post is available in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can post it manually.`);
+      }
+      const { postData } = pending;
+      const wpPost = await wp.createPost({
+        title: postData.title,
+        content: postData.content,
+        excerpt: postData.excerpt,
+        slug: postData.slug,
+        status: postData.publishDate ? 'future' : 'publish',
+        date: postData.publishDate,
+        meta: {
+          _yoast_wpseo_title: postData.seoTitle,
+          _yoast_wpseo_metadesc: postData.seoDescription,
+          _yoast_wpseo_focuskw: postData.focusKeyword,
+        },
+      });
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Blog post *"${postData.title}"* published to your website!\n${wpPost.link}`);
+    }
+
+    if (pending.type === 'apply_meta') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp || !pending.pageId) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected or page ID missing. The proposed changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can apply them manually.`);
+      }
+      await wp.updatePageSEO(pending.pageId, pending.seoData, pending.pageType || 'posts');
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Meta tags updated on your website for page #${pending.pageId}!`);
+    }
+
+    if (pending.type === 'update_post') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected for ${pending.clientName}. The changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can apply them manually.`);
+      }
+      const updates = {};
+      if (pending.updates.title) updates.title = pending.updates.title;
+      if (pending.updates.content) updates.content = pending.updates.content;
+      if (pending.updates.status) updates.status = pending.updates.status;
+      await wp.updatePost(pending.postId, updates);
+      if (pending.seoUpdates) {
+        await wp.updatePageSEO(pending.postId, pending.seoUpdates);
+      }
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Post #${pending.postId} updated on your website!`);
     }
 
     pendingApprovals.delete(approvalId);
