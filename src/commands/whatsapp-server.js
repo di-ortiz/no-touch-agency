@@ -109,6 +109,7 @@ app.use('/webhook', rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   message: 'Too many requests',
+  validate: { xForwardedForHeader: false, default: true },
 }));
 
 // CORS for /api routes (called from Lovable website)
@@ -125,6 +126,7 @@ app.use('/api', rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   message: 'Too many requests',
+  validate: { xForwardedForHeader: false, default: true },
 }));
 
 // --- POST /api/client-init --- (called by Lovable after payment)
@@ -2181,7 +2183,12 @@ When the client asks for ads, visuals, creatives, or mockups:
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack });
     try {
-      await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
+      // Include error hint so we can diagnose from Telegram logs
+      const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
+      const hint = isApiError
+        ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
+        : ` (${error.message?.substring(0, 80)})`;
+      await sendTelegram(`Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`, chatId);
     } catch (e) { /* best effort */ }
   }
 }
