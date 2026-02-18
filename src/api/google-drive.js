@@ -294,22 +294,34 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
 
 /**
  * Download an image from a URL and upload it to Google Drive, returning a public viewable link.
- * Used to persist temporary AI-generated image URLs (DALL-E, Flux, Imagen) before sending to WhatsApp.
+ * Also returns the raw image buffer so callers can upload directly to WhatsApp Media API
+ * without a second download.
  *
  * @param {string} imageUrl - The temporary image URL to persist
  * @param {string} fileName - Filename for the uploaded image
  * @param {string} [folderId] - Google Drive folder to upload to
- * @returns {object|null} { id, webViewLink, webContentLink } or null on failure
+ * @returns {object|null} { id, webViewLink, webContentLink, imageBuffer, mimeType } or null on failure
  */
 export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
+  // Always download the image (needed for both Drive upload and WhatsApp direct send)
+  let imageBuffer, mimeType;
+  try {
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    imageBuffer = Buffer.from(response.data);
+    mimeType = response.headers['content-type'] || 'image/png';
+  } catch (e) {
+    log.warn('Failed to download image from URL', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
+    return null;
+  }
+
   const drive = getDrive();
-  if (!drive) return null;
+  if (!drive) {
+    // No Google Drive configured — still return the buffer for WhatsApp direct upload
+    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
+  }
 
   try {
-    // Download image as stream
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    const contentType = response.headers['content-type'] || 'image/png';
-    const stream = Readable.from(Buffer.from(response.data));
+    const stream = Readable.from(imageBuffer);
 
     // Upload to Drive
     const uploaded = await rateLimited('google', () =>
@@ -320,7 +332,7 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
             parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
           },
           media: {
-            mimeType: contentType,
+            mimeType,
             body: stream,
           },
           fields: 'id, name, webViewLink, webContentLink',
@@ -329,7 +341,7 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
       }, { retries: 2, label: 'Google Drive upload image from URL' })
     );
 
-    // Make publicly viewable so WhatsApp can fetch it
+    // Make publicly viewable
     await rateLimited('google', () =>
       retry(async () => {
         await drive.permissions.create({
@@ -339,14 +351,14 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
       }, { retries: 2, label: 'Google Drive set image public' })
     );
 
-    // Build direct content link
     const webContentLink = `https://drive.google.com/uc?export=view&id=${uploaded.id}`;
 
     log.info('Image persisted to Google Drive', { id: uploaded.id, fileName });
-    return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink };
+    return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink, imageBuffer, mimeType };
   } catch (e) {
-    log.warn('Failed to persist image to Google Drive', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
-    return null;
+    log.warn('Failed to persist image to Google Drive (buffer still available)', { error: e.message });
+    // Drive upload failed but we still have the buffer for WhatsApp direct upload
+    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
   }
 }
 

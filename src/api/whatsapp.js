@@ -1,4 +1,5 @@
 import axios from 'axios';
+import FormData from 'form-data';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
@@ -132,11 +133,91 @@ export async function sendThinkingMessage(to, message) {
 }
 
 /**
+ * Upload media (image/video) directly to WhatsApp's servers and get a media_id.
+ * This is the most reliable way to send media — avoids URL fetching issues.
+ *
+ * @param {Buffer} buffer - The media binary data
+ * @param {string} mimeType - MIME type (e.g. 'image/png', 'video/mp4')
+ * @param {string} [fileName] - Filename for the upload
+ * @returns {string} The WhatsApp media_id
+ */
+export async function uploadWhatsAppMedia(buffer, mimeType, fileName) {
+  return rateLimited('whatsapp', () =>
+    retry(async () => {
+      const form = new FormData();
+      form.append('messaging_product', 'whatsapp');
+      form.append('type', mimeType);
+      form.append('file', buffer, { filename: fileName || 'media.png', contentType: mimeType });
+
+      const response = await axios.post(
+        `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/media`,
+        form,
+        { headers: { ...form.getHeaders(), Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` } }
+      );
+
+      log.debug('WhatsApp media uploaded', { mediaId: response.data.id });
+      return response.data.id;
+    }, { retries: 2, label: 'WhatsApp media upload' })
+  );
+}
+
+/**
+ * Download an image from a URL, upload it directly to WhatsApp's servers,
+ * and send it as a native image message (like a person sending a photo).
+ *
+ * @param {string} imageUrl - URL to download the image from
+ * @param {string} [caption] - Optional caption
+ * @param {string} [to] - Recipient (defaults to owner)
+ */
+export async function sendWhatsAppImageDirect(imageUrl, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+
+  // Step 1: Download the image
+  const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+  const buffer = Buffer.from(imageResponse.data);
+  const mimeType = imageResponse.headers['content-type'] || 'image/png';
+
+  // Step 2: Upload to WhatsApp Media API
+  const mediaId = await uploadWhatsAppMedia(buffer, mimeType, `image-${Date.now()}.png`);
+
+  // Step 3: Send message referencing the uploaded media
+  await rateLimited('whatsapp', () =>
+    retry(async () => {
+      const result = await axios.post(
+        `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: recipient,
+          type: 'image',
+          image: { id: mediaId, ...(caption ? { caption } : {}) },
+        },
+        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+      log.debug('WhatsApp image sent via direct upload', { to: recipient, mediaId });
+      return result.data;
+    }, { retries: 2, label: 'WhatsApp image send (direct)' })
+  );
+}
+
+/**
  * Send a WhatsApp image message via Meta Cloud API.
- * Falls back to sending the URL as text if media delivery fails.
+ * Tries direct upload first (download → upload to WhatsApp → send with media_id).
+ * Falls back to link-based delivery, then to text.
  */
 export async function sendWhatsAppImage(imageUrl, caption, to) {
   const recipient = to || config.WHATSAPP_OWNER_PHONE;
+
+  // Try direct upload first (most reliable — sends like a normal person's photo)
+  try {
+    await sendWhatsAppImageDirect(imageUrl, caption, to);
+    return;
+  } catch (directError) {
+    log.warn('WhatsApp direct image upload failed, trying link-based', { error: directError.message });
+  }
+
+  // Fallback: link-based delivery (WhatsApp servers fetch the URL)
   try {
     await rateLimited('whatsapp', async () => {
       return retry(async () => {
@@ -152,19 +233,13 @@ export async function sendWhatsAppImage(imageUrl, caption, to) {
           { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
-        log.debug('WhatsApp image sent', { to: recipient });
+        log.debug('WhatsApp image sent via link', { to: recipient });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp image send' });
+      }, { retries: 2, label: 'WhatsApp image send (link)' });
     });
-  } catch (error) {
-    log.warn('WhatsApp image send failed', { error: error.message, url: imageUrl?.slice(0, 100) });
-    // Only send the URL as text if it's a persistent URL (Google Drive, etc.), not a temporary AI-generated URL
-    const isTemporaryUrl = imageUrl?.includes('oaidalleapiprodscus') || imageUrl?.includes('dall-e') || imageUrl?.includes('fal.run') || imageUrl?.includes('fal.ai');
-    if (isTemporaryUrl) {
-      await sendWhatsApp(`${caption ? `${caption}\n` : ''}[Image could not be delivered — the image was generated but the temporary URL expired. Please try generating again.]`, to);
-    } else {
-      await sendWhatsApp(`${caption ? `${caption}\n` : ''}${imageUrl}`, to);
-    }
+  } catch (linkError) {
+    log.warn('WhatsApp image send failed completely', { error: linkError.message, url: imageUrl?.slice(0, 100) });
+    await sendWhatsApp(`${caption ? `${caption}\n` : ''}[Image could not be delivered. Please try again.]`, to);
   }
 }
 
@@ -248,4 +323,4 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };
+export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppImageDirect, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };
