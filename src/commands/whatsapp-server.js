@@ -141,6 +141,30 @@ const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
 const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
 
+// Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
+const TOOL_PROGRESS_MESSAGES = {
+  generate_ad_images: 'Generating your ad images... This might take a minute.',
+  generate_ad_video: 'Creating your video... This will take a few minutes.',
+  generate_creative_package: 'Building your creative package... This will take a few minutes.',
+  browse_website: 'Browsing the website...',
+  search_ad_library: 'Searching the ad library...',
+  get_page_ads: 'Looking up ads for this page...',
+  search_google_ads_transparency: 'Searching Google ads...',
+  analyze_serp: 'Analyzing search results...',
+  get_domain_overview: 'Analyzing the domain...',
+  find_seo_competitors: 'Finding SEO competitors...',
+  audit_landing_page: 'Auditing the landing page...',
+  audit_seo_page: 'Running SEO audit...',
+  get_search_volume: 'Researching keywords...',
+  get_keyword_ideas: 'Finding keyword ideas...',
+  get_keyword_planner_volume: 'Researching keyword volumes...',
+  get_keyword_planner_ideas: 'Finding keyword opportunities...',
+  create_presentation: 'Building your presentation...',
+  generate_weekly_report: 'Generating the weekly report...',
+  generate_campaign_brief: 'Creating the campaign brief...',
+  run_competitor_analysis: 'Analyzing competitors...',
+};
+
 async function executeCSAToolWithTimeout(toolName, toolInput) {
   const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
   return Promise.race([
@@ -2830,11 +2854,11 @@ async function handleTelegramCommand(message, chatId) {
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call, progress on later rounds
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await reply(response.text);
-      } else if (rounds >= 3) {
-        await sendThinkingIndicator('telegram', chatId, 'Still working on it... almost there.');
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -2843,10 +2867,11 @@ async function handleTelegramCommand(message, chatId) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking message before expensive tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('telegram', chatId, progressMsg);
+        }
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
@@ -3269,10 +3294,11 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendTelegram(response.text, chatId);
-      } else if (rounds >= 3) {
-        await sendThinkingIndicator('telegram', chatId, 'Still working on it... almost there.');
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it...');
       }
 
       const toolResults = [];
@@ -3280,14 +3306,10 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
         log.info('Client tool execution (Telegram)', { tool: tool.name, client: contactName, round: rounds });
         toolsSummary.push(tool.name);
 
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video... This will take a few minutes.');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
-        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
-          await sendThinkingIndicator('telegram', chatId, 'Researching keywords... This might take a minute.');
-        }
-        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
-          await sendThinkingIndicator('telegram', chatId, 'Running analysis... Give me a moment.');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('telegram', chatId, progressMsg);
         }
 
         try {
@@ -3513,11 +3535,11 @@ async function handleCommand(message) {
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call, progress on later rounds
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendWhatsApp(response.text);
-      } else if (rounds >= 3) {
-        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it... almost there.');
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -3526,10 +3548,11 @@ async function handleCommand(message) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking message before expensive tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', ownerChatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', ownerChatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', ownerChatId, 'Building your full creative package... Give me a few minutes!');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('whatsapp', ownerChatId, progressMsg);
+        }
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
@@ -3850,10 +3873,11 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendWhatsApp(response.text, from);
-      } else if (rounds >= 3) {
-        await sendThinkingIndicator('whatsapp', from, 'Still working on it... almost there.');
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('whatsapp', from, 'Still working on it...');
       }
 
       const toolResults = [];
@@ -3861,15 +3885,10 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
         log.info('Client tool execution', { tool: tool.name, client: contactName, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking messages for slow tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', from, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', from, 'Creating your video... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', from, 'Building your full creative package... Give me a few minutes!');
-        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
-          await sendThinkingIndicator('whatsapp', from, 'Researching keywords... This might take a minute.');
-        }
-        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
-          await sendThinkingIndicator('whatsapp', from, 'Running analysis... Give me a moment.');
+        // Send progress message for every tool so user knows what Sofia is doing
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('whatsapp', from, progressMsg);
         }
 
         try {
