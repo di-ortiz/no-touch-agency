@@ -1900,6 +1900,13 @@ async function handleTelegramClientMessage(chatId, message) {
     // Build the formatted "Hi Sofia, I am..." message from pending data
     if (pendingData) {
       actualMessage = `Hi Sofia, I am ${pendingData.name || 'a new client'}${pendingData.business_name ? `, representing ${pendingData.business_name}` : ''}${pendingData.website ? ` (${pendingData.website})` : ''}. My Unique Client Code is ${pendingData.token}.`;
+
+      // Cancel stale onboarding sessions so fresh signups get the personalized welcome
+      const staleSession = getOnboardingSession(chatId);
+      if (staleSession) {
+        updateOnboardingSession(staleSession.id, { status: 'cancelled' });
+        log.info('Cancelled stale Telegram onboarding session for fresh signup', { chatId, sessionId: staleSession.id });
+      }
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)
@@ -2357,6 +2364,20 @@ async function handleCommand(message) {
 // --- Client Message Handler (non-owner contacts) ---
 async function handleClientMessage(from, message) {
   try {
+    // 0. Pre-check for signup token — cancel stale sessions so fresh signups aren't blocked
+    const preTokenMatch = message.match(TOKEN_RE_INLINE);
+    if (preTokenMatch) {
+      const preCheck = await getPendingClientWithFallback(preTokenMatch[1]);
+      if (preCheck) {
+        // Valid pending signup found — cancel any stale onboarding sessions
+        const staleSession = getOnboardingSession(from);
+        if (staleSession) {
+          updateOnboardingSession(staleSession.id, { status: 'cancelled' });
+          log.info('Cancelled stale onboarding session for fresh signup', { from, sessionId: staleSession.id });
+        }
+      }
+    }
+
     // 1. Check if client has an active onboarding session
     if (hasActiveOnboarding(from)) {
       log.info('Routing to onboarding flow', { from });

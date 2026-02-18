@@ -855,7 +855,10 @@ export function getClientContextByPhone(phone) {
   const contact = getContactByPhone(phone);
   if (!contact) return null;
 
-  const client = contact.client_id ? getClient(contact.client_id) : null;
+  // Contact without a client_id means onboarding was never completed — not a known client yet
+  if (!contact.client_id) return null;
+
+  const client = getClient(contact.client_id);
 
   // Get all channels this client is connected on
   const channels = contact.client_id
