@@ -77,23 +77,6 @@ async function sendThinkingIndicator(channel, chatId, message) {
   }
 }
 
-/**
- * Persist a temporary image URL to Google Drive, returning a stable public URL.
- * Falls back to the original URL if Drive upload fails.
- */
-async function persistImageUrl(tempUrl, label) {
-  try {
-    const fileName = `${label || 'ad-image'}-${Date.now()}.png`;
-    const driveResult = await googleDrive.uploadImageFromUrl(tempUrl, fileName);
-    if (driveResult?.webContentLink) {
-      return driveResult.webContentLink;
-    }
-  } catch (e) {
-    log.warn('Image persistence failed, using original URL', { error: e.message });
-  }
-  return tempUrl; // fallback to original
-}
-
 // Helper: safely send a single media item, logging failures without throwing
 async function safeSendMedia(sendFn, url, caption, toolName) {
   try {
@@ -104,33 +87,32 @@ async function safeSendMedia(sendFn, url, caption, toolName) {
 }
 
 // Helper: deliver generated media (images/videos) inline after tool execution
+// NOTE: generate_ad_images and generate_creative_package already persist images to Google Drive
+// in the tool handler, so result URLs here are already permanent.
 async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendImage = (url, caption) =>
     channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  // Generated ad images (DALL-E 3 / Flux Pro / Imagen 3)
+  // Generated ad images (already persisted to Google Drive in tool handler)
   if (toolName === 'generate_ad_images' && result.images) {
     for (const img of result.images) {
       if (!img.url || img.error) continue;
-      const stableUrl = await persistImageUrl(img.url, img.label || img.format);
-      await safeSendMedia(sendImage, stableUrl, img.label || img.format || 'Ad image', toolName);
+      await safeSendMedia(sendImage, img.url, img.label || img.format || 'Ad image', toolName);
     }
   }
   // Generated ad video (Sora 2)
   if (toolName === 'generate_ad_video' && result.videoUrl) {
     await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
   }
-  // Creative package (images + optional video)
+  // Creative package (already persisted to Google Drive in tool handler)
   if (toolName === 'generate_creative_package' && result.imageUrls) {
     for (const url of result.imageUrls) {
-      if (!url) continue;
-      const stableUrl = await persistImageUrl(url, 'creative-package');
-      await safeSendMedia(sendImage, stableUrl, 'Creative package image', toolName);
+      if (url) await safeSendMedia(sendImage, url, 'Creative package image', toolName);
     }
   }
-  // Ad library search results — send snapshot previews (already persistent URLs, no need to re-upload)
+  // Ad library search results — send snapshot previews
   if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
     for (const ad of result.ads) {
       if (!ad.snapshotUrl) continue;
@@ -138,7 +120,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
     }
   }
-  // Google Ads Transparency — send creative previews (already persistent URLs)
+  // Google Ads Transparency — send creative previews
   if (toolName === 'search_google_ads_transparency' && result.creatives) {
     for (const creative of result.creatives) {
       if (!creative.previewUrl) continue;
@@ -490,6 +472,8 @@ PROCESS:
 4. *Present & Iterate* — After delivering the actual images, ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
 
 IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
+
+IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -1354,18 +1338,34 @@ Return ONLY the JSON array, no other text.`;
         clientId: client?.id,
       });
 
-      const mappedImages = images.map(img => ({
-        format: img.format,
-        label: img.dimensions?.label || img.format,
-        url: img.url,
-        provider: img.provider,
-        error: img.error,
-      }));
+      // Persist generated images to Google Drive so URLs are permanent (DALL-E/Flux URLs expire)
+      const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const mappedImages = [];
+      for (const img of images) {
+        const mapped = {
+          format: img.format,
+          label: img.dimensions?.label || img.format,
+          url: img.url,
+          provider: img.provider,
+          error: img.error,
+        };
+        if (img.url && !img.error) {
+          try {
+            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+            if (driveResult?.webContentLink) {
+              mapped.url = driveResult.webContentLink;
+              mapped.driveId = driveResult.id;
+            }
+          } catch (e) {
+            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+          }
+        }
+        mappedImages.push(mapped);
+      }
 
       // Save companion Sheet to Drive
       let sheetUrl = null;
       try {
-        const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
         const sheet = await campaignRecord.createAdImagesRecord({
           clientName: toolInput.clientName,
           platform: toolInput.platform,
@@ -1444,11 +1444,29 @@ Return ONLY the JSON array, no other text.`;
         buildDeck: true,
       });
 
+      // Persist generated images to Google Drive so URLs are permanent
+      const client = getClient(toolInput.clientName);
+      const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const persistedImageUrls = [];
+      for (const img of pkg.images) {
+        if (img.error || !img.url) continue;
+        try {
+          const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
+          if (driveResult?.webContentLink) {
+            img.url = driveResult.webContentLink; // update in-place for sheet record too
+            persistedImageUrls.push(driveResult.webContentLink);
+          } else {
+            persistedImageUrls.push(img.url);
+          }
+        } catch (e) {
+          log.warn('Failed to persist creative package image to Drive', { error: e.message });
+          persistedImageUrls.push(img.url);
+        }
+      }
+
       // Save companion Sheet to Drive
       let sheetUrl = null;
       try {
-        const client = getClient(toolInput.clientName);
-        const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
         const sheet = await campaignRecord.createCreativeRecord({
           clientName: pkg.clientName,
           platform: pkg.platform,
@@ -1458,7 +1476,7 @@ Return ONLY the JSON array, no other text.`;
           videos: pkg.videos,
           summary: pkg.summary,
           presentationUrl: pkg.presentation?.url,
-          folderId,
+          folderId: pkgFolderId,
         });
         sheetUrl = sheet?.url || null;
       } catch (e) {
@@ -1473,7 +1491,7 @@ Return ONLY the JSON array, no other text.`;
         textAdsCount: pkg.textAds.length,
         textAdPreview: pkg.textAds.slice(0, 3).map(a => ({ headline: a.headline, cta: a.cta, angle: a.angle })),
         imagesCount: pkg.images.filter(i => !i.error).length,
-        imageUrls: pkg.images.filter(i => !i.error).map(i => i.url),
+        imageUrls: persistedImageUrls,
         videosCount: pkg.videos.filter(v => !v.error).length,
         presentationUrl: pkg.presentation?.url || null,
         sheetUrl,
@@ -2594,6 +2612,8 @@ PROCESS:
 
 IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
 
+IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
+
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
 If a tool returns an error, explain it simply and suggest alternatives. Never show raw error objects.
@@ -3017,6 +3037,7 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
 3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
 4. After delivering real images, ask if they want adjustments
+IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
@@ -3593,6 +3614,7 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
 3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
 4. After delivering real images, ask if they want adjustments
+IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
