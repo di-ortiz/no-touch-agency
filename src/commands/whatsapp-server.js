@@ -73,24 +73,46 @@ async function sendThinkingIndicator(channel, chatId, message) {
 
 // Helper: deliver generated media (images/videos) inline after tool execution
 async function deliverMediaInline(toolName, result, channel, chatId) {
+  const sendImage = (url, caption) =>
+    channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
+  const sendVideo = (url, caption) =>
+    channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
+
   try {
+    // Generated ad images (DALL-E 3)
     if (toolName === 'generate_ad_images' && result.images) {
       for (const img of result.images) {
         if (!img.url || img.error) continue;
-        const caption = img.label || img.format || 'Ad image';
-        if (channel === 'telegram') {
-          await sendTelegramPhoto(img.url, caption, chatId);
-        } else {
-          await sendWhatsAppImage(img.url, caption, chatId);
-        }
+        await sendImage(img.url, img.label || img.format || 'Ad image');
       }
     }
+    // Generated ad video (Sora 2)
     if (toolName === 'generate_ad_video' && result.videoUrl) {
-      const caption = `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim();
-      if (channel === 'telegram') {
-        await sendTelegramVideo(result.videoUrl, caption, chatId);
-      } else {
-        await sendWhatsAppVideo(result.videoUrl, caption, chatId);
+      await sendVideo(result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim());
+    }
+    // Creative package (images + optional video)
+    if (toolName === 'generate_creative_package' && result.imageUrls) {
+      for (const url of result.imageUrls) {
+        if (url) await sendImage(url, 'Creative package image');
+      }
+    }
+    // Ad library search results — send snapshot previews
+    if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
+      for (const ad of result.ads) {
+        if (!ad.snapshotUrl) continue;
+        const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
+        await sendImage(ad.snapshotUrl, caption);
+      }
+    }
+    // Google Ads Transparency — send creative previews
+    if (toolName === 'search_google_ads_transparency' && result.creatives) {
+      for (const creative of result.creatives) {
+        if (!creative.previewUrl) continue;
+        if (creative.format === 'VIDEO') {
+          await sendVideo(creative.previewUrl, `Google Ad — ${creative.format}`);
+        } else {
+          await sendImage(creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`);
+        }
       }
     }
   } catch (e) {
