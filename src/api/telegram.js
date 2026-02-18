@@ -31,25 +31,39 @@ export async function sendTelegram(message, chatId) {
 
   for (const chunk of chunks) {
     await rateLimited('telegram', async () => {
-      return retry(async () => {
-        const result = await axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
-          chat_id: recipient,
-          text: chunk,
-          parse_mode: 'HTML',
+      try {
+        const result = await retry(async () => {
+          return axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
+            chat_id: recipient,
+            text: chunk,
+            parse_mode: 'HTML',
+          });
+        }, {
+          retries: 2,
+          label: 'Telegram send',
+          shouldRetry: (err) => {
+            const status = err.response?.status;
+            if (status === 400) return false; // Don't retry HTML parse errors
+            return !status || status === 429 || status >= 500;
+          },
         });
 
-        recordCost({
-          platform: 'telegram',
-          workflow: 'telegram',
-          costCentsOverride: 0, // Telegram Bot API is free
-        });
-
+        recordCost({ platform: 'telegram', workflow: 'telegram', costCentsOverride: 0 });
         log.debug('Telegram sent', { messageId: result.data?.result?.message_id, to: recipient });
         return result.data;
-      }, {
-        retries: 3,
-        label: 'Telegram send',
-      });
+      } catch (htmlError) {
+        // If HTML parsing failed (400), retry without parse_mode
+        if (htmlError.response?.status === 400) {
+          log.debug('Telegram HTML parse failed, retrying without parse_mode', { to: recipient });
+          const fallback = await axios.post(`${TELEGRAM_API_BASE}/sendMessage`, {
+            chat_id: recipient,
+            text: chunk,
+          });
+          recordCost({ platform: 'telegram', workflow: 'telegram', costCentsOverride: 0 });
+          return fallback.data;
+        }
+        throw htmlError;
+      }
     });
   }
 }

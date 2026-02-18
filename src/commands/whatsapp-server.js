@@ -223,10 +223,10 @@ function clearHistory(chatId) {
  */
 function tryLinkCrossChannel(token, chatId, channel) {
   const pending = getPendingClientByTokenAny(token);
-  if (!pending || !pending.activated_phone) return null;
+  if (!pending || !pending.chat_id) return null;
 
   // Find the existing contact from the first channel
-  const existingContact = getContactByPhone(pending.activated_phone);
+  const existingContact = getContactByPhone(pending.chat_id);
   if (!existingContact?.client_id) return null;
 
   // Create a new contact for this channel, linked to the same client
@@ -240,7 +240,7 @@ function tryLinkCrossChannel(token, chatId, channel) {
     });
     log.info('Cross-channel link created', {
       clientId: existingContact.client_id,
-      existingPhone: pending.activated_phone,
+      existingChatId: pending.chat_id,
       newChatId: chatId,
       channel,
     });
@@ -1658,8 +1658,10 @@ app.post('/webhook/telegram', async (req, res) => {
       await handleTelegramClientMessage(chatId, body);
     }
   } catch (error) {
-    log.error('Telegram command handling failed', { error: error.message });
-    await sendTelegram(`❌ Error: ${error.message}`);
+    log.error('Telegram command handling failed', { error: error.message, stack: error.stack });
+    try {
+      await sendTelegram(`Error: ${error.message}`);
+    } catch (e) { /* best effort */ }
   }
 });
 
@@ -2176,8 +2178,10 @@ When the client asks for ads, visuals, creatives, or mockups:
       }
     }
   } catch (error) {
-    log.error('Telegram client message handling failed', { chatId, error: error.message });
-    await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
+    log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack });
+    try {
+      await sendTelegram('Thank you for your message. Our team will get back to you shortly.', chatId);
+    } catch (e) { /* best effort */ }
   }
 }
 
@@ -2631,8 +2635,10 @@ When the client asks for ads, visuals, creatives, or mockups:
       }
     }
   } catch (error) {
-    log.error('Client message handling failed', { from, error: error.message });
-    await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+    log.error('Client message handling failed', { from, error: error.message, stack: error.stack });
+    try {
+      await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+    } catch (e) { /* best effort */ }
   }
 }
 
