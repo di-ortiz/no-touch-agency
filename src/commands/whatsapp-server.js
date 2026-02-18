@@ -5,6 +5,7 @@ import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as se
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, getLatestPendingClient, activatePendingClient,
+  updatePendingClient, getPendingClientByLeadsieInvite,
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
@@ -257,6 +258,17 @@ app.get('/api/leadsie-connect', async (req, res) => {
       platforms: uniquePlatforms,
       message: `Hi ${pending.name || clientName}! Welcome aboard. Please grant us access to your accounts below — it's a secure, one-click process. This lets us manage your ad campaigns and optimize your results right away.`,
     });
+
+    // Store the invite ID and requested platforms on the pending record
+    // so we can match the Leadsie webhook callback and track what's still pending
+    try {
+      updatePendingClient(token, {
+        leadsie_invite_id: invite.inviteId,
+        requested_platforms: JSON.stringify(uniquePlatforms),
+      });
+    } catch (e) {
+      log.warn('Failed to store Leadsie invite on pending client', { error: e.message });
+    }
 
     log.info('Leadsie connect redirect', { token, clientName, inviteUrl: invite.inviteUrl, platforms: uniquePlatforms });
 
@@ -2763,6 +2775,20 @@ async function handleTelegramClientMessage(chatId, message) {
     if (clientContext.channelsNeed) contextParts.push(`<b>Channels Interested In:</b> ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`<b>Brand Voice:</b> ${clientContext.brandVoice}`);
 
+    // Build platform access status section
+    let platformAccessNote = '';
+    const pa = clientContext.platformAccess;
+    if (pa && (pa.granted.length > 0 || pa.pending.length > 0)) {
+      const lines = ['\nPLATFORM ACCESS STATUS:'];
+      if (pa.granted.length > 0) {
+        lines.push(`✅ Granted: ${pa.granted.map(p => p.label).join(', ')}`);
+      }
+      if (pa.pending.length > 0) {
+        lines.push(`⏳ Still needed: ${pa.pending.map(p => p.label).join(', ')}`);
+      }
+      platformAccessNote = lines.join('\n');
+    }
+
     // Check for cross-channel contacts
     let crossChannelNote = '';
     if (clientContext.clientId) {
@@ -2778,7 +2804,7 @@ async function handleTelegramClientMessage(chatId, message) {
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
-${memoryContext}${crossChannelNote}
+${memoryContext}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -2798,6 +2824,14 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - If a follow-up message arrives (like "any success?" or "how's it going?"), CONTINUE the task you were working on — do not restart or change topic.
 - NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
+
+PLATFORM ACCESS FOLLOW-UP:
+If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
+- On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
+- Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
+- Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
+- If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
@@ -2968,65 +3002,89 @@ app.post('/webhook/leadsie', async (req, res) => {
 
     log.info('Leadsie onboarding completed', { inviteId: invite_id, clientName: client_name });
 
-    // Find the client linked to this Leadsie invite
+    // Extract granted platform credentials from the webhook payload
+    const updates = {};
+    const grantedPlatforms = [];
+    for (const account of (granted_accounts || [])) {
+      grantedPlatforms.push(account.platform);
+
+      // Ad accounts
+      if (account.platform === 'facebook' && account.account_id) {
+        updates.meta_ad_account_id = account.account_id;
+      } else if (account.platform === 'google' && account.account_id) {
+        updates.google_ads_customer_id = account.account_id;
+      } else if (account.platform === 'tiktok' && account.account_id) {
+        updates.tiktok_advertiser_id = account.account_id;
+
+      // CMS platforms
+      } else if (account.platform === 'wordpress') {
+        if (account.site_url) updates.wordpress_url = account.site_url;
+        if (account.username) updates.wordpress_username = account.username;
+        if (account.access_token || account.app_password) updates.wordpress_app_password = account.access_token || account.app_password;
+        updates.cms_platform = 'wordpress';
+      } else if (account.platform === 'shopify') {
+        if (account.store_url || account.site_url) updates.shopify_store_url = account.store_url || account.site_url;
+        if (account.access_token) updates.shopify_access_token = account.access_token;
+        updates.cms_platform = 'shopify';
+
+      // DNS
+      } else if (account.platform === 'godaddy') {
+        if (account.domain) updates.godaddy_domain = account.domain;
+        if (account.api_key || account.access_token) updates.godaddy_api_key = account.api_key || account.access_token;
+
+      // CRM
+      } else if (account.platform === 'hubspot') {
+        if (account.access_token) updates.hubspot_access_token = account.access_token;
+      }
+    }
+
+    // Find the client linked to this Leadsie invite (check both onboarding_sessions and pending_clients)
     const { default: Database } = await import('better-sqlite3');
     const DB_PATH = process.env.KB_DB_PATH || 'data/knowledge.db';
     const db = new Database(DB_PATH);
     const session = db.prepare('SELECT * FROM onboarding_sessions WHERE leadsie_invite_id = ?').get(invite_id);
 
-    if (session?.client_id) {
-      // Update client with granted account credentials (ad accounts, CMS, DNS, CRM)
-      const updates = {};
-      const grantedPlatforms = [];
-      for (const account of (granted_accounts || [])) {
-        grantedPlatforms.push(account.platform);
+    // Also check pending_clients (for invites created via /api/leadsie-connect before onboarding)
+    const pendingByInvite = getPendingClientByLeadsieInvite(invite_id);
 
-        // Ad accounts
-        if (account.platform === 'facebook' && account.account_id) {
-          updates.meta_ad_account_id = account.account_id;
-        } else if (account.platform === 'google' && account.account_id) {
-          updates.google_ads_customer_id = account.account_id;
-        } else if (account.platform === 'tiktok' && account.account_id) {
-          updates.tiktok_advertiser_id = account.account_id;
+    let clientId = session?.client_id || null;
 
-        // CMS platforms
-        } else if (account.platform === 'wordpress') {
-          if (account.site_url) updates.wordpress_url = account.site_url;
-          if (account.username) updates.wordpress_username = account.username;
-          if (account.access_token || account.app_password) updates.wordpress_app_password = account.access_token || account.app_password;
-          updates.cms_platform = 'wordpress';
-        } else if (account.platform === 'shopify') {
-          if (account.store_url || account.site_url) updates.shopify_store_url = account.store_url || account.site_url;
-          if (account.access_token) updates.shopify_access_token = account.access_token;
-          updates.cms_platform = 'shopify';
-
-        // DNS
-        } else if (account.platform === 'godaddy') {
-          if (account.domain) updates.godaddy_domain = account.domain;
-          if (account.api_key || account.access_token) updates.godaddy_api_key = account.api_key || account.access_token;
-
-        // CRM
-        } else if (account.platform === 'hubspot') {
-          if (account.access_token) updates.hubspot_access_token = account.access_token;
-        }
-      }
-      if (Object.keys(updates).length > 0) {
-        const { updateClient: updateClientKb } = await import('../services/knowledge-base.js');
-        updateClientKb(session.client_id, updates);
-      }
-
-      // Notify owner with categorized platform list
-      const adPlatforms = grantedPlatforms.filter(p => ['facebook', 'google', 'tiktok'].includes(p));
-      const cmsPlatforms = grantedPlatforms.filter(p => ['wordpress', 'shopify'].includes(p));
-      const otherPlatforms = grantedPlatforms.filter(p => ['godaddy', 'hubspot', 'mailchimp'].includes(p));
-
-      let notifyMsg = `✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n`;
-      if (adPlatforms.length) notifyMsg += `\n📊 *Ad accounts:* ${adPlatforms.join(', ')}`;
-      if (cmsPlatforms.length) notifyMsg += `\n🌐 *CMS access:* ${cmsPlatforms.join(', ')} — Sofia can now manage website content & SEO`;
-      if (otherPlatforms.length) notifyMsg += `\n🔧 *Other:* ${otherPlatforms.join(', ')}`;
-      notifyMsg += '\n\nAll credentials have been saved automatically.';
-      await sendWhatsApp(notifyMsg);
+    // If no client from session, try to find the client from the pending record's chat_id
+    if (!clientId && pendingByInvite?.chat_id) {
+      const contact = getContactByPhone(pendingByInvite.chat_id);
+      clientId = contact?.client_id || null;
     }
+
+    if (clientId && Object.keys(updates).length > 0) {
+      updateClient(clientId, updates);
+      log.info('Leadsie webhook: stored granted credentials on client', { clientId, grantedPlatforms });
+    } else if (!clientId && pendingByInvite && Object.keys(updates).length > 0) {
+      // Client hasn't been created yet (hasn't contacted Sofia) — store on pending record
+      // These will be carried over when the client is activated
+      try {
+        const pendingUpdates = {};
+        for (const [key, value] of Object.entries(updates)) {
+          pendingUpdates[key] = value;
+        }
+        updatePendingClient(pendingByInvite.token, pendingUpdates);
+        log.info('Leadsie webhook: stored granted credentials on pending client', { token: pendingByInvite.token, grantedPlatforms });
+      } catch (e) {
+        log.warn('Failed to store Leadsie credentials on pending client', { error: e.message });
+      }
+    }
+
+    // Notify owner with categorized platform list
+    const adPlatforms = grantedPlatforms.filter(p => ['facebook', 'google', 'tiktok'].includes(p));
+    const cmsPlatforms = grantedPlatforms.filter(p => ['wordpress', 'shopify'].includes(p));
+    const otherPlatforms = grantedPlatforms.filter(p => ['godaddy', 'hubspot', 'mailchimp'].includes(p));
+
+    let notifyMsg = `✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n`;
+    if (adPlatforms.length) notifyMsg += `\n📊 *Ad accounts:* ${adPlatforms.join(', ')}`;
+    if (cmsPlatforms.length) notifyMsg += `\n🌐 *CMS access:* ${cmsPlatforms.join(', ')} — Sofia can now manage website content & SEO`;
+    if (otherPlatforms.length) notifyMsg += `\n🔧 *Other:* ${otherPlatforms.join(', ')}`;
+    if (!clientId) notifyMsg += `\n\n⏳ Client hasn't connected with Sofia yet — credentials saved to pending record.`;
+    notifyMsg += '\n\nAll credentials have been saved automatically.';
+    await sendWhatsApp(notifyMsg);
 
     db.close();
   } catch (error) {
@@ -3291,6 +3349,20 @@ async function handleClientMessage(from, message) {
     if (clientContext.channelsNeed) contextParts.push(`*Channels Interested In:* ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`*Brand Voice:* ${clientContext.brandVoice}`);
 
+    // Build platform access status section
+    let platformAccessNote = '';
+    const pa = clientContext.platformAccess;
+    if (pa && (pa.granted.length > 0 || pa.pending.length > 0)) {
+      const lines = ['\nPLATFORM ACCESS STATUS:'];
+      if (pa.granted.length > 0) {
+        lines.push(`✅ *Granted:* ${pa.granted.map(p => p.label).join(', ')}`);
+      }
+      if (pa.pending.length > 0) {
+        lines.push(`⏳ *Still needed:* ${pa.pending.map(p => p.label).join(', ')}`);
+      }
+      platformAccessNote = lines.join('\n');
+    }
+
     // Check for cross-channel contacts
     let crossChannelNote = '';
     if (clientContext.clientId) {
@@ -3306,7 +3378,7 @@ async function handleClientMessage(from, message) {
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
-${memoryContext}${crossChannelNote}
+${memoryContext}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -3326,6 +3398,14 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - If a follow-up message arrives (like "any success?" or "how's it going?"), CONTINUE the task you were working on — do not restart or change topic.
 - NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
+
+PLATFORM ACCESS FOLLOW-UP:
+If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
+- On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
+- Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
+- Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
+- If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
