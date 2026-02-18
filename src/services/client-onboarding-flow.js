@@ -254,14 +254,17 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     if (session.current_step === 'confirm_details' && nextStep !== 'confirm_details' && nextStep !== 'complete') {
       const ch = session.channel || channel;
 
-      // Generate Leadsie invite early (default: Facebook + Google)
+      // Generate Leadsie invite early (ad accounts + CMS if website detected)
       let leadsieUrl = null;
       try {
+        const earlyPlatforms = ['facebook', 'google'];
+        // If we know their website, also request WordPress CMS access
+        if (answers.website) earlyPlatforms.push('wordpress');
         const invite = await leadsie.createInvite({
           clientName: answers.business_name || answers.name,
           clientEmail: answers.email || '',
-          platforms: ['facebook', 'google'],
-          message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts.`,
+          platforms: earlyPlatforms,
+          message: `Hi ${answers.name}! Please click the link below to grant us access to your accounts. This covers ad platforms${answers.website ? ' and your website CMS' : ''} — secure and takes under 2 minutes.`,
         });
         leadsieUrl = invite.inviteUrl;
         answers._leadsie_url = leadsieUrl;
@@ -521,10 +524,12 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
     }
   } else {
     try {
+      // Determine which platforms to request based on client's answers
       const platformsToRequest = [];
       const channelsHave = (answers.channels_have || '').toLowerCase();
       const channelsNeed = (answers.channels_need || '').toLowerCase();
 
+      // Ad platforms
       if (channelsHave.includes('facebook') || channelsHave.includes('instagram') || channelsHave.includes('meta') || channelsNeed.includes('facebook') || channelsNeed.includes('instagram') || channelsNeed.includes('meta')) {
         platformsToRequest.push('facebook');
       }
@@ -540,11 +545,19 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
         platformsToRequest.push('facebook', 'google');
       }
 
+      // CMS access — always request WordPress if they have a website (for SEO management)
+      if (answers.website) {
+        platformsToRequest.push('wordpress');
+      }
+
+      // CRM — request HubSpot access for lead/deal sync
+      platformsToRequest.push('hubspot');
+
       const invite = await leadsie.createInvite({
         clientName: answers.business_name || answers.name,
         clientEmail: answers.email || '',
         platforms: platformsToRequest,
-        message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts. It's a secure, one-click process — takes less than 2 minutes!`,
+        message: `Hi ${answers.name}! Please click the link below to grant us access to your accounts — ad platforms, website, and CRM. It's secure and takes under 2 minutes!`,
       });
 
       leadsieUrl = invite.inviteUrl;

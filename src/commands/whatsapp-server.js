@@ -38,6 +38,7 @@ import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
+import * as seoEngine from '../services/seo-engine.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
@@ -608,11 +609,84 @@ const CSA_TOOLS = [
     description: 'Visit a website and extract its content, headings, images, brand colors, and metadata. Perfect for researching competitor websites, getting creative inspiration, analyzing landing pages, or understanding a brand before creating ads. Works on any public URL.',
     input_schema: { type: 'object', properties: { url: { type: 'string', description: 'URL to visit (e.g. "https://example.com" or "example.com")' }, purpose: { type: 'string', description: 'Why you\'re visiting: "creative_inspiration", "competitor_research", "brand_analysis", or "general"' } }, required: ['url'] },
   },
+  // --- SEO & Content Management ---
+  {
+    name: 'full_seo_audit',
+    description: 'Run a comprehensive SEO audit on a client\'s website. Combines PageSpeed performance, on-page SEO (meta tags, headings, images), domain overview (traffic, keywords, backlinks), and WordPress SEO analysis (if CMS connected via Leadsie). Returns prioritized recommendations.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name to audit' } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_blog_post',
+    description: 'Generate a full SEO-optimized blog post and optionally publish/schedule it on the client\'s WordPress site. Includes title, HTML content, meta tags, excerpt, and featured image prompt. If WordPress is connected, it can publish as draft or schedule for a future date.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      topic: { type: 'string', description: 'Blog post topic or title idea' },
+      keywords: { type: 'string', description: 'Comma-separated target keywords' },
+      tone: { type: 'string', description: 'Writing tone: professional, casual, educational, persuasive (default: professional)' },
+      wordCount: { type: 'number', description: 'Target word count (default: 1200)' },
+      action: { type: 'string', enum: ['generate_only', 'save_draft', 'schedule'], description: 'What to do: generate_only (just return content), save_draft (create WP draft), schedule (schedule for future publish)' },
+      publishDate: { type: 'string', description: 'ISO 8601 date for scheduled publishing (only if action=schedule)' },
+    }, required: ['clientName', 'topic'] },
+  },
+  {
+    name: 'fix_meta_tags',
+    description: 'Generate optimized SEO meta tags (title + description) for a specific page and optionally push the update to WordPress. If no page specified, audits ALL pages and fixes the worst ones.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      url: { type: 'string', description: 'Specific page URL to fix (optional — omit to audit all pages)' },
+      pageId: { type: 'number', description: 'WordPress page/post ID (if known)' },
+      pageType: { type: 'string', enum: ['posts', 'pages'], description: 'WordPress content type (default: posts)' },
+      focusKeyword: { type: 'string', description: 'Target keyword for this page' },
+      applyChanges: { type: 'boolean', description: 'If true, push meta tag updates to WordPress (default: false — preview only)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'plan_content_calendar',
+    description: 'Create an SEO-driven content calendar with blog post topics, keywords, content types, and publish dates. Based on keyword gaps, competitor analysis, and industry trends. Returns a structured calendar that can be saved to Google Sheets.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      keywords: { type: 'string', description: 'Comma-separated seed keywords (optional — will research if not provided)' },
+      monthsAhead: { type: 'number', description: 'How many months to plan (default: 3)' },
+      postsPerWeek: { type: 'number', description: 'Posts per week (default: 1)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'list_wp_content',
+    description: 'List all posts and pages on a client\'s WordPress site. Shows title, status, date, and SEO meta info. Requires WordPress CMS access via Leadsie.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      contentType: { type: 'string', enum: ['posts', 'pages', 'all'], description: 'What to list (default: all)' },
+      status: { type: 'string', enum: ['publish', 'draft', 'future', 'any'], description: 'Filter by status (default: publish)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'update_wp_post',
+    description: 'Update an existing WordPress post or page — content, title, status, or SEO meta. Requires WordPress CMS access via Leadsie.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      postId: { type: 'number', description: 'WordPress post/page ID to update' },
+      title: { type: 'string', description: 'New title (optional)' },
+      content: { type: 'string', description: 'New HTML content (optional)' },
+      status: { type: 'string', enum: ['publish', 'draft', 'future'], description: 'New status (optional)' },
+      seoTitle: { type: 'string', description: 'New SEO title (optional)' },
+      seoDescription: { type: 'string', description: 'New meta description (optional)' },
+      focusKeyword: { type: 'string', description: 'New focus keyword (optional)' },
+    }, required: ['clientName', 'postId'] },
+  },
+  {
+    name: 'generate_schema_markup',
+    description: 'Generate JSON-LD schema markup (structured data) for a page. Supports LocalBusiness, Article, Product, Service, FAQ, HowTo types. Helps pages appear as rich results in Google.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      pageType: { type: 'string', description: 'Schema type: LocalBusiness, Article, Product, Service, FAQ, HowTo' },
+      url: { type: 'string', description: 'Page URL' },
+    }, required: ['clientName', 'pageType', 'url'] },
+  },
   // --- Client Onboarding (Leadsie) ---
   {
     name: 'create_onboarding_link',
-    description: 'Create a Leadsie invite link to send to a new client so they can grant access to their ad accounts (Meta, Google Ads, TikTok) in one click. Sofia will send the link directly via chat.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client business name' }, clientEmail: { type: 'string', description: 'Client email (optional)' }, platforms: { type: 'string', description: 'Comma-separated platforms: facebook, google, tiktok (default: facebook,google)' } }, required: ['clientName'] },
+    description: 'Create a Leadsie invite link to send to a new client so they can grant access to their ad accounts (Meta, Google Ads, TikTok), CMS (WordPress, Shopify), DNS (GoDaddy), and CRM (HubSpot) in one click. Sofia will send the link directly via chat.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client business name' }, clientEmail: { type: 'string', description: 'Client email (optional)' }, platforms: { type: 'string', description: 'Comma-separated platforms: facebook, google, tiktok, wordpress, shopify, godaddy, hubspot (default: facebook,google,wordpress,hubspot)' } }, required: ['clientName'] },
   },
   {
     name: 'check_onboarding_status',
@@ -1330,11 +1404,254 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    // --- SEO & Content Management ---
+    case 'full_seo_audit': {
+      const audit = await seoEngine.fullSEOAudit(toolInput.clientName);
+      const recs = await seoEngine.generateSEORecommendations(audit);
+      return {
+        audit: {
+          url: audit.url,
+          performance: audit.performance?.scores || audit.performance,
+          coreWebVitals: audit.performance?.coreWebVitals,
+          onPage: audit.onPage,
+          content: audit.content,
+          domain: audit.domain,
+          wordpress: audit.wordpress,
+        },
+        recommendations: recs.recommendations || [],
+        overallScore: recs.overallScore,
+        summary: recs.summary,
+        message: `Full SEO audit completed for ${audit.clientName}. Overall score: ${recs.overallScore || 'N/A'}/100. ${recs.recommendations?.length || 0} recommendations generated.`,
+      };
+    }
+
+    case 'generate_blog_post': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const keywords = toolInput.keywords ? toolInput.keywords.split(',').map(k => k.trim()) : [];
+      const post = await seoEngine.generateBlogPost({
+        topic: toolInput.topic,
+        keywords,
+        tone: toolInput.tone,
+        wordCount: toolInput.wordCount || 1200,
+        clientName: client.name,
+        businessDescription: client.description,
+        targetAudience: client.target_audience,
+      });
+
+      if (post.error) return post;
+
+      const result = { ...post, action: toolInput.action || 'generate_only' };
+
+      // Publish to WordPress if requested and connected
+      if (toolInput.action && toolInput.action !== 'generate_only') {
+        const wp = seoEngine.getWordPressClient(client);
+        if (!wp) {
+          result.wpStatus = 'not_connected';
+          result.message = `Blog post generated but WordPress is not connected for ${client.name}. Send them a Leadsie link with WordPress access to enable publishing.`;
+        } else {
+          try {
+            const status = toolInput.action === 'schedule' ? 'future' : 'draft';
+            const wpPost = await wp.createPost({
+              title: post.title,
+              content: post.content,
+              excerpt: post.excerpt,
+              slug: post.slug,
+              status,
+              date: toolInput.publishDate,
+              meta: {
+                _yoast_wpseo_title: post.seoTitle,
+                _yoast_wpseo_metadesc: post.seoDescription,
+                _yoast_wpseo_focuskw: post.focusKeyword,
+              },
+            });
+            result.wpPost = wpPost;
+            result.wpStatus = status;
+            result.message = status === 'future'
+              ? `Blog post "${post.title}" scheduled for ${toolInput.publishDate} on WordPress! Link: ${wpPost.link}`
+              : `Blog post "${post.title}" saved as draft on WordPress! Link: ${wpPost.link}`;
+          } catch (e) {
+            result.wpStatus = 'failed';
+            result.wpError = e.message;
+            result.message = `Blog post generated but WordPress publish failed: ${e.message}`;
+          }
+        }
+      } else {
+        result.message = `Blog post "${post.title}" generated (${post.content?.length || 0} chars). Ready to review before publishing.`;
+      }
+
+      return result;
+    }
+
+    case 'fix_meta_tags': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+
+      // If specific page, generate meta tags for it
+      if (toolInput.url || toolInput.pageId) {
+        const currentMeta = toolInput.pageId && wp
+          ? await wp.getPageSEO(toolInput.pageId, toolInput.pageType || 'posts')
+          : {};
+
+        const newMeta = await seoEngine.generateMetaTags({
+          url: toolInput.url || currentMeta.link || client.website,
+          currentTitle: currentMeta.seoTitle,
+          currentDescription: currentMeta.seoDescription,
+          focusKeyword: toolInput.focusKeyword || currentMeta.focusKeyword,
+          businessDescription: client.description,
+        });
+
+        if (toolInput.applyChanges && wp && toolInput.pageId) {
+          try {
+            await wp.updatePageSEO(toolInput.pageId, newMeta, toolInput.pageType || 'posts');
+            newMeta.applied = true;
+            newMeta.message = `Meta tags updated on WordPress for page #${toolInput.pageId}!`;
+          } catch (e) {
+            newMeta.applied = false;
+            newMeta.message = `Meta tags generated but update failed: ${e.message}`;
+          }
+        } else {
+          newMeta.applied = false;
+          newMeta.message = wp
+            ? `Meta tags generated. Set applyChanges=true to push to WordPress.`
+            : `Meta tags generated. Connect WordPress via Leadsie to auto-apply.`;
+        }
+
+        return newMeta;
+      }
+
+      // Audit ALL pages if no specific page
+      if (!wp) return { error: `WordPress not connected for ${client.name}. Cannot audit all pages without CMS access.` };
+
+      const allSEO = await wp.getAllPagesSEO();
+      const needsFix = allSEO.filter(p => !p.seoTitle || !p.seoDescription || p.seoTitle === '(missing)' || p.seoDescription === '(missing)');
+
+      return {
+        totalPages: allSEO.length,
+        pagesNeedingFix: needsFix.length,
+        pages: needsFix.slice(0, 15).map(p => ({
+          id: p.id, title: p.title, type: p.type, slug: p.slug,
+          seoTitle: p.seoTitle, seoDescription: p.seoDescription,
+        })),
+        message: `Found ${needsFix.length}/${allSEO.length} pages missing or incomplete meta tags. Use fix_meta_tags with a specific pageId to generate and apply fixes.`,
+      };
+    }
+
+    case 'plan_content_calendar': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const keywords = toolInput.keywords ? toolInput.keywords.split(',').map(k => k.trim()) : [];
+      const competitors = client.competitors ? (typeof client.competitors === 'string' ? JSON.parse(client.competitors) : client.competitors) : [];
+
+      const calendar = await seoEngine.planContentCalendar({
+        clientName: client.name,
+        keywords,
+        competitors,
+        industry: client.industry,
+        monthsAhead: toolInput.monthsAhead || 3,
+        postsPerWeek: toolInput.postsPerWeek || 1,
+      });
+
+      if (calendar.error) return calendar;
+
+      // Save to Google Sheets if client has Drive folder
+      if (client.drive_root_folder_id) {
+        try {
+          const sheet = await googleSheets.createSpreadsheet(
+            `${client.name} — SEO Content Calendar`,
+            client.drive_root_folder_id,
+          );
+          const rows = [['Week', 'Publish Date', 'Title', 'Primary Keyword', 'Content Type', 'Search Volume', 'Brief', 'Status']];
+          for (const item of (calendar.calendar || [])) {
+            rows.push([item.week, item.publishDate, item.title, item.primaryKeyword, item.contentType, item.searchVolume, item.brief, 'Planned']);
+          }
+          await googleSheets.writeData(sheet.spreadsheetId, 'Sheet1!A1', rows);
+          calendar.sheetUrl = `https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}`;
+          calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts! View and edit: ${calendar.sheetUrl}`;
+        } catch (e) {
+          log.warn('Failed to save content calendar to Sheets', { error: e.message });
+          calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts (Google Sheet save failed: ${e.message}).`;
+        }
+      } else {
+        calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts.`;
+      }
+
+      return calendar;
+    }
+
+    case 'list_wp_content': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+      if (!wp) return { error: `WordPress not connected for ${client.name}. Send them a Leadsie link with WordPress access.` };
+
+      const contentType = toolInput.contentType || 'all';
+      const status = toolInput.status === 'any' ? undefined : (toolInput.status || 'publish');
+      const results = {};
+
+      if (contentType === 'posts' || contentType === 'all') {
+        results.posts = await wp.listPosts({ status, perPage: 50 });
+      }
+      if (contentType === 'pages' || contentType === 'all') {
+        results.pages = await wp.listPages({ status, perPage: 50 });
+      }
+
+      const totalPosts = results.posts?.length || 0;
+      const totalPages = results.pages?.length || 0;
+      return { ...results, totalPosts, totalPages, message: `Found ${totalPosts} posts and ${totalPages} pages on ${client.name}'s WordPress site.` };
+    }
+
+    case 'update_wp_post': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+      if (!wp) return { error: `WordPress not connected for ${client.name}.` };
+
+      const updates = {};
+      if (toolInput.title) updates.title = toolInput.title;
+      if (toolInput.content) updates.content = toolInput.content;
+      if (toolInput.status) updates.status = toolInput.status;
+
+      // Update post content
+      const postResult = await wp.updatePost(toolInput.postId, updates);
+
+      // Update SEO meta separately if provided
+      if (toolInput.seoTitle || toolInput.seoDescription || toolInput.focusKeyword) {
+        await wp.updatePageSEO(toolInput.postId, {
+          seoTitle: toolInput.seoTitle,
+          seoDescription: toolInput.seoDescription,
+          focusKeyword: toolInput.focusKeyword,
+        });
+      }
+
+      return { ...postResult, message: `Post #${toolInput.postId} updated successfully on WordPress.` };
+    }
+
+    case 'generate_schema_markup': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const schema = await seoEngine.generateSchemaMarkup({
+        pageType: toolInput.pageType,
+        url: toolInput.url,
+        businessName: client.name,
+        businessDescription: client.description,
+      });
+
+      return { schema, message: `JSON-LD schema markup generated for ${toolInput.pageType}. Add this to the page's <head> section.` };
+    }
+
     // --- Leadsie Onboarding ---
     case 'create_onboarding_link': {
       const platforms = toolInput.platforms
         ? toolInput.platforms.split(',').map(p => p.trim())
-        : ['facebook', 'google'];
+        : ['facebook', 'google', 'wordpress', 'hubspot'];
       const invite = await leadsie.createInvite({
         clientName: toolInput.clientName,
         clientEmail: toolInput.clientEmail || '',
@@ -2298,6 +2615,8 @@ When the client asks for ads, visuals, creatives, or mockups:
       'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
       'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
       'search_google_ads_transparency',
+      'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
+      'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -2444,15 +2763,39 @@ app.post('/webhook/leadsie', async (req, res) => {
     const session = db.prepare('SELECT * FROM onboarding_sessions WHERE leadsie_invite_id = ?').get(invite_id);
 
     if (session?.client_id) {
-      // Update client with granted ad account IDs
+      // Update client with granted account credentials (ad accounts, CMS, DNS, CRM)
       const updates = {};
+      const grantedPlatforms = [];
       for (const account of (granted_accounts || [])) {
+        grantedPlatforms.push(account.platform);
+
+        // Ad accounts
         if (account.platform === 'facebook' && account.account_id) {
           updates.meta_ad_account_id = account.account_id;
         } else if (account.platform === 'google' && account.account_id) {
           updates.google_ads_customer_id = account.account_id;
         } else if (account.platform === 'tiktok' && account.account_id) {
           updates.tiktok_advertiser_id = account.account_id;
+
+        // CMS platforms
+        } else if (account.platform === 'wordpress') {
+          if (account.site_url) updates.wordpress_url = account.site_url;
+          if (account.username) updates.wordpress_username = account.username;
+          if (account.access_token || account.app_password) updates.wordpress_app_password = account.access_token || account.app_password;
+          updates.cms_platform = 'wordpress';
+        } else if (account.platform === 'shopify') {
+          if (account.store_url || account.site_url) updates.shopify_store_url = account.store_url || account.site_url;
+          if (account.access_token) updates.shopify_access_token = account.access_token;
+          updates.cms_platform = 'shopify';
+
+        // DNS
+        } else if (account.platform === 'godaddy') {
+          if (account.domain) updates.godaddy_domain = account.domain;
+          if (account.api_key || account.access_token) updates.godaddy_api_key = account.api_key || account.access_token;
+
+        // CRM
+        } else if (account.platform === 'hubspot') {
+          if (account.access_token) updates.hubspot_access_token = account.access_token;
         }
       }
       if (Object.keys(updates).length > 0) {
@@ -2460,9 +2803,17 @@ app.post('/webhook/leadsie', async (req, res) => {
         updateClientKb(session.client_id, updates);
       }
 
-      // Notify owner
-      const platformNames = (granted_accounts || []).map(a => a.platform).join(', ');
-      await sendWhatsApp(`✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n\nAccess granted for: ${platformNames || 'accounts linked'}\n\nAd account IDs have been saved automatically.`);
+      // Notify owner with categorized platform list
+      const adPlatforms = grantedPlatforms.filter(p => ['facebook', 'google', 'tiktok'].includes(p));
+      const cmsPlatforms = grantedPlatforms.filter(p => ['wordpress', 'shopify'].includes(p));
+      const otherPlatforms = grantedPlatforms.filter(p => ['godaddy', 'hubspot', 'mailchimp'].includes(p));
+
+      let notifyMsg = `✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n`;
+      if (adPlatforms.length) notifyMsg += `\n📊 *Ad accounts:* ${adPlatforms.join(', ')}`;
+      if (cmsPlatforms.length) notifyMsg += `\n🌐 *CMS access:* ${cmsPlatforms.join(', ')} — Sofia can now manage website content & SEO`;
+      if (otherPlatforms.length) notifyMsg += `\n🔧 *Other:* ${otherPlatforms.join(', ')}`;
+      notifyMsg += '\n\nAll credentials have been saved automatically.';
+      await sendWhatsApp(notifyMsg);
     }
 
     db.close();
@@ -2780,6 +3131,8 @@ When the client asks for ads, visuals, creatives, or mockups:
       'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
       'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
       'search_google_ads_transparency',
+      'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
+      'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)

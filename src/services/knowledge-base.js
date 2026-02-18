@@ -247,6 +247,18 @@ function getDb() {
 
     // Safe migration: add channel to client_contacts for cross-channel identity
     try { db.exec("ALTER TABLE client_contacts ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: CMS / DNS / CRM platform credentials (granted via Leadsie OAuth)
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_url TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_username TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_app_password TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN shopify_store_url TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN shopify_access_token TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN godaddy_domain TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN godaddy_api_key TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN hubspot_access_token TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN ga4_property_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN cms_platform TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }

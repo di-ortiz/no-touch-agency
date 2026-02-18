@@ -39,36 +39,57 @@ async function apiPost(endpoint, data) {
 }
 
 /**
+ * Supported Leadsie platform categories:
+ * - Ad accounts: 'facebook', 'google', 'tiktok'
+ * - CMS: 'wordpress', 'shopify'
+ * - DNS: 'godaddy'
+ * - CRM: 'hubspot'
+ * - Email: 'mailchimp'
+ */
+const AD_PLATFORMS = ['facebook', 'google', 'tiktok'];
+const CMS_PLATFORMS = ['wordpress', 'shopify'];
+const DNS_PLATFORMS = ['godaddy'];
+const CRM_PLATFORMS = ['hubspot'];
+const ALL_SUPPORTED = [...AD_PLATFORMS, ...CMS_PLATFORMS, ...DNS_PLATFORMS, ...CRM_PLATFORMS, 'mailchimp'];
+
+export { AD_PLATFORMS, CMS_PLATFORMS, DNS_PLATFORMS, CRM_PLATFORMS, ALL_SUPPORTED };
+
+/**
  * Create a Leadsie invite link for a new client.
- * This link lets the client grant access to their ad accounts in one click.
+ * This link lets the client grant access to ad accounts, CMS, DNS, and CRM in one click.
  *
  * @param {object} opts
  * @param {string} opts.clientName - Client's business name
  * @param {string} opts.clientEmail - Client's email
- * @param {string[]} opts.platforms - Platforms to request access for ['facebook', 'google', 'tiktok']
+ * @param {string[]} opts.platforms - Platforms to request access for
+ *   Ad accounts: ['facebook', 'google', 'tiktok']
+ *   CMS: ['wordpress', 'shopify']
+ *   DNS: ['godaddy']
+ *   CRM: ['hubspot']
  * @param {string} opts.message - Optional personalized message
  * @returns {object} { inviteUrl, inviteId, status }
  */
 export async function createInvite(opts = {}) {
   if (!opts.clientName) throw new Error('Client name is required');
 
-  log.info('Creating Leadsie invite', { clientName: opts.clientName, platforms: opts.platforms });
+  const platforms = opts.platforms || ['facebook', 'google'];
+  log.info('Creating Leadsie invite', { clientName: opts.clientName, platforms });
 
   const data = {
     client_name: opts.clientName,
     client_email: opts.clientEmail || '',
-    platforms: opts.platforms || ['facebook', 'google'],
-    message: opts.message || `Hi ${opts.clientName}! Please click the link below to grant us access to your ad accounts. This is a secure, one-click process powered by Leadsie.`,
+    platforms,
+    message: opts.message || `Hi ${opts.clientName}! Please click the link below to grant us access to your accounts. This is a secure, one-click process powered by Leadsie.`,
   };
 
   const result = await apiPost('/invites', data);
 
-  log.info('Leadsie invite created', { inviteId: result.id, url: result.invite_url });
+  log.info('Leadsie invite created', { inviteId: result.id, url: result.invite_url, platforms });
   return {
     inviteId: result.id,
     inviteUrl: result.invite_url,
     status: result.status || 'pending',
-    platforms: opts.platforms,
+    platforms,
   };
 }
 
