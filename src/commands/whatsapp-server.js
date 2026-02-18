@@ -35,6 +35,8 @@ import * as googleSheets from '../api/google-sheets.js';
 import * as keywordPlanner from '../api/google-keyword-planner.js';
 import * as dataforseo from '../api/dataforseo.js';
 import * as openaiMedia from '../api/openai-media.js';
+import * as imageRouter from '../api/image-router.js';
+import * as geminiApi from '../api/gemini.js';
 import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
@@ -646,8 +648,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using DALL-E 3 in platform-specific dimensions. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' } }, required: ['clientName', 'platform', 'concept'] },
+    description: 'Generate ad creative images using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects the best available provider with smart fallback). IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['dalle', 'fal', 'gemini'], description: 'Preferred AI image provider (optional — auto-selects if not specified). Use dalle for photorealism, fal for artistic/stylized, gemini for variety.' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
     name: 'generate_ad_video',
@@ -694,6 +696,17 @@ const CSA_TOOLS = [
       search: { type: 'string', description: 'Optional: filter URLs by keyword (e.g. "blog" or "pricing")' },
       limit: { type: 'number', description: 'Max URLs to return (default: 100)' },
     }, required: ['url'] },
+  },
+  // --- Visual Analysis ---
+  {
+    name: 'analyze_visual_reference',
+    description: 'Analyze a competitor ad, reference image, or any visual using Gemini Vision AI. Extracts detailed creative insights: composition, color palette, style, mood, lighting, typography approach, and actionable recommendations for creating similar or better ads. Perfect for analyzing Meta Ad Library screenshots, competitor landing pages, or client reference images before generating creatives.',
+    input_schema: { type: 'object', properties: {
+      imageUrl: { type: 'string', description: 'URL of the image to analyze (competitor ad, reference creative, etc.)' },
+      analysisType: { type: 'string', enum: ['competitor_ad', 'style_reference', 'brand_analysis', 'landing_page', 'general'], description: 'Type of analysis to perform (affects the depth and focus of insights)' },
+      clientName: { type: 'string', description: 'Client name (for context — what brand should the insights inform?)' },
+      context: { type: 'string', description: 'Additional context (e.g. "This is a competitor\'s top-performing Instagram ad for a SaaS product")' },
+    }, required: ['imageUrl'] },
   },
   // --- SEO & Content Management ---
   {
@@ -1295,7 +1308,9 @@ Return ONLY the JSON array, no other text.`;
       return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length, sheetUrl };
     }
     case 'generate_ad_images': {
-      if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable image generation.' };
+      const providerStatus = imageRouter.getProviderStatus();
+      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
+      if (!anyConfigured) return { error: 'No image generation providers configured. Set at least one of OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY in .env.' };
       const client = getClient(toolInput.clientName);
 
       // Generate the image prompt using AI with full context
@@ -1316,12 +1331,14 @@ Return ONLY the JSON array, no other text.`;
       // Parse custom formats if provided
       const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
 
-      const images = await openaiMedia.generateAdImages({
+      // Use the image router with smart fallback across DALL-E 3, Flux Pro, Imagen 3
+      const images = await imageRouter.generateAdImages({
         prompt: imagePrompt,
         platform: toolInput.platform,
         formats,
         quality: 'hd',
         style: 'natural',
+        preferred: toolInput.preferredProvider,
         workflow: 'ad-image-generation',
         clientId: client?.id,
       });
@@ -1330,6 +1347,7 @@ Return ONLY the JSON array, no other text.`;
         format: img.format,
         label: img.dimensions?.label || img.format,
         url: img.url,
+        provider: img.provider,
         error: img.error,
       }));
 
@@ -1350,6 +1368,7 @@ Return ONLY the JSON array, no other text.`;
         log.error('Failed to create ad images record sheet', { error: e.message });
       }
 
+      const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
       return {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
@@ -1357,6 +1376,7 @@ Return ONLY the JSON array, no other text.`;
         imagePrompt,
         images: mappedImages,
         totalGenerated: images.filter(i => !i.error).length,
+        providers,
         sheetUrl,
       };
     }
@@ -1548,6 +1568,75 @@ Return ONLY the JSON array, no other text.`;
         url: toolInput.url,
         totalUrls: mapResult.totalUrls,
         urls: mapResult.urls,
+      };
+    }
+
+    // --- Visual Analysis ---
+    case 'analyze_visual_reference': {
+      if (!geminiApi.isConfigured()) {
+        return { error: 'Visual analysis requires GEMINI_API_KEY to be configured in .env.' };
+      }
+      const analysisPrompts = {
+        competitor_ad: `You are a senior creative director analyzing a competitor's ad creative. Provide a detailed breakdown:
+
+1. **Visual Composition**: Layout, focal point, use of space, visual hierarchy
+2. **Color Palette**: Exact colors used, dominant vs accent, mood they create
+3. **Style & Aesthetic**: Photography style, filters, design approach (minimalist, bold, lifestyle, etc.)
+4. **Mood & Emotion**: What feelings does this evoke? What psychological triggers are used?
+5. **Target Audience Signals**: Who is this ad targeting based on visual cues?
+6. **Strengths**: What makes this ad effective? What would make someone stop scrolling?
+7. **Weaknesses/Gaps**: What could be improved? Where is the opportunity to do better?
+8. **Actionable Recommendations**: Specific directions for creating a BETTER version of this ad for our client.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        style_reference: `Analyze this reference image for creative inspiration. Extract:
+1. **Visual Style**: Exact style (photorealistic, illustrated, minimalist, editorial, etc.)
+2. **Color Palette**: All colors with hex approximations
+3. **Composition**: How elements are arranged, rule of thirds, symmetry, etc.
+4. **Lighting**: Type (natural, studio, dramatic, soft), direction, quality
+5. **Mood**: Overall feeling and atmosphere
+6. **Textures & Materials**: Any notable textures or material qualities
+7. **Key Elements to Replicate**: What specific techniques should we borrow for ad creatives?${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        brand_analysis: `Analyze this brand visual for brand identity extraction:
+1. **Brand Colors**: Primary, secondary, accent colors with hex approximations
+2. **Typography Approach**: Serif/sans-serif, weight, style
+3. **Visual Identity**: Logo placement, brand elements, patterns
+4. **Brand Personality**: What personality does the visual communicate?
+5. **Target Market**: Who is this brand speaking to?
+6. **Design System Cues**: Spacing, borders, shadows, rounded vs sharp corners
+7. **Recommendations**: How to maintain this brand identity in ad creatives.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        landing_page: `Analyze this landing page screenshot for conversion optimization insights:
+1. **Above the Fold**: What's immediately visible? Hero image/video, headline, CTA
+2. **Visual Hierarchy**: Where does the eye travel first?
+3. **Color Psychology**: How are colors used to drive action?
+4. **Trust Signals**: Testimonials, logos, badges visible?
+5. **CTA Design**: Button colors, size, placement, copy
+6. **Imagery**: Type (product, lifestyle, illustration), quality, relevance
+7. **Recommendations**: How to create ads that match this landing page experience.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        general: `Analyze this image in detail for creative inspiration:
+1. **Composition & Layout**: How is the image composed?
+2. **Color Palette**: Key colors used
+3. **Style & Mood**: Overall aesthetic and emotional tone
+4. **Lighting**: Quality and direction
+5. **Key Takeaways**: What creative insights can be applied to ad design?${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+      };
+
+      const prompt = analysisPrompts[toolInput.analysisType] || analysisPrompts.general;
+      const result = await geminiApi.analyzeImage({
+        imageUrl: toolInput.imageUrl,
+        prompt,
+        workflow: 'visual-analysis',
+        clientId: toolInput.clientName ? getClient(toolInput.clientName)?.id : undefined,
+      });
+
+      return {
+        imageUrl: toolInput.imageUrl,
+        analysisType: toolInput.analysisType || 'general',
+        analysis: result.analysis,
+        model: result.model,
+        clientName: toolInput.clientName || null,
       };
     }
 
@@ -2946,7 +3035,8 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website', 'crawl_website', 'search_web', 'map_website',
+      'generate_text_ads', 'analyze_visual_reference',
+      'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',
@@ -3520,7 +3610,8 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website', 'crawl_website', 'search_web', 'map_website',
+      'generate_text_ads', 'analyze_visual_reference',
+      'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',

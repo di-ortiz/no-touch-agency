@@ -1,6 +1,7 @@
 import logger from '../utils/logger.js';
 import { askClaude } from '../api/anthropic.js';
 import * as openaiMedia from '../api/openai-media.js';
+import * as imageRouter from '../api/image-router.js';
 import * as googleSlides from '../api/google-slides.js';
 import { getClient, buildClientContext, getTopCreatives } from './knowledge-base.js';
 import { auditLog } from './cost-tracker.js';
@@ -265,7 +266,8 @@ export async function generateCreativePackage(opts = {}) {
   });
 
   // --- Step 2: Generate images ---
-  if (opts.generateImages !== false && config.OPENAI_API_KEY) {
+  const hasImageProvider = config.OPENAI_API_KEY || config.FAL_API_KEY || config.GEMINI_API_KEY;
+  if (opts.generateImages !== false && hasImageProvider) {
     log.info('Step 2: Generating ad images...');
     try {
       // Generate an image prompt based on the creative brief
@@ -283,8 +285,8 @@ export async function generateCreativePackage(opts = {}) {
         competitorInsights: opts.competitorInsights,
       });
 
-      // Generate images for platform-specific formats
-      const images = await openaiMedia.generateAdImages({
+      // Generate images via router (DALL-E 3 → Flux Pro → Imagen 3 fallback)
+      const images = await imageRouter.generateAdImages({
         prompt: imagePrompt,
         platform,
         quality: 'hd',

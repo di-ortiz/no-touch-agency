@@ -19,6 +19,8 @@ const limiters = {
   pagespeed: new PQueue({ concurrency: 2, interval: 2000, intervalCap: 2 }),
   openai: new PQueue({ concurrency: 3, interval: 1000, intervalCap: 3 }),
   firecrawl: new PQueue({ concurrency: 3, interval: 1000, intervalCap: 3 }),
+  gemini: new PQueue({ concurrency: 3, interval: 1000, intervalCap: 3 }),
+  fal: new PQueue({ concurrency: 2, interval: 1000, intervalCap: 2 }),
 };
 
 /**
