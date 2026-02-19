@@ -194,25 +194,33 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     contactName,
   });
 
-  // Note: conversation history saving is handled by the callers (addToHistory)
+  // Load conversation history so Claude can resolve references like "same as above"
+  // History is saved to DB by callers (addToHistory in whatsapp-server.js)
+  const conversationHistory = getMessages(phone, 40);
 
   // Build prompt and send to Claude for natural extraction
   const sessionLang = session.language || 'en';
   const systemPrompt = buildOnboardingPrompt(session, contactName, sessionLang);
 
+  // Build messages array: full conversation history + current message
+  const messages = [...conversationHistory, { role: 'user', content: message }];
+
   try {
     const response = await askClaude({
       systemPrompt,
-      userMessage: message,
+      messages,
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1024,
       workflow: 'onboarding-flow',
     });
 
-    // Parse Claude's JSON response
+    // Parse Claude's JSON response (with multiple extraction strategies)
     let parsed;
     try {
-      const jsonMatch = response.text.match(/\{[\s\S]*\}/);
+      let text = response.text;
+      // Strip markdown code fences (```json ... ``` or ``` ... ```)
+      text = text.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '');
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
       parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
     } catch (e) {
       log.warn('Failed to parse onboarding response', { text: response.text });
@@ -220,11 +228,41 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     }
 
     if (!parsed) {
-      return "I appreciate your patience! Could you repeat that? I want to make sure I capture everything correctly.";
+      // Track consecutive parse failures to avoid infinite loops
+      const answers = { ...session.answers };
+      const failures = (answers._parse_failures || 0) + 1;
+      answers._parse_failures = failures;
+
+      if (failures >= 2) {
+        // Auto-advance: accept the user's raw message as the answer for the current step
+        log.info('Auto-advancing onboarding after repeated parse failures', { phone, step: session.current_step, failures });
+        answers[session.current_step] = message.trim();
+        answers._parse_failures = 0;
+        const nextStep = getNextStep(session.current_step);
+        updateOnboardingSession(session.id, {
+          answers,
+          currentStep: nextStep,
+          status: nextStep === 'complete' ? 'completed' : 'in_progress',
+        });
+        // Build a natural acknowledgment and move on
+        const langAck = sessionLang === 'es' ? `¡Perfecto, anotado! Siguiente pregunta...`
+          : sessionLang === 'pt' ? `Perfeito, anotado! Próxima pergunta...`
+          : `Got it, noted! Moving on to the next question...`;
+        return langAck;
+      }
+
+      updateOnboardingSession(session.id, { answers });
+      const langRetry = sessionLang === 'es' ? `Disculpa, ¿podrías repetir eso? Quiero asegurarme de captar todo correctamente.`
+        : sessionLang === 'pt' ? `Desculpe, pode repetir? Quero ter certeza de captar tudo corretamente.`
+        : `I appreciate your patience! Could you repeat that? I want to make sure I capture everything correctly.`;
+      return langRetry;
     }
+
+    // Successful parse — reset failure counter
 
     // Update answers with extracted information
     const answers = { ...session.answers };
+    answers._parse_failures = 0;
     if (parsed.extracted && typeof parsed.extracted === 'object') {
       for (const [key, value] of Object.entries(parsed.extracted)) {
         if (value && value.toString().trim()) {
@@ -249,18 +287,22 @@ export async function handleOnboardingMessage(phone, message, channel = 'whatsap
     if (session.current_step === 'confirm_details' && nextStep !== 'confirm_details' && nextStep !== 'complete') {
       const ch = session.channel || channel;
 
-      // Generate Leadsie invite early (default: Facebook + Google)
+      // Generate Leadsie invite early (ad accounts + CMS if website detected)
       let leadsieUrl = null;
       try {
+        const earlyPlatforms = ['facebook', 'google'];
+        // If we know their website, also request WordPress CMS access
+        if (answers.website) earlyPlatforms.push('wordpress');
         const invite = await leadsie.createInvite({
           clientName: answers.business_name || answers.name,
           clientEmail: answers.email || '',
-          platforms: ['facebook', 'google'],
-          message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts.`,
+          platforms: earlyPlatforms,
+          message: `Hi ${answers.name}! Please click the link below to grant us access to your accounts. This covers ad platforms${answers.website ? ' and your website CMS' : ''} — secure and takes under 2 minutes.`,
         });
         leadsieUrl = invite.inviteUrl;
         answers._leadsie_url = leadsieUrl;
         answers._leadsie_invite_id = invite.inviteId;
+        answers._requested_platforms = JSON.stringify(earlyPlatforms);
       } catch (e) {
         log.warn('Leadsie invite during onboarding failed', { error: e.message });
       }
@@ -363,6 +405,25 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
       updateContact(phone, { clientId: client.id });
     } else {
       createContact({ phone, name: answers.name, clientId: client.id, channel });
+    }
+
+    // Carry over requested_platforms and any pre-granted credentials from pending record
+    if (pendingClient) {
+      const carryOver = {};
+      if (pendingClient.requested_platforms) carryOver.requested_platforms = pendingClient.requested_platforms;
+      if (pendingClient.meta_ad_account_id) carryOver.meta_ad_account_id = pendingClient.meta_ad_account_id;
+      if (pendingClient.google_ads_customer_id) carryOver.google_ads_customer_id = pendingClient.google_ads_customer_id;
+      if (pendingClient.tiktok_advertiser_id) carryOver.tiktok_advertiser_id = pendingClient.tiktok_advertiser_id;
+      if (pendingClient.wordpress_url) carryOver.wordpress_url = pendingClient.wordpress_url;
+      if (pendingClient.wordpress_username) carryOver.wordpress_username = pendingClient.wordpress_username;
+      if (pendingClient.wordpress_app_password) carryOver.wordpress_app_password = pendingClient.wordpress_app_password;
+      if (pendingClient.hubspot_access_token) carryOver.hubspot_access_token = pendingClient.hubspot_access_token;
+      if (pendingClient.shopify_store_url) carryOver.shopify_store_url = pendingClient.shopify_store_url;
+      if (pendingClient.shopify_access_token) carryOver.shopify_access_token = pendingClient.shopify_access_token;
+      if (Object.keys(carryOver).length > 0) {
+        updateClient(clientId, carryOver);
+        log.info('Carried over platform credentials from pending client', { clientId, fields: Object.keys(carryOver) });
+      }
     }
 
     steps.push('Client profile created');
@@ -492,15 +553,22 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
   }
 
   // Step 5: Create Leadsie invite link (or reuse one already sent during onboarding)
+  // Track all requested platforms across both early and final invites
+  let allRequestedPlatforms = [];
+
   if (answers._leadsie_url) {
     leadsieUrl = answers._leadsie_url;
     steps.push('Leadsie invite (sent during onboarding)');
+
+    // Parse the early requested platforms
+    try { allRequestedPlatforms = JSON.parse(answers._requested_platforms || '[]'); } catch (e) { /* ignore */ }
 
     // Check if client mentioned additional platforms — create a supplemental invite
     const channelsHave = (answers.channels_have || '').toLowerCase();
     const channelsNeed = (answers.channels_need || '').toLowerCase();
     const needsTikTok = (channelsHave.includes('tiktok') || channelsNeed.includes('tiktok'));
     if (needsTikTok) {
+      allRequestedPlatforms.push('tiktok');
       try {
         const extra = await leadsie.createInvite({
           clientName: answers.business_name || answers.name,
@@ -516,10 +584,12 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
     }
   } else {
     try {
+      // Determine which platforms to request based on client's answers
       const platformsToRequest = [];
       const channelsHave = (answers.channels_have || '').toLowerCase();
       const channelsNeed = (answers.channels_need || '').toLowerCase();
 
+      // Ad platforms
       if (channelsHave.includes('facebook') || channelsHave.includes('instagram') || channelsHave.includes('meta') || channelsNeed.includes('facebook') || channelsNeed.includes('instagram') || channelsNeed.includes('meta')) {
         platformsToRequest.push('facebook');
       }
@@ -535,11 +605,21 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
         platformsToRequest.push('facebook', 'google');
       }
 
+      // CMS access — always request WordPress if they have a website (for SEO management)
+      if (answers.website) {
+        platformsToRequest.push('wordpress');
+      }
+
+      // CRM — request HubSpot access for lead/deal sync
+      platformsToRequest.push('hubspot');
+
+      allRequestedPlatforms = [...platformsToRequest];
+
       const invite = await leadsie.createInvite({
         clientName: answers.business_name || answers.name,
         clientEmail: answers.email || '',
         platforms: platformsToRequest,
-        message: `Hi ${answers.name}! Please click the link below to grant us access to your ad accounts. It's a secure, one-click process — takes less than 2 minutes!`,
+        message: `Hi ${answers.name}! Please click the link below to grant us access to your accounts — ad platforms, website, and CRM. It's secure and takes under 2 minutes!`,
       });
 
       leadsieUrl = invite.inviteUrl;
@@ -553,6 +633,12 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
       log.warn('Leadsie invite creation failed', { error: e.message });
       errors.push(`Leadsie: ${e.message}`);
     }
+  }
+
+  // Store requested_platforms on the client record for Sofia to compare against granted access
+  if (clientId && allRequestedPlatforms.length > 0) {
+    const unique = [...new Set(allRequestedPlatforms)];
+    updateClient(clientId, { requested_platforms: JSON.stringify(unique) });
   }
 
   // Update session as completed
@@ -855,12 +941,18 @@ export function getClientContextByPhone(phone) {
   const contact = getContactByPhone(phone);
   if (!contact) return null;
 
-  const client = contact.client_id ? getClient(contact.client_id) : null;
+  // Contact without a client_id means onboarding was never completed — not a known client yet
+  if (!contact.client_id) return null;
+
+  const client = getClient(contact.client_id);
 
   // Get all channels this client is connected on
   const channels = contact.client_id
     ? getContactsByClientId(contact.client_id).map(c => ({ phone: c.phone, channel: c.channel || 'whatsapp' }))
     : [{ phone: contact.phone, channel: contact.channel || 'whatsapp' }];
+
+  // Build platform access status: compare requested platforms vs actually granted credentials
+  const platformAccess = buildPlatformAccessStatus(client);
 
   return {
     contactName: contact.name,
@@ -891,6 +983,70 @@ export function getClientContextByPhone(phone) {
     profileSheetId: client?.drive_profile_sheet_id,
     onboardingComplete: client?.onboarding_complete === 1,
     channels,
+    platformAccess,
+  };
+}
+
+/**
+ * Compare requested platforms vs actually granted credentials to determine access status.
+ * Returns { granted: [...], pending: [...], allGranted: bool }
+ */
+function buildPlatformAccessStatus(client) {
+  if (!client) return { granted: [], pending: [], allGranted: true };
+
+  // Map platform names to the credential fields that indicate access was granted
+  const platformCredentialMap = {
+    facebook: 'meta_ad_account_id',
+    google: 'google_ads_customer_id',
+    tiktok: 'tiktok_advertiser_id',
+    wordpress: 'wordpress_app_password',
+    shopify: 'shopify_access_token',
+    godaddy: 'godaddy_api_key',
+    hubspot: 'hubspot_access_token',
+  };
+
+  // Friendly names for display
+  const platformLabels = {
+    facebook: 'Meta Ads (Facebook/Instagram)',
+    google: 'Google Ads',
+    tiktok: 'TikTok Ads',
+    wordpress: 'WordPress (CMS)',
+    shopify: 'Shopify (CMS)',
+    godaddy: 'GoDaddy (DNS)',
+    hubspot: 'HubSpot (CRM)',
+  };
+
+  let requestedPlatforms = [];
+  try {
+    requestedPlatforms = client.requested_platforms ? JSON.parse(client.requested_platforms) : [];
+  } catch (e) { /* ignore */ }
+
+  // If no requested_platforms recorded, infer from what we know
+  if (requestedPlatforms.length === 0) {
+    // Default: at least facebook + google for any PPC client
+    requestedPlatforms = ['facebook', 'google'];
+    if (client.website) requestedPlatforms.push('wordpress');
+    if (client.channels_have?.toLowerCase().includes('tiktok') || client.channels_need?.toLowerCase().includes('tiktok')) {
+      requestedPlatforms.push('tiktok');
+    }
+  }
+
+  const granted = [];
+  const pending = [];
+
+  for (const platform of requestedPlatforms) {
+    const credField = platformCredentialMap[platform];
+    if (credField && client[credField]) {
+      granted.push({ platform, label: platformLabels[platform] || platform });
+    } else {
+      pending.push({ platform, label: platformLabels[platform] || platform });
+    }
+  }
+
+  return {
+    granted,
+    pending,
+    allGranted: pending.length === 0,
   };
 }
 

@@ -84,6 +84,8 @@ export function initializeSchedule(workflows) {
     clientMorningBriefing,
     morningCostAlert,
     eveningCostAlert,
+    weeklySEOCheck,
+    monthlyContentAnalysis,
   } = workflows;
 
   // Workflow 1: Morning Intelligence Briefing - 8 AM
@@ -126,6 +128,10 @@ export function initializeSchedule(workflows) {
   // Owner Cost Alerts - morning recap at 8 AM, end-of-day report at 9 PM (owner-only, never sent to clients)
   if (morningCostAlert) registerJob('morning-cost-alert', '0 8 * * *', morningCostAlert);
   if (eveningCostAlert) registerJob('evening-cost-alert', '0 21 * * *', eveningCostAlert);
+
+  // SEO Monitoring - weekly check Monday 9 AM, monthly content analysis 1st Monday at 10 AM
+  if (weeklySEOCheck) registerJob('weekly-seo-check', '0 9 * * 1', weeklySEOCheck);
+  if (monthlyContentAnalysis) registerJob('monthly-content-analysis', '0 10 1-7 * 1', monthlyContentAnalysis);
 
   log.info(`Initialized ${jobs.size} scheduled jobs`);
 }

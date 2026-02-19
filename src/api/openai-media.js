@@ -16,7 +16,7 @@ function getClient() {
     if (!config.OPENAI_API_KEY) {
       throw new Error('OPENAI_API_KEY not configured. Set it in .env to enable image/video generation.');
     }
-    client = new OpenAI({ apiKey: config.OPENAI_API_KEY });
+    client = new OpenAI({ apiKey: config.OPENAI_API_KEY, timeout: 45000 });
   }
   return client;
 }
@@ -99,7 +99,7 @@ export async function generateImage(opts = {}) {
         format,
         dimensions: dims,
       };
-    }, { retries: 2, label: 'DALL-E 3 image', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'DALL-E 3 image', shouldRetry: isRetryableHttpError })
   );
 }
 

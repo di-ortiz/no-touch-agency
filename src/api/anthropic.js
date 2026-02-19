@@ -22,6 +22,8 @@ const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
  * @param {string} opts.clientId - Client ID for cost tracking
  * @param {Array} opts.tools - Tool definitions for tool use
  */
+const CLAUDE_API_TIMEOUT_MS = 90_000; // 90s timeout per API call (includes retries)
+
 export async function askClaude({
   systemPrompt,
   userMessage,
@@ -32,60 +34,65 @@ export async function askClaude({
   tools,
   messages,
 }) {
-  return rateLimited('anthropic', async () => {
-    return retry(async () => {
-      const params = {
-        model,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: messages || [{ role: 'user', content: userMessage }],
-      };
+  return Promise.race([
+    rateLimited('anthropic', async () => {
+      return retry(async () => {
+        const params = {
+          model,
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: messages || [{ role: 'user', content: userMessage }],
+        };
 
-      if (tools) {
-        params.tools = tools;
-      }
+        if (tools) {
+          params.tools = tools;
+        }
 
-      const response = await client.messages.create(params);
+        const response = await client.messages.create(params);
 
-      const inputTokens = response.usage?.input_tokens || 0;
-      const outputTokens = response.usage?.output_tokens || 0;
+        const inputTokens = response.usage?.input_tokens || 0;
+        const outputTokens = response.usage?.output_tokens || 0;
 
-      recordCost({
-        platform: 'anthropic',
-        model,
-        workflow,
-        clientId,
-        inputTokens,
-        outputTokens,
+        recordCost({
+          platform: 'anthropic',
+          model,
+          workflow,
+          clientId,
+          inputTokens,
+          outputTokens,
+        });
+
+        log.debug('Claude response', {
+          model,
+          inputTokens,
+          outputTokens,
+          stopReason: response.stop_reason,
+        });
+
+        // Extract text content
+        const textBlocks = response.content.filter(b => b.type === 'text');
+        const text = textBlocks.map(b => b.text).join('\n');
+
+        // Extract tool use blocks
+        const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+        return {
+          text,
+          toolUse: toolUseBlocks,
+          stopReason: response.stop_reason,
+          usage: { inputTokens, outputTokens },
+          raw: response,
+        };
+      }, {
+        retries: 3,
+        label: 'Claude API call',
+        shouldRetry: isRetryableHttpError,
       });
-
-      log.debug('Claude response', {
-        model,
-        inputTokens,
-        outputTokens,
-        stopReason: response.stop_reason,
-      });
-
-      // Extract text content
-      const textBlocks = response.content.filter(b => b.type === 'text');
-      const text = textBlocks.map(b => b.text).join('\n');
-
-      // Extract tool use blocks
-      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
-
-      return {
-        text,
-        toolUse: toolUseBlocks,
-        stopReason: response.stop_reason,
-        usage: { inputTokens, outputTokens },
-        raw: response,
-      };
-    }, {
-      retries: 3,
-      label: 'Claude API call',
-      shouldRetry: isRetryableHttpError,
-    });
-  });
+    }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Claude API call timed out after ${CLAUDE_API_TIMEOUT_MS / 1000}s`)), CLAUDE_API_TIMEOUT_MS)
+    ),
+  ]);
 }
 
 /**

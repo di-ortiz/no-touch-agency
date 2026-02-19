@@ -81,6 +81,15 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().optional().default(''),
   SUPABASE_ANON_KEY: z.string().optional().default(''),
 
+  // Firecrawl (web scraping / crawling)
+  FIRECRAWL_API_KEY: z.string().optional().default(''),
+
+  // Gemini (Google AI — Imagen 3 image generation + multi-modal vision)
+  GEMINI_API_KEY: z.string().optional().default(''),
+
+  // fal.ai (Flux image generation)
+  FAL_API_KEY: z.string().optional().default(''),
+
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),

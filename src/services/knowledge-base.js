@@ -247,6 +247,23 @@ function getDb() {
 
     // Safe migration: add channel to client_contacts for cross-channel identity
     try { db.exec("ALTER TABLE client_contacts ADD COLUMN channel TEXT DEFAULT 'whatsapp'"); } catch (e) { /* already exists */ }
+
+    // Safe migration: track which platforms were requested via Leadsie so Sofia can follow up on missing access
+    try { db.exec("ALTER TABLE clients ADD COLUMN requested_platforms TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN requested_platforms TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN leadsie_invite_id TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: CMS / DNS / CRM platform credentials (granted via Leadsie OAuth)
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_url TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_username TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN wordpress_app_password TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN shopify_store_url TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN shopify_access_token TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN godaddy_domain TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN godaddy_api_key TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN hubspot_access_token TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN ga4_property_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN cms_platform TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }
@@ -256,7 +273,7 @@ function getDb() {
 export function getContactByPhone(phone) {
   const d = getDb();
   const normalized = phone?.replace(/[^0-9]/g, '');
-  return d.prepare('SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?').get(normalized);
+  return d.prepare(`SELECT * FROM client_contacts WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).get(normalized);
 }
 
 export function createContact(data) {
@@ -280,7 +297,7 @@ export function updateContact(phone, updates) {
     values.push(value);
   }
   values.push(normalized);
-  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, "+", ""), " ", "") = ?`).run(...values);
+  d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).run(...values);
 }
 
 /**
@@ -614,6 +631,25 @@ export function activatePendingClient(token, chatId, channel) {
   log.info('Activated pending client', { token, chatId, channel });
 }
 
+export function updatePendingClient(token, updates) {
+  const d = getDb();
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
+  }
+  if (fields.length === 0) return;
+  values.push(token);
+  d.prepare(`UPDATE pending_clients SET ${fields.join(', ')} WHERE token = ?`).run(...values);
+}
+
+export function getPendingClientByLeadsieInvite(inviteId) {
+  const d = getDb();
+  return d.prepare('SELECT * FROM pending_clients WHERE leadsie_invite_id = ?').get(inviteId);
+}
+
 // --- Persistent Conversation History ---
 
 export function saveMessage(chatId, channel, role, content) {
@@ -757,7 +793,7 @@ export default {
   buildClientContext,
   getContactByPhone, createContact, updateContact,
   getOnboardingSession, createOnboardingSession, updateOnboardingSession,
-  createPendingClient, getPendingClientByToken, getPendingClientByChatId, activatePendingClient,
+  createPendingClient, getPendingClientByToken, getPendingClientByChatId, activatePendingClient, updatePendingClient, getPendingClientByLeadsieInvite,
   saveMessage, getMessages, clearMessages,
   getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
   getAllClientContacts, getLastClientMessageTime, getContactChannel,

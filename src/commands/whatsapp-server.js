@@ -1,10 +1,11 @@
 import express from 'express';
 import { askClaude } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument } from '../api/whatsapp.js';
+import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia } from '../api/whatsapp.js';
 import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, getLatestPendingClient, activatePendingClient,
+  updatePendingClient, getPendingClientByLeadsieInvite,
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
@@ -34,10 +35,14 @@ import * as googleSheets from '../api/google-sheets.js';
 import * as keywordPlanner from '../api/google-keyword-planner.js';
 import * as dataforseo from '../api/dataforseo.js';
 import * as openaiMedia from '../api/openai-media.js';
+import * as imageRouter from '../api/image-router.js';
+import * as geminiApi from '../api/gemini.js';
 import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
+import * as firecrawlApi from '../api/firecrawl.js';
+import * as seoEngine from '../services/seo-engine.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
@@ -45,6 +50,7 @@ import * as googleTransparency from '../api/google-transparency.js';
 import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
+import * as campaignRecord from '../services/campaign-record.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -71,30 +77,230 @@ async function sendThinkingIndicator(channel, chatId, message) {
   }
 }
 
-// Helper: deliver generated media (images/videos) inline after tool execution
-async function deliverMediaInline(toolName, result, channel, chatId) {
+/**
+ * Send an image to WhatsApp as a native photo (like a person sending a pic from their camera roll).
+ * Uses direct buffer upload → WhatsApp Media API → send with media_id.
+ * Falls back to URL-based sending if buffer is not available.
+ */
+async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chatId) {
+  const effectiveMime = mimeType || 'image/png';
+  // Match filename extension to actual MIME type to avoid silent rejection
+  const extMap = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+  const ext = extMap[effectiveMime] || '.png';
+
   try {
-    if (toolName === 'generate_ad_images' && result.images) {
-      for (const img of result.images) {
-        if (!img.url || img.error) continue;
-        const caption = img.label || img.format || 'Ad image';
-        if (channel === 'telegram') {
-          await sendTelegramPhoto(img.url, caption, chatId);
-        } else {
-          await sendWhatsAppImage(img.url, caption, chatId);
-        }
+    if (imageBuffer) {
+      // Validate buffer before upload
+      if (!Buffer.isBuffer(imageBuffer)) {
+        throw new Error(`Expected Buffer, got ${typeof imageBuffer}`);
       }
-    }
-    if (toolName === 'generate_ad_video' && result.videoUrl) {
-      const caption = `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim();
-      if (channel === 'telegram') {
-        await sendTelegramVideo(result.videoUrl, caption, chatId);
-      } else {
-        await sendWhatsAppVideo(result.videoUrl, caption, chatId);
+      if (imageBuffer.length < 100) {
+        throw new Error(`Image buffer too small (${imageBuffer.length} bytes) — likely corrupt or empty`);
       }
+
+      log.info('Uploading image buffer to WhatsApp Media API', { bufferSize: imageBuffer.length, mimeType: effectiveMime, to: chatId });
+      const mediaId = await uploadWhatsAppMedia(imageBuffer, effectiveMime, `image-${Date.now()}${ext}`);
+
+      const sendResult = await axios.post(
+        `https://graph.facebook.com/v21.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: chatId,
+          type: 'image',
+          image: { id: mediaId, ...(caption ? { caption } : {}) },
+        },
+        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      const msgId = sendResult.data?.messages?.[0]?.id;
+      log.info('WhatsApp image sent via native upload', { to: chatId, mediaId, messageId: msgId });
+    } else {
+      // No buffer available — use sendWhatsAppImage (tries direct download + upload first)
+      await sendWhatsAppImage(url, caption, chatId);
     }
   } catch (e) {
-    log.warn('Failed to deliver media inline', { error: e.message, toolName });
+    log.warn('WhatsApp native image send failed, trying URL fallback', { error: e.message, url: url?.slice(0, 80) });
+    try {
+      await sendWhatsAppImage(url, caption, chatId);
+    } catch (e2) {
+      // Throw so caller knows ALL delivery methods failed
+      throw new Error(`All image delivery failed: native=${e.message}, url=${e2.message}`);
+    }
+  }
+}
+
+// JSON replacer: strip binary image buffers from tool results before sending to Claude.
+// _imageBuffers are only needed by deliverMediaInline for native WhatsApp upload, not by the AI.
+function stripBinaryBuffers(key, value) {
+  if (key === '_imageBuffers') return undefined;
+  return value;
+}
+
+// Tool execution timeout: prevent any single tool from hanging forever
+const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
+const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+
+// Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
+const TOOL_PROGRESS_MESSAGES = {
+  generate_ad_images: 'Generating your ad images... This might take a minute.',
+  generate_ad_video: 'Creating your video... This will take a few minutes.',
+  generate_creative_package: 'Building your creative package... This will take a few minutes.',
+  browse_website: 'Browsing the website...',
+  search_ad_library: 'Searching the ad library...',
+  get_page_ads: 'Looking up ads for this page...',
+  search_google_ads_transparency: 'Searching Google ads...',
+  analyze_serp: 'Analyzing search results...',
+  get_domain_overview: 'Analyzing the domain...',
+  find_seo_competitors: 'Finding SEO competitors...',
+  audit_landing_page: 'Auditing the landing page...',
+  audit_seo_page: 'Running SEO audit...',
+  get_search_volume: 'Researching keywords...',
+  get_keyword_ideas: 'Finding keyword ideas...',
+  get_keyword_planner_volume: 'Researching keyword volumes...',
+  get_keyword_planner_ideas: 'Finding keyword opportunities...',
+  create_presentation: 'Building your presentation...',
+  generate_weekly_report: 'Generating the weekly report...',
+  generate_campaign_brief: 'Creating the campaign brief...',
+  run_competitor_analysis: 'Analyzing competitors...',
+};
+
+async function executeCSAToolWithTimeout(toolName, toolInput) {
+  const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
+  return Promise.race([
+    executeCSATool(toolName, toolInput),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Tool "${toolName}" timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    ),
+  ]);
+}
+
+// Helper: safely send a single media item, logging failures without throwing
+async function safeSendMedia(sendFn, url, caption, toolName) {
+  try {
+    await sendFn(url, caption);
+  } catch (e) {
+    log.warn('Failed to deliver media item', { error: e.message, toolName, url: url?.slice(0, 100) });
+  }
+}
+
+// Helper: deliver generated media (images/videos) inline after tool execution
+// For WhatsApp + generated images: uses direct buffer upload (native photo delivery).
+// For Telegram and other media: uses URL-based delivery.
+async function deliverMediaInline(toolName, result, channel, chatId) {
+  const sendImage = (url, caption) =>
+    channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
+  const sendVideo = (url, caption) =>
+    channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
+
+  // Generated ad images — use native buffer upload for WhatsApp
+  if (toolName === 'generate_ad_images' && result.images) {
+    const validImages = result.images.filter(i => i.url && !i.error);
+    const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
+    log.info('Delivering ad images inline', {
+      total: result.images.length,
+      valid: validImages.length,
+      hasBuffers,
+      channel,
+    });
+
+    let deliveredCount = 0;
+    for (let i = 0; i < result.images.length; i++) {
+      const img = result.images[i];
+      if (!img.url || img.error) continue;
+      const caption = img.label || img.format || 'Ad image';
+
+      if (channel === 'whatsapp') {
+        let sent = false;
+
+        // Try 1: Native buffer upload (fastest, most reliable when buffer available)
+        if (result._imageBuffers?.[i]?.buffer) {
+          try {
+            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, img.url, caption, chatId);
+            sent = true;
+            deliveredCount++;
+          } catch (e) {
+            log.warn('Native image delivery failed at deliverMediaInline', { error: e.message, format: img.format });
+          }
+        }
+
+        // Try 2: URL-based fallback (if native wasn't available or failed completely)
+        if (!sent) {
+          log.info('Trying URL-based image delivery fallback', { format: img.format, url: img.url?.slice(0, 80) });
+          try {
+            await sendWhatsAppImage(img.url, caption, chatId);
+            sent = true;
+            deliveredCount++;
+          } catch (e) {
+            log.error('All image delivery methods failed for format', { error: e.message, format: img.format });
+          }
+        }
+      } else {
+        // Telegram / other channels
+        await safeSendMedia(sendImage, img.url, caption, toolName);
+        deliveredCount++;
+      }
+    }
+
+    // If we had valid images but couldn't deliver any, notify the user
+    if (deliveredCount === 0 && validImages.length > 0) {
+      log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
+      const driveUrl = validImages.find(i => i.driveId)?.url;
+      const fallbackMsg = driveUrl
+        ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
+        : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
+      try {
+        if (channel === 'whatsapp') await sendWhatsApp(fallbackMsg, chatId);
+        else await sendTelegram(fallbackMsg, chatId);
+      } catch (_) { /* best effort */ }
+    }
+  }
+  // Generated ad video (Sora 2)
+  if (toolName === 'generate_ad_video' && result.videoUrl) {
+    await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
+  }
+  // Creative package — use native buffer upload for WhatsApp
+  if (toolName === 'generate_creative_package' && result.imageUrls) {
+    for (let i = 0; i < result.imageUrls.length; i++) {
+      const url = result.imageUrls[i];
+      if (!url) continue;
+      const caption = 'Creative package image';
+      if (channel === 'whatsapp') {
+        let sent = false;
+        if (result._imageBuffers?.[i]?.buffer) {
+          try {
+            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
+            sent = true;
+          } catch (e) {
+            log.warn('Native creative package image delivery failed', { error: e.message });
+          }
+        }
+        if (!sent) {
+          await safeSendMedia(sendImage, url, caption, toolName);
+        }
+      } else {
+        await safeSendMedia(sendImage, url, caption, toolName);
+      }
+    }
+  }
+  // Ad library search results — send snapshot previews (URL-based is fine, these are stable URLs)
+  if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
+    for (const ad of result.ads) {
+      if (!ad.snapshotUrl) continue;
+      const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
+      await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
+    }
+  }
+  // Google Ads Transparency — send creative previews
+  if (toolName === 'search_google_ads_transparency' && result.creatives) {
+    for (const creative of result.creatives) {
+      if (!creative.previewUrl) continue;
+      if (creative.format === 'VIDEO') {
+        await safeSendMedia(sendVideo, creative.previewUrl, `Google Ad — ${creative.format}`, toolName);
+      } else {
+        await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
+      }
+    }
   }
 }
 
@@ -201,6 +407,60 @@ app.post('/api/client-init', async (req, res) => {
   }
 });
 
+// --- GET /api/leadsie-connect --- (redirect client to Leadsie access grant page)
+// Lovable redirects clients here after checkout. We look up their pending record,
+// create a Leadsie invite on the fly, and redirect them to the Leadsie URL.
+app.get('/api/leadsie-connect', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).json({ error: 'Missing token parameter. Usage: /api/leadsie-connect?token=<client-token>' });
+    }
+
+    // Look up pending client by token
+    const pending = getPendingClientByToken(token) || getPendingClientByTokenAny(token);
+    if (!pending) {
+      return res.status(404).json({ error: 'Client not found. Please complete checkout first.' });
+    }
+
+    const clientName = pending.business_name || pending.name || pending.email || 'New Client';
+
+    // Determine platforms — default to ad accounts + WordPress + HubSpot
+    const platforms = ['facebook', 'google', 'wordpress', 'hubspot'];
+    if (pending.website) platforms.push('wordpress'); // ensure wordpress if they have a site
+
+    // Deduplicate
+    const uniquePlatforms = [...new Set(platforms)];
+
+    // Create Leadsie invite via API
+    const invite = await leadsie.createInvite({
+      clientName,
+      clientEmail: pending.email || '',
+      platforms: uniquePlatforms,
+      message: `Hi ${pending.name || clientName}! Welcome aboard. Please grant us access to your accounts below — it's a secure, one-click process. This lets us manage your ad campaigns and optimize your results right away.`,
+    });
+
+    // Store the invite ID and requested platforms on the pending record
+    // so we can match the Leadsie webhook callback and track what's still pending
+    try {
+      updatePendingClient(token, {
+        leadsie_invite_id: invite.inviteId,
+        requested_platforms: JSON.stringify(uniquePlatforms),
+      });
+    } catch (e) {
+      log.warn('Failed to store Leadsie invite on pending client', { error: e.message });
+    }
+
+    log.info('Leadsie connect redirect', { token, clientName, inviteUrl: invite.inviteUrl, platforms: uniquePlatforms });
+
+    // Redirect client directly to the Leadsie invite page
+    return res.redirect(invite.inviteUrl);
+  } catch (error) {
+    log.error('Leadsie connect failed', { error: error.message, token: req.query.token });
+    return res.status(500).json({ error: 'Failed to create access request. Please contact support.' });
+  }
+});
+
 // Pending approval actions
 const pendingApprovals = new Map();
 
@@ -217,6 +477,60 @@ function addToHistory(chatId, role, content, channel = 'whatsapp') {
 
 function clearHistory(chatId) {
   clearMessages(chatId);
+}
+
+/**
+ * Summarize tool results for persistent conversation history.
+ * Extracts key deliverables (URLs, counts, ad copy previews) so Sofia
+ * retains awareness of what she generated/shared across messages.
+ */
+function summarizeToolDeliverables(toolResults) {
+  const lines = [];
+  for (const result of toolResults) {
+    try {
+      const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+      const data = JSON.parse(content);
+      if (data.error) continue;
+
+      // Creative package
+      if (data.presentationUrl) lines.push(`Presentation: ${data.presentationUrl}`);
+      if (data.sheetUrl) lines.push(`Data sheet: ${data.sheetUrl}`);
+      if (data.imageUrls?.length) lines.push(`Generated ${data.imageUrls.length} images`);
+      if (data.textAdsCount) lines.push(`Generated ${data.textAdsCount} ad copy variations`);
+      if (data.textAdPreview?.length) {
+        lines.push(`Ad preview: ${data.textAdPreview.map(a => `"${a.headline}" [${a.cta}]`).join(' | ')}`);
+      }
+      if (data.videosCount) lines.push(`Generated ${data.videosCount} video(s)`);
+      if (data.videoUrl) lines.push(`Video: ${data.videoUrl}`);
+
+      // Standalone text ads
+      if (data.ads?.length && !data.textAdsCount) {
+        lines.push(`Generated ${data.ads.length} ad copy variations`);
+        const preview = data.ads.slice(0, 3).map(a => `"${a.headline}" [${a.cta}]`).join(' | ');
+        if (preview) lines.push(`Ad preview: ${preview}`);
+      }
+
+      // Standalone images
+      if (data.images?.length && !data.imageUrls) {
+        const ok = data.images.filter(i => !i.error);
+        if (ok.length) lines.push(`Generated ${ok.length} images: ${ok.map(i => i.label || i.format).join(', ')}`);
+      }
+
+      // Keyword / SERP research
+      if (data.keywords?.length) lines.push(`Found ${data.keywords.length} keywords`);
+      if (data.results?.length) lines.push(`Returned ${data.results.length} results`);
+
+      // Competitor research
+      if (data.competitors?.length) lines.push(`Analyzed ${data.competitors.length} competitors`);
+
+      // Campaign summary
+      if (data.summary && typeof data.summary === 'string') lines.push(`Summary: ${data.summary.slice(0, 300)}`);
+      if (data.message && typeof data.message === 'string' && !lines.length) lines.push(data.message.slice(0, 300));
+    } catch (e) {
+      // Skip unparseable results
+    }
+  }
+  return lines.length ? lines.join('\n') : '';
 }
 
 /**
@@ -318,31 +632,19 @@ CRITICAL RULES:
 - If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
-When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you *would* create — actually create it.
 
-1. *Gather the Creative Brief* — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
-   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
-   - Who is the target audience? (demographics, interests, pain points)
-   - What's the offer or value proposition? (discount, free trial, unique benefit?)
-   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
-   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
-   - What platforms? (Meta, Google, TikTok, Instagram?)
-   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
-   - Any competitors to reference or differentiate from?
-   - Specific products/services to feature?
-   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+RULE: ALWAYS call generate_ad_images, generate_ad_video, or generate_creative_package. Text descriptions of images are NEVER acceptable.
 
-2. *Research First* — Before generating, use your tools:
-   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
-   - Search competitor ads (search_ad_library) to see what's working in the space
-   - Check brand files if they have a Drive folder (list_client_files)
+PROCESS:
+1. *Quick Context Check* — If the request is missing critical info (you don't know the product/brand at all), ask at most 1-2 quick questions. But if you already have client context (brand, website, industry) from the knowledge base, SKIP questions and generate immediately.
+2. *Generate First, Iterate Later* — Call the generation tool right away with whatever context you have. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill gaps. It's better to generate something real and iterate than to ask questions.
+3. *Use Rich Prompts* — Pass ALL available context (brand colors, audience, references, style, mood) to the generation tools. Browse the client's website if you need visual inspiration, but do this IN PARALLEL with generation, not as a blocker.
+4. *Present & Iterate* — After delivering the actual images, ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
 
-3. *Generate with Full Context* — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
+IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
 
-4. *Present & Iterate* — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
-
-EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
-EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
+IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -512,8 +814,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using DALL-E 3 in platform-specific dimensions. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' } }, required: ['clientName', 'platform', 'concept'] },
+    description: 'Generate ad creative images using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects the best available provider with smart fallback). IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['dalle', 'fal', 'gemini'], description: 'Preferred AI image provider (optional — auto-selects if not specified). Use dalle for photorealism, fal for artistic/stylized, gemini for variety.' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
     name: 'generate_ad_video',
@@ -531,11 +833,125 @@ const CSA_TOOLS = [
     description: 'Visit a website and extract its content, headings, images, brand colors, and metadata. Perfect for researching competitor websites, getting creative inspiration, analyzing landing pages, or understanding a brand before creating ads. Works on any public URL.',
     input_schema: { type: 'object', properties: { url: { type: 'string', description: 'URL to visit (e.g. "https://example.com" or "example.com")' }, purpose: { type: 'string', description: 'Why you\'re visiting: "creative_inspiration", "competitor_research", "brand_analysis", or "general"' } }, required: ['url'] },
   },
+  {
+    name: 'crawl_website',
+    description: 'Crawl an entire website and extract clean content from multiple pages. Great for understanding a competitor\'s full site structure, analyzing all blog posts, or auditing a client\'s website content. Returns markdown content for each page found. Requires Firecrawl.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'Starting URL to crawl (e.g. "https://example.com")' },
+      limit: { type: 'number', description: 'Max pages to crawl (default: 10, max: 50)' },
+      maxDepth: { type: 'number', description: 'Max link depth to follow (default: 2)' },
+      includePaths: { type: 'string', description: 'Comma-separated path patterns to include (e.g. "/blog/*,/products/*")' },
+      excludePaths: { type: 'string', description: 'Comma-separated path patterns to exclude (e.g. "/admin/*,/login")' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'search_web',
+    description: 'Search the web and return full page content from top results. Like Google search but returns the actual scraped content of each result page as clean markdown. Great for market research, finding competitor info, industry trends, or any topic research.',
+    input_schema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Search query (e.g. "best PPC strategies for e-commerce 2025")' },
+      limit: { type: 'number', description: 'Max results to return (default: 5, max: 10)' },
+      lang: { type: 'string', description: 'Language code (default: "en")' },
+      country: { type: 'string', description: 'Country code (default: "us")' },
+    }, required: ['query'] },
+  },
+  {
+    name: 'map_website',
+    description: 'Quickly discover all URLs on a website without scraping their content. Returns a list of every page/URL found on the domain. Useful for understanding site structure, finding specific pages, or planning a crawl. Much faster than crawl_website.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'Website URL to map (e.g. "https://example.com")' },
+      search: { type: 'string', description: 'Optional: filter URLs by keyword (e.g. "blog" or "pricing")' },
+      limit: { type: 'number', description: 'Max URLs to return (default: 100)' },
+    }, required: ['url'] },
+  },
+  // --- Visual Analysis ---
+  {
+    name: 'analyze_visual_reference',
+    description: 'Analyze a competitor ad, reference image, or any visual using Gemini Vision AI. Extracts detailed creative insights: composition, color palette, style, mood, lighting, typography approach, and actionable recommendations for creating similar or better ads. Perfect for analyzing Meta Ad Library screenshots, competitor landing pages, or client reference images before generating creatives.',
+    input_schema: { type: 'object', properties: {
+      imageUrl: { type: 'string', description: 'URL of the image to analyze (competitor ad, reference creative, etc.)' },
+      analysisType: { type: 'string', enum: ['competitor_ad', 'style_reference', 'brand_analysis', 'landing_page', 'general'], description: 'Type of analysis to perform (affects the depth and focus of insights)' },
+      clientName: { type: 'string', description: 'Client name (for context — what brand should the insights inform?)' },
+      context: { type: 'string', description: 'Additional context (e.g. "This is a competitor\'s top-performing Instagram ad for a SaaS product")' },
+    }, required: ['imageUrl'] },
+  },
+  // --- SEO & Content Management ---
+  {
+    name: 'full_seo_audit',
+    description: 'Run a comprehensive SEO audit on a client\'s website. Combines PageSpeed performance, on-page SEO (meta tags, headings, images), domain overview (traffic, keywords, backlinks), and WordPress SEO analysis (if CMS connected via Leadsie). Returns prioritized recommendations.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name to audit' } }, required: ['clientName'] },
+  },
+  {
+    name: 'generate_blog_post',
+    description: 'Generate a full SEO-optimized blog post and optionally publish/schedule it on the client\'s WordPress site. Includes title, HTML content, meta tags, excerpt, and featured image prompt. If WordPress is connected, it can publish as draft or schedule for a future date.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      topic: { type: 'string', description: 'Blog post topic or title idea' },
+      keywords: { type: 'string', description: 'Comma-separated target keywords' },
+      tone: { type: 'string', description: 'Writing tone: professional, casual, educational, persuasive (default: professional)' },
+      wordCount: { type: 'number', description: 'Target word count (default: 1200)' },
+      action: { type: 'string', enum: ['generate_only', 'save_draft', 'schedule'], description: 'What to do: generate_only (just return content), save_draft (create WP draft), schedule (schedule for future publish)' },
+      publishDate: { type: 'string', description: 'ISO 8601 date for scheduled publishing (only if action=schedule)' },
+    }, required: ['clientName', 'topic'] },
+  },
+  {
+    name: 'fix_meta_tags',
+    description: 'Generate optimized SEO meta tags (title + description) for a specific page and optionally push the update to WordPress. If no page specified, audits ALL pages and fixes the worst ones.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      url: { type: 'string', description: 'Specific page URL to fix (optional — omit to audit all pages)' },
+      pageId: { type: 'number', description: 'WordPress page/post ID (if known)' },
+      pageType: { type: 'string', enum: ['posts', 'pages'], description: 'WordPress content type (default: posts)' },
+      focusKeyword: { type: 'string', description: 'Target keyword for this page' },
+      applyChanges: { type: 'boolean', description: 'If true, push meta tag updates to WordPress (default: false — preview only)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'plan_content_calendar',
+    description: 'Create an SEO-driven content calendar with blog post topics, keywords, content types, and publish dates. Based on keyword gaps, competitor analysis, and industry trends. Returns a structured calendar that can be saved to Google Sheets.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      keywords: { type: 'string', description: 'Comma-separated seed keywords (optional — will research if not provided)' },
+      monthsAhead: { type: 'number', description: 'How many months to plan (default: 3)' },
+      postsPerWeek: { type: 'number', description: 'Posts per week (default: 1)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'list_wp_content',
+    description: 'List all posts and pages on a client\'s WordPress site. Shows title, status, date, and SEO meta info. Requires WordPress CMS access via Leadsie.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      contentType: { type: 'string', enum: ['posts', 'pages', 'all'], description: 'What to list (default: all)' },
+      status: { type: 'string', enum: ['publish', 'draft', 'future', 'any'], description: 'Filter by status (default: publish)' },
+    }, required: ['clientName'] },
+  },
+  {
+    name: 'update_wp_post',
+    description: 'Update an existing WordPress post or page — content, title, status, or SEO meta. Requires WordPress CMS access via Leadsie.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      postId: { type: 'number', description: 'WordPress post/page ID to update' },
+      title: { type: 'string', description: 'New title (optional)' },
+      content: { type: 'string', description: 'New HTML content (optional)' },
+      status: { type: 'string', enum: ['publish', 'draft', 'future'], description: 'New status (optional)' },
+      seoTitle: { type: 'string', description: 'New SEO title (optional)' },
+      seoDescription: { type: 'string', description: 'New meta description (optional)' },
+      focusKeyword: { type: 'string', description: 'New focus keyword (optional)' },
+    }, required: ['clientName', 'postId'] },
+  },
+  {
+    name: 'generate_schema_markup',
+    description: 'Generate JSON-LD schema markup (structured data) for a page. Supports LocalBusiness, Article, Product, Service, FAQ, HowTo types. Helps pages appear as rich results in Google.',
+    input_schema: { type: 'object', properties: {
+      clientName: { type: 'string', description: 'Client name' },
+      pageType: { type: 'string', description: 'Schema type: LocalBusiness, Article, Product, Service, FAQ, HowTo' },
+      url: { type: 'string', description: 'Page URL' },
+    }, required: ['clientName', 'pageType', 'url'] },
+  },
   // --- Client Onboarding (Leadsie) ---
   {
     name: 'create_onboarding_link',
-    description: 'Create a Leadsie invite link to send to a new client so they can grant access to their ad accounts (Meta, Google Ads, TikTok) in one click. Sofia will send the link directly via chat.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client business name' }, clientEmail: { type: 'string', description: 'Client email (optional)' }, platforms: { type: 'string', description: 'Comma-separated platforms: facebook, google, tiktok (default: facebook,google)' } }, required: ['clientName'] },
+    description: 'Create a Leadsie invite link to send to a new client so they can grant access to their ad accounts (Meta, Google Ads, TikTok), CMS (WordPress, Shopify), DNS (GoDaddy), and CRM (HubSpot) in one click. Sofia will send the link directly via chat.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client business name' }, clientEmail: { type: 'string', description: 'Client email (optional)' }, platforms: { type: 'string', description: 'Comma-separated platforms: facebook, google, tiktok, wordpress, shopify, godaddy, hubspot (default: facebook,google,wordpress,hubspot)' } }, required: ['clientName'] },
   },
   {
     name: 'check_onboarding_status',
@@ -1038,10 +1454,29 @@ Return ONLY the JSON array, no other text.`;
         angle: toolInput.concept,
         variations: Math.min(toolInput.variations || 5, 10),
       });
-      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const client = getClient(toolInput.clientName);
+        const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const sheet = await campaignRecord.createTextAdsRecord({
+          clientName: toolInput.clientName,
+          platform: toolInput.platform,
+          ads,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create text ads record sheet', { error: e.message });
+      }
+
+      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length, sheetUrl };
     }
     case 'generate_ad_images': {
-      if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable image generation.' };
+      const providerStatus = imageRouter.getProviderStatus();
+      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
+      if (!anyConfigured) return { error: 'No image generation providers configured. Set at least one of OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY in .env.' };
       const client = getClient(toolInput.clientName);
 
       // Generate the image prompt using AI with full context
@@ -1062,29 +1497,79 @@ Return ONLY the JSON array, no other text.`;
       // Parse custom formats if provided
       const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
 
-      const images = await openaiMedia.generateAdImages({
+      // Use the image router with smart fallback across DALL-E 3, Flux Pro, Imagen 3
+      const images = await imageRouter.generateAdImages({
         prompt: imagePrompt,
         platform: toolInput.platform,
         formats,
         quality: 'hd',
         style: 'natural',
+        preferred: toolInput.preferredProvider,
         workflow: 'ad-image-generation',
         clientId: client?.id,
       });
 
-      return {
+      // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
+      const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const mappedImages = [];
+      const _imageBuffers = []; // kept in-memory for deliverMediaInline, not serialized to JSON
+      for (const img of images) {
+        const mapped = {
+          format: img.format,
+          label: img.dimensions?.label || img.format,
+          url: img.url,
+          provider: img.provider,
+          error: img.error,
+        };
+        let imgBuffer = null;
+        if (img.url && !img.error) {
+          try {
+            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+            if (driveResult) {
+              if (driveResult.webContentLink) {
+                mapped.url = driveResult.webContentLink;
+                mapped.driveId = driveResult.id;
+              }
+              imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+            }
+          } catch (e) {
+            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+          }
+        }
+        mappedImages.push(mapped);
+        _imageBuffers.push(imgBuffer);
+      }
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createAdImagesRecord({
+          clientName: toolInput.clientName,
+          platform: toolInput.platform,
+          concept: toolInput.concept,
+          imagePrompt,
+          images: mappedImages,
+          folderId: imgFolderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create ad images record sheet', { error: e.message });
+      }
+
+      const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
+      const result = {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
         concept: toolInput.concept,
         imagePrompt,
-        images: images.map(img => ({
-          format: img.format,
-          label: img.dimensions?.label || img.format,
-          url: img.url,
-          error: img.error,
-        })),
+        images: mappedImages,
         totalGenerated: images.filter(i => !i.error).length,
+        providers,
+        sheetUrl,
       };
+      // Attach image buffers for deliverMediaInline (not serialized to JSON for Claude)
+      result._imageBuffers = _imageBuffers;
+      return result;
     }
     case 'generate_ad_video': {
       if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable video generation.' };
@@ -1139,7 +1624,54 @@ Return ONLY the JSON array, no other text.`;
         buildDeck: true,
       });
 
-      return {
+      // Persist generated images to Google Drive + keep buffers for WhatsApp direct upload
+      const client = getClient(toolInput.clientName);
+      const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const persistedImageUrls = [];
+      const _pkgImageBuffers = [];
+      for (const img of pkg.images) {
+        if (img.error || !img.url) continue;
+        try {
+          const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
+          if (driveResult) {
+            if (driveResult.webContentLink) {
+              img.url = driveResult.webContentLink;
+              persistedImageUrls.push(driveResult.webContentLink);
+            } else {
+              persistedImageUrls.push(img.url);
+            }
+            _pkgImageBuffers.push({ buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType });
+          } else {
+            persistedImageUrls.push(img.url);
+            _pkgImageBuffers.push(null);
+          }
+        } catch (e) {
+          log.warn('Failed to persist creative package image to Drive', { error: e.message });
+          persistedImageUrls.push(img.url);
+          _pkgImageBuffers.push(null);
+        }
+      }
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createCreativeRecord({
+          clientName: pkg.clientName,
+          platform: pkg.platform,
+          campaignName: pkg.campaignName,
+          textAds: pkg.textAds,
+          images: pkg.images,
+          videos: pkg.videos,
+          summary: pkg.summary,
+          presentationUrl: pkg.presentation?.url,
+          folderId: pkgFolderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create creative record sheet', { error: e.message });
+      }
+
+      const pkgResult = {
         clientName: pkg.clientName,
         platform: pkg.platform,
         campaignName: pkg.campaignName,
@@ -1147,14 +1679,17 @@ Return ONLY the JSON array, no other text.`;
         textAdsCount: pkg.textAds.length,
         textAdPreview: pkg.textAds.slice(0, 3).map(a => ({ headline: a.headline, cta: a.cta, angle: a.angle })),
         imagesCount: pkg.images.filter(i => !i.error).length,
-        imageUrls: pkg.images.filter(i => !i.error).map(i => i.url),
+        imageUrls: persistedImageUrls,
         videosCount: pkg.videos.filter(v => !v.error).length,
         presentationUrl: pkg.presentation?.url || null,
+        sheetUrl,
         status: 'awaiting_approval',
         message: pkg.presentation?.url
-          ? `Creative deck ready for review: ${pkg.presentation.url}`
+          ? `Creative deck ready for review: ${pkg.presentation.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '')
           : 'Creative package generated (Google Slides not configured for deck)',
       };
+      pkgResult._imageBuffers = _pkgImageBuffers;
+      return pkgResult;
     }
     // --- Website Browsing ---
     case 'browse_website': {
@@ -1194,11 +1729,493 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    case 'crawl_website': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Website crawling is not available — Firecrawl API key is not configured.' };
+      }
+      const limit = Math.min(toolInput.limit || 10, 50);
+      const crawlOpts = {
+        limit,
+        maxDepth: toolInput.maxDepth || 2,
+      };
+      if (toolInput.includePaths) crawlOpts.includePaths = toolInput.includePaths.split(',').map(p => p.trim());
+      if (toolInput.excludePaths) crawlOpts.excludePaths = toolInput.excludePaths.split(',').map(p => p.trim());
+
+      const result = await firecrawlApi.crawl(toolInput.url, crawlOpts);
+      return {
+        totalPages: result.totalPages,
+        pages: result.pages.map(p => ({
+          url: p.url,
+          title: p.metadata?.title || '',
+          description: p.metadata?.description || '',
+          contentPreview: p.markdown?.slice(0, 2000) || '',
+          wordCount: p.markdown ? p.markdown.split(/\s+/).length : 0,
+        })),
+      };
+    }
+
+    case 'search_web': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Web search is not available — Firecrawl API key is not configured.' };
+      }
+      const searchResult = await firecrawlApi.search(toolInput.query, {
+        limit: Math.min(toolInput.limit || 5, 10),
+        lang: toolInput.lang || 'en',
+        country: toolInput.country || 'us',
+      });
+      return {
+        query: toolInput.query,
+        totalResults: searchResult.totalResults,
+        results: searchResult.results.map(r => ({
+          url: r.url,
+          title: r.title,
+          description: r.description,
+          contentPreview: r.markdown?.slice(0, 1500) || '',
+        })),
+      };
+    }
+
+    case 'map_website': {
+      if (!firecrawlApi.isConfigured()) {
+        return { error: 'Website mapping is not available — Firecrawl API key is not configured.' };
+      }
+      const mapResult = await firecrawlApi.map(toolInput.url, {
+        limit: toolInput.limit || 100,
+        search: toolInput.search || undefined,
+      });
+      return {
+        url: toolInput.url,
+        totalUrls: mapResult.totalUrls,
+        urls: mapResult.urls,
+      };
+    }
+
+    // --- Visual Analysis ---
+    case 'analyze_visual_reference': {
+      if (!geminiApi.isConfigured()) {
+        return { error: 'Visual analysis requires GEMINI_API_KEY to be configured in .env.' };
+      }
+      const analysisPrompts = {
+        competitor_ad: `You are a senior creative director analyzing a competitor's ad creative. Provide a detailed breakdown:
+
+1. **Visual Composition**: Layout, focal point, use of space, visual hierarchy
+2. **Color Palette**: Exact colors used, dominant vs accent, mood they create
+3. **Style & Aesthetic**: Photography style, filters, design approach (minimalist, bold, lifestyle, etc.)
+4. **Mood & Emotion**: What feelings does this evoke? What psychological triggers are used?
+5. **Target Audience Signals**: Who is this ad targeting based on visual cues?
+6. **Strengths**: What makes this ad effective? What would make someone stop scrolling?
+7. **Weaknesses/Gaps**: What could be improved? Where is the opportunity to do better?
+8. **Actionable Recommendations**: Specific directions for creating a BETTER version of this ad for our client.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        style_reference: `Analyze this reference image for creative inspiration. Extract:
+1. **Visual Style**: Exact style (photorealistic, illustrated, minimalist, editorial, etc.)
+2. **Color Palette**: All colors with hex approximations
+3. **Composition**: How elements are arranged, rule of thirds, symmetry, etc.
+4. **Lighting**: Type (natural, studio, dramatic, soft), direction, quality
+5. **Mood**: Overall feeling and atmosphere
+6. **Textures & Materials**: Any notable textures or material qualities
+7. **Key Elements to Replicate**: What specific techniques should we borrow for ad creatives?${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        brand_analysis: `Analyze this brand visual for brand identity extraction:
+1. **Brand Colors**: Primary, secondary, accent colors with hex approximations
+2. **Typography Approach**: Serif/sans-serif, weight, style
+3. **Visual Identity**: Logo placement, brand elements, patterns
+4. **Brand Personality**: What personality does the visual communicate?
+5. **Target Market**: Who is this brand speaking to?
+6. **Design System Cues**: Spacing, borders, shadows, rounded vs sharp corners
+7. **Recommendations**: How to maintain this brand identity in ad creatives.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        landing_page: `Analyze this landing page screenshot for conversion optimization insights:
+1. **Above the Fold**: What's immediately visible? Hero image/video, headline, CTA
+2. **Visual Hierarchy**: Where does the eye travel first?
+3. **Color Psychology**: How are colors used to drive action?
+4. **Trust Signals**: Testimonials, logos, badges visible?
+5. **CTA Design**: Button colors, size, placement, copy
+6. **Imagery**: Type (product, lifestyle, illustration), quality, relevance
+7. **Recommendations**: How to create ads that match this landing page experience.${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+
+        general: `Analyze this image in detail for creative inspiration:
+1. **Composition & Layout**: How is the image composed?
+2. **Color Palette**: Key colors used
+3. **Style & Mood**: Overall aesthetic and emotional tone
+4. **Lighting**: Quality and direction
+5. **Key Takeaways**: What creative insights can be applied to ad design?${toolInput.context ? `\n\nContext: ${toolInput.context}` : ''}`,
+      };
+
+      const prompt = analysisPrompts[toolInput.analysisType] || analysisPrompts.general;
+      const result = await geminiApi.analyzeImage({
+        imageUrl: toolInput.imageUrl,
+        prompt,
+        workflow: 'visual-analysis',
+        clientId: toolInput.clientName ? getClient(toolInput.clientName)?.id : undefined,
+      });
+
+      return {
+        imageUrl: toolInput.imageUrl,
+        analysisType: toolInput.analysisType || 'general',
+        analysis: result.analysis,
+        model: result.model,
+        clientName: toolInput.clientName || null,
+      };
+    }
+
+    // --- SEO & Content Management ---
+    case 'full_seo_audit': {
+      const audit = await seoEngine.fullSEOAudit(toolInput.clientName);
+      const recs = await seoEngine.generateSEORecommendations(audit);
+      return {
+        audit: {
+          url: audit.url,
+          performance: audit.performance?.scores || audit.performance,
+          coreWebVitals: audit.performance?.coreWebVitals,
+          onPage: audit.onPage,
+          content: audit.content,
+          domain: audit.domain,
+          wordpress: audit.wordpress,
+        },
+        recommendations: recs.recommendations || [],
+        overallScore: recs.overallScore,
+        summary: recs.summary,
+        message: `Full SEO audit completed for ${audit.clientName}. Overall score: ${recs.overallScore || 'N/A'}/100. ${recs.recommendations?.length || 0} recommendations generated.`,
+      };
+    }
+
+    case 'generate_blog_post': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const keywords = toolInput.keywords ? toolInput.keywords.split(',').map(k => k.trim()) : [];
+      const post = await seoEngine.generateBlogPost({
+        topic: toolInput.topic,
+        keywords,
+        tone: toolInput.tone,
+        wordCount: toolInput.wordCount || 1200,
+        clientName: client.name,
+        businessDescription: client.description,
+        targetAudience: client.target_audience,
+      });
+
+      if (post.error) return post;
+
+      // Always save to Google Doc for client review
+      let docUrl = null;
+      try {
+        const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const docContent = `${post.title}\n\n` +
+          `SEO Title: ${post.seoTitle || ''}\n` +
+          `Meta Description: ${post.seoDescription || ''}\n` +
+          `Focus Keyword: ${post.focusKeyword || ''}\n` +
+          `Slug: ${post.slug || ''}\n` +
+          `Tags: ${(post.suggestedTags || []).join(', ')}\n` +
+          `Category: ${post.suggestedCategory || ''}\n` +
+          `---\n\n` +
+          (post.content || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        const doc = await googleDrive.createDocument(
+          `Blog Post — ${post.title}`,
+          docContent,
+          folderId,
+        );
+        if (doc) docUrl = doc.webViewLink;
+      } catch (e) {
+        log.warn('Failed to save blog post to Google Doc', { error: e.message });
+      }
+
+      // Create pending approval so client can approve publishing or self-post
+      const approvalId = `blog-${Date.now()}`;
+      const wpConnected = !!seoEngine.getWordPressClient(client);
+      pendingApprovals.set(approvalId, {
+        type: 'publish_blog',
+        clientId: client.id,
+        clientName: client.name,
+        postData: {
+          title: post.title,
+          content: post.content,
+          excerpt: post.excerpt,
+          slug: post.slug,
+          seoTitle: post.seoTitle,
+          seoDescription: post.seoDescription,
+          focusKeyword: post.focusKeyword,
+          publishDate: toolInput.publishDate,
+        },
+        docUrl,
+        wpConnected,
+      });
+
+      return {
+        title: post.title,
+        seoTitle: post.seoTitle,
+        seoDescription: post.seoDescription,
+        focusKeyword: post.focusKeyword,
+        excerpt: post.excerpt,
+        suggestedTags: post.suggestedTags,
+        suggestedCategory: post.suggestedCategory,
+        imagePrompt: post.imagePrompt,
+        docUrl,
+        approvalId,
+        wpConnected,
+        status: 'pending_client_review',
+        deliveryOptions: {
+          option1: `I can publish this directly to your website — just reply APPROVE ${approvalId}`,
+          option2: docUrl
+            ? `Review and edit the Google Doc here: ${docUrl} — then either post it yourself or reply APPROVE ${approvalId} when ready`
+            : 'I can send you the content to post yourself',
+        },
+        message: `Blog post "${post.title}" is ready for your review!${docUrl ? ` Google Doc: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I publish it to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and post it yourself (or approve after review)`,
+      };
+    }
+
+    case 'fix_meta_tags': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+
+      // If specific page, generate meta tags for it
+      if (toolInput.url || toolInput.pageId) {
+        const currentMeta = toolInput.pageId && wp
+          ? await wp.getPageSEO(toolInput.pageId, toolInput.pageType || 'posts')
+          : {};
+
+        const newMeta = await seoEngine.generateMetaTags({
+          url: toolInput.url || currentMeta.link || client.website,
+          currentTitle: currentMeta.seoTitle,
+          currentDescription: currentMeta.seoDescription,
+          focusKeyword: toolInput.focusKeyword || currentMeta.focusKeyword,
+          businessDescription: client.description,
+        });
+
+        // Save proposed changes to Google Doc for review
+        let docUrl = null;
+        try {
+          const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+          const docContent = `Meta Tag Changes — ${currentMeta.title || toolInput.url || 'Page'}\n\n` +
+            `Page: ${toolInput.url || currentMeta.link || 'N/A'}\n` +
+            `Page ID: ${toolInput.pageId || 'N/A'}\n\n` +
+            `--- CURRENT ---\n` +
+            `Title: ${currentMeta.seoTitle || '(missing)'}\n` +
+            `Description: ${currentMeta.seoDescription || '(missing)'}\n` +
+            `Focus Keyword: ${currentMeta.focusKeyword || '(none)'}\n\n` +
+            `--- PROPOSED ---\n` +
+            `Title: ${newMeta.seoTitle || ''}\n` +
+            `Description: ${newMeta.seoDescription || ''}\n` +
+            `Focus Keyword: ${newMeta.focusKeyword || ''}\n\n` +
+            `Reasoning: ${newMeta.reasoning || ''}`;
+          const doc = await googleDrive.createDocument(
+            `Meta Tags — ${currentMeta.title || toolInput.url || client.name}`,
+            docContent,
+            folderId,
+          );
+          if (doc) docUrl = doc.webViewLink;
+        } catch (e) {
+          log.warn('Failed to save meta tag changes to Google Doc', { error: e.message });
+        }
+
+        // Create pending approval
+        const approvalId = `meta-${Date.now()}`;
+        pendingApprovals.set(approvalId, {
+          type: 'apply_meta',
+          clientId: client.id,
+          clientName: client.name,
+          pageId: toolInput.pageId,
+          pageType: toolInput.pageType || 'posts',
+          seoData: {
+            seoTitle: newMeta.seoTitle,
+            seoDescription: newMeta.seoDescription,
+            focusKeyword: newMeta.focusKeyword,
+          },
+          docUrl,
+          wpConnected: !!wp,
+        });
+
+        return {
+          ...newMeta,
+          currentTitle: currentMeta.seoTitle || '(missing)',
+          currentDescription: currentMeta.seoDescription || '(missing)',
+          docUrl,
+          approvalId,
+          applied: false,
+          status: 'pending_client_review',
+          deliveryOptions: {
+            option1: `I can apply these changes to your website — reply APPROVE ${approvalId}`,
+            option2: docUrl
+              ? `Review the proposed changes here: ${docUrl} — then approve or apply them yourself`
+              : 'I can send you the proposed changes to apply yourself',
+          },
+          message: `Meta tag improvements generated!${docUrl ? ` Review: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I apply the changes to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
+        };
+      }
+
+      // Audit ALL pages if no specific page
+      if (!wp) return { error: `WordPress not connected for ${client.name}. Cannot audit all pages without CMS access.` };
+
+      const allSEO = await wp.getAllPagesSEO();
+      const needsFix = allSEO.filter(p => !p.seoTitle || !p.seoDescription || p.seoTitle === '(missing)' || p.seoDescription === '(missing)');
+
+      return {
+        totalPages: allSEO.length,
+        pagesNeedingFix: needsFix.length,
+        pages: needsFix.slice(0, 15).map(p => ({
+          id: p.id, title: p.title, type: p.type, slug: p.slug,
+          seoTitle: p.seoTitle, seoDescription: p.seoDescription,
+        })),
+        message: `Found ${needsFix.length}/${allSEO.length} pages missing or incomplete meta tags. Use fix_meta_tags with a specific pageId to generate and apply fixes.`,
+      };
+    }
+
+    case 'plan_content_calendar': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const keywords = toolInput.keywords ? toolInput.keywords.split(',').map(k => k.trim()) : [];
+      const competitors = client.competitors ? (typeof client.competitors === 'string' ? JSON.parse(client.competitors) : client.competitors) : [];
+
+      const calendar = await seoEngine.planContentCalendar({
+        clientName: client.name,
+        keywords,
+        competitors,
+        industry: client.industry,
+        monthsAhead: toolInput.monthsAhead || 3,
+        postsPerWeek: toolInput.postsPerWeek || 1,
+      });
+
+      if (calendar.error) return calendar;
+
+      // Save to Google Sheets if client has Drive folder
+      if (client.drive_root_folder_id) {
+        try {
+          const sheet = await googleSheets.createSpreadsheet(
+            `${client.name} — SEO Content Calendar`,
+            client.drive_root_folder_id,
+          );
+          const rows = [['Week', 'Publish Date', 'Title', 'Primary Keyword', 'Content Type', 'Search Volume', 'Brief', 'Status']];
+          for (const item of (calendar.calendar || [])) {
+            rows.push([item.week, item.publishDate, item.title, item.primaryKeyword, item.contentType, item.searchVolume, item.brief, 'Planned']);
+          }
+          await googleSheets.writeData(sheet.spreadsheetId, 'Sheet1!A1', rows);
+          calendar.sheetUrl = `https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}`;
+          calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts! View and edit: ${calendar.sheetUrl}`;
+        } catch (e) {
+          log.warn('Failed to save content calendar to Sheets', { error: e.message });
+          calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts (Google Sheet save failed: ${e.message}).`;
+        }
+      } else {
+        calendar.message = `Content calendar created with ${calendar.calendar?.length || 0} posts.`;
+      }
+
+      return calendar;
+    }
+
+    case 'list_wp_content': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+      if (!wp) return { error: `WordPress not connected for ${client.name}. Send them a Leadsie link with WordPress access.` };
+
+      const contentType = toolInput.contentType || 'all';
+      const status = toolInput.status === 'any' ? undefined : (toolInput.status || 'publish');
+      const results = {};
+
+      if (contentType === 'posts' || contentType === 'all') {
+        results.posts = await wp.listPosts({ status, perPage: 50 });
+      }
+      if (contentType === 'pages' || contentType === 'all') {
+        results.pages = await wp.listPages({ status, perPage: 50 });
+      }
+
+      const totalPosts = results.posts?.length || 0;
+      const totalPages = results.pages?.length || 0;
+      return { ...results, totalPosts, totalPages, message: `Found ${totalPosts} posts and ${totalPages} pages on ${client.name}'s WordPress site.` };
+    }
+
+    case 'update_wp_post': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const wp = seoEngine.getWordPressClient(client);
+      if (!wp) return { error: `WordPress not connected for ${client.name}.` };
+
+      // Build a summary of proposed changes for the client
+      const changesList = [];
+      if (toolInput.title) changesList.push(`Title → "${toolInput.title}"`);
+      if (toolInput.content) changesList.push(`Content updated (${toolInput.content.length} chars)`);
+      if (toolInput.status) changesList.push(`Status → ${toolInput.status}`);
+      if (toolInput.seoTitle) changesList.push(`SEO Title → "${toolInput.seoTitle}"`);
+      if (toolInput.seoDescription) changesList.push(`Meta Description → "${toolInput.seoDescription}"`);
+      if (toolInput.focusKeyword) changesList.push(`Focus Keyword → "${toolInput.focusKeyword}"`);
+
+      // Save proposed changes to Google Doc
+      let docUrl = null;
+      try {
+        const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const docContent = `Proposed Changes — Post #${toolInput.postId}\n\n` +
+          `Changes:\n${changesList.map(c => `• ${c}`).join('\n')}\n\n` +
+          (toolInput.content ? `--- UPDATED CONTENT ---\n${toolInput.content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()}` : '');
+        const doc = await googleDrive.createDocument(
+          `Post Update — #${toolInput.postId} (${client.name})`,
+          docContent,
+          folderId,
+        );
+        if (doc) docUrl = doc.webViewLink;
+      } catch (e) {
+        log.warn('Failed to save post update to Google Doc', { error: e.message });
+      }
+
+      // Create pending approval — never push changes without client consent
+      const approvalId = `update-${Date.now()}`;
+      pendingApprovals.set(approvalId, {
+        type: 'update_post',
+        clientId: client.id,
+        clientName: client.name,
+        postId: toolInput.postId,
+        updates: {
+          title: toolInput.title,
+          content: toolInput.content,
+          status: toolInput.status,
+        },
+        seoUpdates: (toolInput.seoTitle || toolInput.seoDescription || toolInput.focusKeyword) ? {
+          seoTitle: toolInput.seoTitle,
+          seoDescription: toolInput.seoDescription,
+          focusKeyword: toolInput.focusKeyword,
+        } : null,
+        docUrl,
+      });
+
+      return {
+        postId: toolInput.postId,
+        proposedChanges: changesList,
+        docUrl,
+        approvalId,
+        status: 'pending_client_review',
+        deliveryOptions: {
+          option1: `I can apply these changes to your website — reply APPROVE ${approvalId}`,
+          option2: docUrl
+            ? `Review the proposed changes here: ${docUrl} — then approve or apply them yourself`
+            : 'I can send you the changes to apply yourself',
+        },
+        message: `Changes prepared for post #${toolInput.postId}!${docUrl ? ` Review: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I apply the changes — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
+      };
+    }
+
+    case 'generate_schema_markup': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const schema = await seoEngine.generateSchemaMarkup({
+        pageType: toolInput.pageType,
+        url: toolInput.url,
+        businessName: client.name,
+        businessDescription: client.description,
+      });
+
+      return { schema, message: `JSON-LD schema markup generated for ${toolInput.pageType}. Add this to the page's <head> section.` };
+    }
+
     // --- Leadsie Onboarding ---
     case 'create_onboarding_link': {
       const platforms = toolInput.platforms
         ? toolInput.platforms.split(',').map(p => p.trim())
-        : ['facebook', 'google'];
+        : ['facebook', 'google', 'wordpress', 'hubspot'];
       const invite = await leadsie.createInvite({
         clientName: toolInput.clientName,
         clientEmail: toolInput.clientEmail || '',
@@ -1360,7 +2377,28 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Media plan deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createMediaPlanRecord({
+          clientName: toolInput.clientName,
+          campaignName: toolInput.campaignName,
+          mediaPlan: toolInput.mediaPlan,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create media plan record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
     case 'build_competitor_deck': {
       const client = getClient(toolInput.clientName);
@@ -1378,7 +2416,32 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Competitor research deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createCompetitorRecord({
+          clientName: toolInput.clientName,
+          competitors: toolInput.competitors,
+          keywordGap: toolInput.keywordGap,
+          competitorAds: toolInput.competitorAds,
+          domainOverview: toolInput.domainOverview,
+          summary: toolInput.summary,
+          recommendations: toolInput.recommendations,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create competitor record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
     case 'build_performance_deck': {
       const client = getClient(toolInput.clientName);
@@ -1399,7 +2462,35 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Performance report deck ready: ${result.url}` };
+
+      // Save companion Sheet to Drive
+      let sheetUrl = null;
+      try {
+        const sheet = await campaignRecord.createPerformanceRecord({
+          clientName: toolInput.clientName,
+          reportType: toolInput.reportType,
+          dateRange: toolInput.dateRange,
+          metrics: toolInput.metrics,
+          analytics: toolInput.analytics,
+          campaigns: toolInput.campaigns,
+          topKeywords: toolInput.topKeywords,
+          audienceData: toolInput.audienceData,
+          analysis: toolInput.analysis,
+          recommendations: toolInput.recommendations,
+          folderId,
+        });
+        sheetUrl = sheet?.url || null;
+      } catch (e) {
+        log.error('Failed to create performance record sheet', { error: e.message });
+      }
+
+      return {
+        clientName: toolInput.clientName,
+        presentationUrl: result.url,
+        presentationId: result.presentationId,
+        sheetUrl,
+        message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+      };
     }
 
     // --- PDF Reports ---
@@ -1699,31 +2790,19 @@ CRITICAL RULES:
 - If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
-When the user asks you to create ads, visuals, creatives, or mockups, DO NOT generate immediately. Instead, follow this process:
+When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you <i>would</i> create — actually create it.
 
-1. <b>Gather the Creative Brief</b> — Before generating anything, ask the user these questions (adapt naturally, don't list them robotically — ask the most relevant 3-5 based on context):
-   - What's the campaign objective? (brand awareness, leads, conversions, traffic?)
-   - Who is the target audience? (demographics, interests, pain points)
-   - What's the offer or value proposition? (discount, free trial, unique benefit?)
-   - Any visual references or inspiration? (competitor ads they like, mood boards, websites they admire, style preferences)
-   - Brand guidelines? (colors, fonts, tone — or suggest they send a brand guide via file upload)
-   - What platforms? (Meta, Google, TikTok, Instagram?)
-   - What creative style? (photorealistic product shot, lifestyle photography, flat/minimal design, bold/vibrant graphic, editorial, cinematic?)
-   - Any competitors to reference or differentiate from?
-   - Specific products/services to feature?
-   - What emotion should the ad evoke? (urgency, trust, excitement, aspiration, exclusivity?)
+RULE: ALWAYS call generate_ad_images, generate_ad_video, or generate_creative_package. Text descriptions of images are NEVER acceptable.
 
-2. <b>Research First</b> — Before generating, use your tools:
-   - Browse the client's website (browse_website) to understand brand, colors, visual style, messaging
-   - Search competitor ads (search_ad_library) to see what's working in the space
-   - Check brand files if they have a Drive folder (list_client_files)
+PROCESS:
+1. <b>Quick Context Check</b> — If the request is missing critical info (you don't know the product/brand at all), ask at most 1-2 quick questions. But if you already have client context (brand, website, industry) from the knowledge base, SKIP questions and generate immediately.
+2. <b>Generate First, Iterate Later</b> — Call the generation tool right away with whatever context you have. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill gaps. It's better to generate something real and iterate than to ask questions.
+3. <b>Use Rich Prompts</b> — Pass ALL available context (brand colors, audience, references, style, mood) to the generation tools. Browse the client's website if you need visual inspiration, but do this IN PARALLEL with generation, not as a blocker.
+4. <b>Present & Iterate</b> — After delivering the actual images, ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
 
-3. <b>Generate with Full Context</b> — Only after gathering info, generate creatives. Pass ALL context (brand colors, audience, references, style, mood, competitive landscape) to the generation tools. The more detail you provide in the prompt, the better the result.
+IMPORTANT: The user wants to SEE images, not read about them. When in doubt, generate. You can always iterate.
 
-4. <b>Present & Iterate</b> — Show results and ask: "What do you think? Want me to adjust the style, colors, mood, or try a completely different angle?"
-
-EXCEPTION: If the user gives ALL context upfront (audience, offer, style, platform), skip questions and generate.
-EXCEPTION: If the user says "just do it" or "surprise me", generate with available context but mention your assumptions.
+IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -1771,12 +2850,15 @@ async function handleTelegramCommand(message, chatId) {
     // Handle tool use loop (max 10 rounds to allow multi-step tasks)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await reply(response.text);
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -1785,14 +2867,17 @@ async function handleTelegramCommand(message, chatId) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking message before expensive tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('telegram', chatId, progressMsg);
+        }
 
         try {
-          const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
         } catch (e) {
@@ -1815,15 +2900,18 @@ async function handleTelegramCommand(message, chatId) {
       });
     }
 
-    // Send final response and save assistant reply to history
-    if (response.text) {
-      addToHistory(chatId, 'assistant', response.text);
-      await reply(response.text);
+    // Send final response and save rich context to history
+    const tgFinalText = response.text || `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(chatId, 'assistant', `${contextBlock}\n${tgFinalText}`);
     } else {
-      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
-      addToHistory(chatId, 'assistant', msg);
-      await reply(msg);
+      addToHistory(chatId, 'assistant', tgFinalText);
     }
+    await reply(tgFinalText);
   } catch (error) {
     log.error('Telegram command loop failed', { error: error.message, stack: error.stack });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
@@ -1847,6 +2935,54 @@ async function handleTelegramApproval(action, approvalId, chatId) {
       pendingApprovals.delete(approvalId);
       return reply(`✅ Campaign ${pending.campaignId} paused on Meta.`);
     }
+
+    // --- Content publishing approvals ---
+    if (pending.type === 'publish_blog') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected for ${pending.clientName}. The blog post is available in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can post it manually.`);
+      }
+      const { postData } = pending;
+      const wpPost = await wp.createPost({
+        title: postData.title, content: postData.content, excerpt: postData.excerpt,
+        slug: postData.slug, status: postData.publishDate ? 'future' : 'publish', date: postData.publishDate,
+        meta: { _yoast_wpseo_title: postData.seoTitle, _yoast_wpseo_metadesc: postData.seoDescription, _yoast_wpseo_focuskw: postData.focusKeyword },
+      });
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Blog post <b>"${postData.title}"</b> published to your website!\n${wpPost.link}`);
+    }
+
+    if (pending.type === 'apply_meta') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp || !pending.pageId) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected or page ID missing. The proposed changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''}.`);
+      }
+      await wp.updatePageSEO(pending.pageId, pending.seoData, pending.pageType || 'posts');
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Meta tags updated on your website for page #${pending.pageId}!`);
+    }
+
+    if (pending.type === 'update_post') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return reply(`❌ WordPress is not connected for ${pending.clientName}. Changes available in Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''}.`);
+      }
+      const updates = {};
+      if (pending.updates.title) updates.title = pending.updates.title;
+      if (pending.updates.content) updates.content = pending.updates.content;
+      if (pending.updates.status) updates.status = pending.updates.status;
+      await wp.updatePost(pending.postId, updates);
+      if (pending.seoUpdates) await wp.updatePageSEO(pending.postId, pending.seoUpdates);
+      pendingApprovals.delete(approvalId);
+      return reply(`✅ Post #${pending.postId} updated on your website!`);
+    }
+
     pendingApprovals.delete(approvalId);
     return reply(`✅ Action approved and executed.`);
   } catch (error) { return reply(`❌ Action failed: ${error.message}`); }
@@ -1900,6 +3036,13 @@ async function handleTelegramClientMessage(chatId, message) {
     // Build the formatted "Hi Sofia, I am..." message from pending data
     if (pendingData) {
       actualMessage = `Hi Sofia, I am ${pendingData.name || 'a new client'}${pendingData.business_name ? `, representing ${pendingData.business_name}` : ''}${pendingData.website ? ` (${pendingData.website})` : ''}. My Unique Client Code is ${pendingData.token}.`;
+
+      // Cancel stale onboarding sessions so fresh signups get the personalized welcome
+      const staleSession = getOnboardingSession(chatId);
+      if (staleSession) {
+        updateOnboardingSession(staleSession.id, { status: 'cancelled' });
+        log.info('Cancelled stale Telegram onboarding session for fresh signup', { chatId, sessionId: staleSession.id });
+      }
     }
 
     // Check for active onboarding via Telegram (uses chatId as identifier)
@@ -2023,6 +3166,20 @@ async function handleTelegramClientMessage(chatId, message) {
     if (clientContext.channelsNeed) contextParts.push(`<b>Channels Interested In:</b> ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`<b>Brand Voice:</b> ${clientContext.brandVoice}`);
 
+    // Build platform access status section
+    let platformAccessNote = '';
+    const pa = clientContext.platformAccess;
+    if (pa && (pa.granted.length > 0 || pa.pending.length > 0)) {
+      const lines = ['\nPLATFORM ACCESS STATUS:'];
+      if (pa.granted.length > 0) {
+        lines.push(`✅ Granted: ${pa.granted.map(p => p.label).join(', ')}`);
+      }
+      if (pa.pending.length > 0) {
+        lines.push(`⏳ Still needed: ${pa.pending.map(p => p.label).join(', ')}`);
+      }
+      platformAccessNote = lines.join('\n');
+    }
+
     // Check for cross-channel contacts
     let crossChannelNote = '';
     if (clientContext.clientId) {
@@ -2038,7 +3195,7 @@ async function handleTelegramClientMessage(chatId, message) {
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
-${memoryContext}${crossChannelNote}
+${memoryContext}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -2059,22 +3216,47 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 
+PLATFORM ACCESS FOLLOW-UP:
+If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
+- On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
+- Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
+- Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
+- If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
+
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
-1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
-2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+1. ALWAYS call generate_ad_images or generate_creative_package — NEVER substitute with text descriptions of what you would create
+2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
+3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
+4. After delivering real images, ask if they want adjustments
+IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
+
+SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
+When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
+1. NEVER publish or change anything on their website without explicit written approval
+2. ALWAYS present exactly TWO options:
+   - *Option 1: "I can publish this to your website"* — they reply APPROVE [ID] and you push it live
+   - *Option 2: "Here's a Google Doc for you to review"* — share the doc link so they can review, edit, and either post it themselves or come back to approve
+3. Share the Google Doc link so the client can see exactly what will be posted
+4. Wait for their explicit approval (APPROVE) before touching their website
+5. If they choose to post themselves, that's perfectly fine — just confirm you're available if they need changes
+
+NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website',
+      'generate_text_ads', 'analyze_visual_reference',
+      'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',
       'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
       'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
       'search_google_ads_transparency',
+      'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
+      'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -2108,11 +3290,15 @@ When the client asks for ads, visuals, creatives, or mockups:
     // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendTelegram(response.text, chatId);
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('telegram', chatId, 'Still working on it...');
       }
 
       const toolResults = [];
@@ -2120,22 +3306,20 @@ When the client asks for ads, visuals, creatives, or mockups:
         log.info('Client tool execution (Telegram)', { tool: tool.name, client: contactName, round: rounds });
         toolsSummary.push(tool.name);
 
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('telegram', chatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('telegram', chatId, 'Creating your video... This will take a few minutes.');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('telegram', chatId, 'Building your full creative package... Give me a few minutes!');
-        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
-          await sendThinkingIndicator('telegram', chatId, 'Researching keywords... This might take a minute.');
-        }
-        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
-          await sendThinkingIndicator('telegram', chatId, 'Running analysis... Give me a moment.');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('telegram', chatId, progressMsg);
         }
 
         try {
           if (clientContext.clientId && tool.input) {
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
-          const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
         } catch (e) {
           log.error('Client tool failed (Telegram)', { tool: tool.name, error: e.message });
@@ -2160,10 +3344,12 @@ When the client asks for ads, visuals, creatives, or mockups:
       ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    // Save tool-use summary to history so context persists across messages
+    // Save rich tool context to history so Sofia remembers what she generated across messages
     if (rounds > 0 && toolsSummary.length > 0) {
-      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
-      addToHistory(chatId, 'assistant', `${toolContext}\n${finalText}`, 'telegram');
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(chatId, 'assistant', `${contextBlock}\n${finalText}`, 'telegram');
     } else {
       addToHistory(chatId, 'assistant', finalText, 'telegram');
     }
@@ -2209,33 +3395,89 @@ app.post('/webhook/leadsie', async (req, res) => {
 
     log.info('Leadsie onboarding completed', { inviteId: invite_id, clientName: client_name });
 
-    // Find the client linked to this Leadsie invite
+    // Extract granted platform credentials from the webhook payload
+    const updates = {};
+    const grantedPlatforms = [];
+    for (const account of (granted_accounts || [])) {
+      grantedPlatforms.push(account.platform);
+
+      // Ad accounts
+      if (account.platform === 'facebook' && account.account_id) {
+        updates.meta_ad_account_id = account.account_id;
+      } else if (account.platform === 'google' && account.account_id) {
+        updates.google_ads_customer_id = account.account_id;
+      } else if (account.platform === 'tiktok' && account.account_id) {
+        updates.tiktok_advertiser_id = account.account_id;
+
+      // CMS platforms
+      } else if (account.platform === 'wordpress') {
+        if (account.site_url) updates.wordpress_url = account.site_url;
+        if (account.username) updates.wordpress_username = account.username;
+        if (account.access_token || account.app_password) updates.wordpress_app_password = account.access_token || account.app_password;
+        updates.cms_platform = 'wordpress';
+      } else if (account.platform === 'shopify') {
+        if (account.store_url || account.site_url) updates.shopify_store_url = account.store_url || account.site_url;
+        if (account.access_token) updates.shopify_access_token = account.access_token;
+        updates.cms_platform = 'shopify';
+
+      // DNS
+      } else if (account.platform === 'godaddy') {
+        if (account.domain) updates.godaddy_domain = account.domain;
+        if (account.api_key || account.access_token) updates.godaddy_api_key = account.api_key || account.access_token;
+
+      // CRM
+      } else if (account.platform === 'hubspot') {
+        if (account.access_token) updates.hubspot_access_token = account.access_token;
+      }
+    }
+
+    // Find the client linked to this Leadsie invite (check both onboarding_sessions and pending_clients)
     const { default: Database } = await import('better-sqlite3');
     const DB_PATH = process.env.KB_DB_PATH || 'data/knowledge.db';
     const db = new Database(DB_PATH);
     const session = db.prepare('SELECT * FROM onboarding_sessions WHERE leadsie_invite_id = ?').get(invite_id);
 
-    if (session?.client_id) {
-      // Update client with granted ad account IDs
-      const updates = {};
-      for (const account of (granted_accounts || [])) {
-        if (account.platform === 'facebook' && account.account_id) {
-          updates.meta_ad_account_id = account.account_id;
-        } else if (account.platform === 'google' && account.account_id) {
-          updates.google_ads_customer_id = account.account_id;
-        } else if (account.platform === 'tiktok' && account.account_id) {
-          updates.tiktok_advertiser_id = account.account_id;
-        }
-      }
-      if (Object.keys(updates).length > 0) {
-        const { updateClient: updateClientKb } = await import('../services/knowledge-base.js');
-        updateClientKb(session.client_id, updates);
-      }
+    // Also check pending_clients (for invites created via /api/leadsie-connect before onboarding)
+    const pendingByInvite = getPendingClientByLeadsieInvite(invite_id);
 
-      // Notify owner
-      const platformNames = (granted_accounts || []).map(a => a.platform).join(', ');
-      await sendWhatsApp(`✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n\nAccess granted for: ${platformNames || 'accounts linked'}\n\nAd account IDs have been saved automatically.`);
+    let clientId = session?.client_id || null;
+
+    // If no client from session, try to find the client from the pending record's chat_id
+    if (!clientId && pendingByInvite?.chat_id) {
+      const contact = getContactByPhone(pendingByInvite.chat_id);
+      clientId = contact?.client_id || null;
     }
+
+    if (clientId && Object.keys(updates).length > 0) {
+      updateClient(clientId, updates);
+      log.info('Leadsie webhook: stored granted credentials on client', { clientId, grantedPlatforms });
+    } else if (!clientId && pendingByInvite && Object.keys(updates).length > 0) {
+      // Client hasn't been created yet (hasn't contacted Sofia) — store on pending record
+      // These will be carried over when the client is activated
+      try {
+        const pendingUpdates = {};
+        for (const [key, value] of Object.entries(updates)) {
+          pendingUpdates[key] = value;
+        }
+        updatePendingClient(pendingByInvite.token, pendingUpdates);
+        log.info('Leadsie webhook: stored granted credentials on pending client', { token: pendingByInvite.token, grantedPlatforms });
+      } catch (e) {
+        log.warn('Failed to store Leadsie credentials on pending client', { error: e.message });
+      }
+    }
+
+    // Notify owner with categorized platform list
+    const adPlatforms = grantedPlatforms.filter(p => ['facebook', 'google', 'tiktok'].includes(p));
+    const cmsPlatforms = grantedPlatforms.filter(p => ['wordpress', 'shopify'].includes(p));
+    const otherPlatforms = grantedPlatforms.filter(p => ['godaddy', 'hubspot', 'mailchimp'].includes(p));
+
+    let notifyMsg = `✅ *${client_name || 'Client'}* completed Leadsie onboarding!\n`;
+    if (adPlatforms.length) notifyMsg += `\n📊 *Ad accounts:* ${adPlatforms.join(', ')}`;
+    if (cmsPlatforms.length) notifyMsg += `\n🌐 *CMS access:* ${cmsPlatforms.join(', ')} — Sofia can now manage website content & SEO`;
+    if (otherPlatforms.length) notifyMsg += `\n🔧 *Other:* ${otherPlatforms.join(', ')}`;
+    if (!clientId) notifyMsg += `\n\n⏳ Client hasn't connected with Sofia yet — credentials saved to pending record.`;
+    notifyMsg += '\n\nAll credentials have been saved automatically.';
+    await sendWhatsApp(notifyMsg);
 
     db.close();
   } catch (error) {
@@ -2289,12 +3531,15 @@ async function handleCommand(message) {
     // Handle tool use loop (max 10 rounds to allow multi-step tasks)
     let rounds = 0;
     const toolsSummary = []; // track what tools ran for history context
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      // Send a natural "working on it" message on first tool call
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendWhatsApp(response.text);
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -2303,14 +3548,17 @@ async function handleCommand(message) {
         log.info('Executing tool', { tool: tool.name, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking message before expensive tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', ownerChatId, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', ownerChatId, 'Creating your video with Sora 2... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', ownerChatId, 'Building your full creative package... Give me a few minutes!');
+        // Send progress message for every tool
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('whatsapp', ownerChatId, progressMsg);
+        }
 
         try {
-          const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
           await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
         } catch (e) {
@@ -2333,16 +3581,18 @@ async function handleCommand(message) {
       });
     }
 
-    // Send final response and save to history
-    if (response.text) {
-      addToHistory(ownerChatId, 'assistant', response.text);
-      await sendWhatsApp(response.text);
+    // Send final response and save rich context to history
+    const ownerFinalText = response.text || `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
+
+    if (rounds > 0 && toolsSummary.length > 0) {
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(ownerChatId, 'assistant', `${contextBlock}\n${ownerFinalText}`);
     } else {
-      // If no final text (e.g. hit max rounds), let user know
-      const msg = `I ran ${rounds} tool steps (${toolsSummary.join(', ')}) but couldn't produce a final answer. Please try again or ask me to summarize what I found.`;
-      addToHistory(ownerChatId, 'assistant', msg);
-      await sendWhatsApp(msg);
+      addToHistory(ownerChatId, 'assistant', ownerFinalText);
     }
+    await sendWhatsApp(ownerFinalText);
   } catch (error) {
     log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
@@ -2357,6 +3607,20 @@ async function handleCommand(message) {
 // --- Client Message Handler (non-owner contacts) ---
 async function handleClientMessage(from, message) {
   try {
+    // 0. Pre-check for signup token — cancel stale sessions so fresh signups aren't blocked
+    const preTokenMatch = message.match(TOKEN_RE_INLINE);
+    if (preTokenMatch) {
+      const preCheck = await getPendingClientWithFallback(preTokenMatch[1]);
+      if (preCheck) {
+        // Valid pending signup found — cancel any stale onboarding sessions
+        const staleSession = getOnboardingSession(from);
+        if (staleSession) {
+          updateOnboardingSession(staleSession.id, { status: 'cancelled' });
+          log.info('Cancelled stale onboarding session for fresh signup', { from, sessionId: staleSession.id });
+        }
+      }
+    }
+
     // 1. Check if client has an active onboarding session
     if (hasActiveOnboarding(from)) {
       log.info('Routing to onboarding flow', { from });
@@ -2481,6 +3745,20 @@ async function handleClientMessage(from, message) {
     if (clientContext.channelsNeed) contextParts.push(`*Channels Interested In:* ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`*Brand Voice:* ${clientContext.brandVoice}`);
 
+    // Build platform access status section
+    let platformAccessNote = '';
+    const pa = clientContext.platformAccess;
+    if (pa && (pa.granted.length > 0 || pa.pending.length > 0)) {
+      const lines = ['\nPLATFORM ACCESS STATUS:'];
+      if (pa.granted.length > 0) {
+        lines.push(`✅ *Granted:* ${pa.granted.map(p => p.label).join(', ')}`);
+      }
+      if (pa.pending.length > 0) {
+        lines.push(`⏳ *Still needed:* ${pa.pending.map(p => p.label).join(', ')}`);
+      }
+      platformAccessNote = lines.join('\n');
+    }
+
     // Check for cross-channel contacts
     let crossChannelNote = '';
     if (clientContext.clientId) {
@@ -2496,7 +3774,7 @@ async function handleClientMessage(from, message) {
       : '';
 
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
-${memoryContext}${crossChannelNote}
+${memoryContext}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -2517,22 +3795,47 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - NEVER tell the client you don't have clients set up or need configuration. You have tools — use them.
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 
+PLATFORM ACCESS FOLLOW-UP:
+If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
+- On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
+- Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
+- Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
+- If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
+
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the client asks for ads, visuals, creatives, or mockups:
-1. Gather a brief — ask the most relevant 2-3 questions based on context (objective, audience, style/mood, references)
-2. Once you have enough context, call the generate_ad_images or generate_creative_package tool
-3. ALWAYS deliver real images/videos — never substitute with text descriptions`;
+1. ALWAYS call generate_ad_images or generate_creative_package — NEVER substitute with text descriptions of what you would create
+2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
+3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
+4. After delivering real images, ask if they want adjustments
+IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
+
+SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
+When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
+1. NEVER publish or change anything on their website without explicit written approval
+2. ALWAYS present exactly TWO options:
+   - *Option 1: "I can publish this to your website"* — they reply APPROVE [ID] and you push it live
+   - *Option 2: "Here's a Google Doc for you to review"* — share the doc link so they can review, edit, and either post it themselves or come back to approve
+3. Share the Google Doc link so the client can see exactly what will be posted
+4. Wait for their explicit approval (APPROVE) before touching their website
+5. If they choose to post themselves, that's perfectly fine — just confirm you're available if they need changes
+
+NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'browse_website',
+      'generate_text_ads', 'analyze_visual_reference',
+      'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
       'get_keyword_planner_volume', 'get_keyword_planner_ideas',
       'get_domain_overview', 'analyze_serp', 'find_seo_competitors',
       'get_keyword_gap', 'audit_landing_page', 'audit_seo_page',
       'search_google_ads_transparency',
+      'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
+      'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -2566,11 +3869,15 @@ When the client asks for ads, visuals, creatives, or mockups:
     // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
     let rounds = 0;
     const toolsSummary = [];
+    const allToolResults = []; // Collect all tool results for persistent history
     while (response.stopReason === 'tool_use' && rounds < 10) {
       rounds++;
 
-      if (rounds === 1 && response.text) {
+      // Send text from every round so user always sees progress
+      if (response.text) {
         await sendWhatsApp(response.text, from);
+      } else if (rounds >= 2) {
+        await sendThinkingIndicator('whatsapp', from, 'Still working on it...');
       }
 
       const toolResults = [];
@@ -2578,15 +3885,10 @@ When the client asks for ads, visuals, creatives, or mockups:
         log.info('Client tool execution', { tool: tool.name, client: contactName, round: rounds });
         toolsSummary.push(tool.name);
 
-        // Send thinking messages for slow tools
-        if (tool.name === 'generate_ad_images') await sendThinkingIndicator('whatsapp', from, 'Generating your ad images... This might take a minute.');
-        if (tool.name === 'generate_ad_video') await sendThinkingIndicator('whatsapp', from, 'Creating your video... This will take a few minutes. I\'ll send it as soon as it\'s ready!');
-        if (tool.name === 'generate_creative_package') await sendThinkingIndicator('whatsapp', from, 'Building your full creative package... Give me a few minutes!');
-        if (['get_search_volume', 'get_keyword_ideas', 'get_keyword_planner_volume', 'get_keyword_planner_ideas'].includes(tool.name)) {
-          await sendThinkingIndicator('whatsapp', from, 'Researching keywords... This might take a minute.');
-        }
-        if (['analyze_serp', 'get_domain_overview', 'find_seo_competitors', 'audit_landing_page', 'audit_seo_page'].includes(tool.name)) {
-          await sendThinkingIndicator('whatsapp', from, 'Running analysis... Give me a moment.');
+        // Send progress message for every tool so user knows what Sofia is doing
+        const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
+        if (progressMsg) {
+          await sendThinkingIndicator('whatsapp', from, progressMsg);
         }
 
         try {
@@ -2594,8 +3896,10 @@ When the client asks for ads, visuals, creatives, or mockups:
           if (clientContext.clientId && tool.input) {
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
-          const result = await executeCSATool(tool.name, tool.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify(result) });
+          const result = await executeCSAToolWithTimeout(tool.name, tool.input);
+          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
+          allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline
           await deliverMediaInline(tool.name, result, 'whatsapp', from);
         } catch (e) {
@@ -2622,10 +3926,12 @@ When the client asks for ads, visuals, creatives, or mockups:
       ? `I ran ${toolsSummary.length} steps (${[...new Set(toolsSummary)].join(', ')}). Let me know if you'd like me to go deeper on anything!`
       : 'I\'m here to help! What would you like to work on?');
 
-    // Save tool-use summary to history so context persists across messages
+    // Save rich tool context to history so Sofia remembers what she generated across messages
     if (rounds > 0 && toolsSummary.length > 0) {
-      const toolContext = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
-      addToHistory(from, 'assistant', `${toolContext}\n${finalText}`, 'whatsapp');
+      const toolNames = `[Used tools: ${[...new Set(toolsSummary)].join(', ')}]`;
+      const deliverables = summarizeToolDeliverables(allToolResults);
+      const contextBlock = deliverables ? `${toolNames}\n${deliverables}` : toolNames;
+      addToHistory(from, 'assistant', `${contextBlock}\n${finalText}`, 'whatsapp');
     } else {
       addToHistory(from, 'assistant', finalText, 'whatsapp');
     }
@@ -2853,6 +4159,63 @@ async function handleApproval(action, approvalId) {
       return sendWhatsApp(`✅ Campaign ${pending.campaignId} paused on Meta.`);
     }
 
+    // --- Content publishing approvals ---
+    if (pending.type === 'publish_blog') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected for ${pending.clientName}. The blog post is available in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can post it manually.`);
+      }
+      const { postData } = pending;
+      const wpPost = await wp.createPost({
+        title: postData.title,
+        content: postData.content,
+        excerpt: postData.excerpt,
+        slug: postData.slug,
+        status: postData.publishDate ? 'future' : 'publish',
+        date: postData.publishDate,
+        meta: {
+          _yoast_wpseo_title: postData.seoTitle,
+          _yoast_wpseo_metadesc: postData.seoDescription,
+          _yoast_wpseo_focuskw: postData.focusKeyword,
+        },
+      });
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Blog post *"${postData.title}"* published to your website!\n${wpPost.link}`);
+    }
+
+    if (pending.type === 'apply_meta') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp || !pending.pageId) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected or page ID missing. The proposed changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can apply them manually.`);
+      }
+      await wp.updatePageSEO(pending.pageId, pending.seoData, pending.pageType || 'posts');
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Meta tags updated on your website for page #${pending.pageId}!`);
+    }
+
+    if (pending.type === 'update_post') {
+      const client = getClient(pending.clientName);
+      const wp = client ? seoEngine.getWordPressClient(client) : null;
+      if (!wp) {
+        pendingApprovals.delete(approvalId);
+        return sendWhatsApp(`❌ WordPress is not connected for ${pending.clientName}. The changes are in your Google Doc${pending.docUrl ? `: ${pending.docUrl}` : ''} — you can apply them manually.`);
+      }
+      const updates = {};
+      if (pending.updates.title) updates.title = pending.updates.title;
+      if (pending.updates.content) updates.content = pending.updates.content;
+      if (pending.updates.status) updates.status = pending.updates.status;
+      await wp.updatePost(pending.postId, updates);
+      if (pending.seoUpdates) {
+        await wp.updatePageSEO(pending.postId, pending.seoUpdates);
+      }
+      pendingApprovals.delete(approvalId);
+      return sendWhatsApp(`✅ Post #${pending.postId} updated on your website!`);
+    }
+
     pendingApprovals.delete(approvalId);
     return sendWhatsApp(`✅ Action approved and executed.`);
   } catch (error) {
@@ -2870,6 +4233,7 @@ export function startServer(port) {
     console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
     console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
     console.log(`Client init API: http://your-server:${p}/api/client-init`);
+    console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
     console.log(`Health check: http://your-server:${p}/health`);
 
     // Fetch Telegram bot username if not configured
