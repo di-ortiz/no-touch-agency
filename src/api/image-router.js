@@ -207,13 +207,15 @@ export async function generateAdImages(opts = {}) {
   };
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
-  const results = [];
   const PER_FORMAT_TIMEOUT_MS = 120_000; // 120s max per format (provider1 timeout + provider2 attempt)
 
-  for (const format of formats) {
-    try {
-      log.info(`Generating image for format: ${format}`, { platform: opts.platform, formatIndex: results.length + 1, totalFormats: formats.length });
-      const image = await Promise.race([
+  log.info(`Generating ${formats.length} format(s) in parallel`, { platform: opts.platform, formats });
+
+  // Generate all formats in parallel — cuts total time from N*120s to ~120s
+  const settled = await Promise.allSettled(
+    formats.map((format, idx) => {
+      log.info(`Starting image generation for format: ${format}`, { platform: opts.platform, formatIndex: idx + 1, totalFormats: formats.length });
+      return Promise.race([
         generateImage({
           ...opts,
           prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Clean composition, no text overlays.`,
@@ -223,13 +225,19 @@ export async function generateAdImages(opts = {}) {
           setTimeout(() => reject(new Error(`Image generation timed out for format ${format} after ${PER_FORMAT_TIMEOUT_MS / 1000}s`)), PER_FORMAT_TIMEOUT_MS)
         ),
       ]);
-      results.push(image);
-      log.info(`Image generated for format: ${format}`, { provider: image.provider });
-    } catch (e) {
-      log.error(`All providers failed for format ${format}`, { error: e.message });
-      results.push({ format, error: e.message, provider: 'none' });
+    })
+  );
+
+  // Map settled results back in format order
+  const results = settled.map((outcome, idx) => {
+    const format = formats[idx];
+    if (outcome.status === 'fulfilled') {
+      log.info(`Image generated for format: ${format}`, { provider: outcome.value.provider });
+      return outcome.value;
     }
-  }
+    log.error(`All providers failed for format ${format}`, { error: outcome.reason?.message });
+    return { format, error: outcome.reason?.message || 'Unknown error', provider: 'none' };
+  });
 
   return results;
 }

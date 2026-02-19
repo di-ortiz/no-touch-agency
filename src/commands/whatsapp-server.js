@@ -195,7 +195,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
 
   // Generated ad images — use native buffer upload for WhatsApp
   if (toolName === 'generate_ad_images' && result.images) {
-    const validImages = result.images.filter(i => i.url && !i.error);
+    const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
     log.info('Delivering ad images inline', {
       total: result.images.length,
@@ -207,8 +207,10 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
     let deliveredCount = 0;
     for (let i = 0; i < result.images.length; i++) {
       const img = result.images[i];
-      if (!img.url || img.error) continue;
+      if ((!img.url && !img.deliveryUrl) || img.error) continue;
       const caption = img.label || img.format || 'Ad image';
+      // Use the original provider URL for delivery — Drive URLs are blocked by WhatsApp
+      const deliveryUrl = img.deliveryUrl || img.url;
 
       if (channel === 'whatsapp') {
         let sent = false;
@@ -216,28 +218,33 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
         // Try 1: Native buffer upload (fastest, most reliable when buffer available)
         if (result._imageBuffers?.[i]?.buffer) {
           try {
-            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, img.url, caption, chatId);
+            log.info('Delivering image via native buffer upload', { format: img.format, bufferSize: result._imageBuffers[i].buffer.length });
+            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, deliveryUrl, caption, chatId);
             sent = true;
             deliveredCount++;
+            log.info('Image delivered via native buffer', { format: img.format });
           } catch (e) {
             log.warn('Native image delivery failed at deliverMediaInline', { error: e.message, format: img.format });
           }
+        } else {
+          log.warn('No image buffer available for native upload', { format: img.format, hasBuffer: !!result._imageBuffers?.[i] });
         }
 
-        // Try 2: URL-based fallback (if native wasn't available or failed completely)
+        // Try 2: URL-based fallback using original provider URL (NOT Drive URL)
         if (!sent) {
-          log.info('Trying URL-based image delivery fallback', { format: img.format, url: img.url?.slice(0, 80) });
+          log.info('Falling back to URL-based image delivery', { format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80), isDriveUrl: deliveryUrl?.includes('drive.google.com') });
           try {
-            await sendWhatsAppImage(img.url, caption, chatId);
+            await sendWhatsAppImage(deliveryUrl, caption, chatId);
             sent = true;
             deliveredCount++;
+            log.info('Image delivered via URL fallback', { format: img.format });
           } catch (e) {
-            log.error('All image delivery methods failed for format', { error: e.message, format: img.format });
+            log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
           }
         }
       } else {
         // Telegram / other channels
-        await safeSendMedia(sendImage, img.url, caption, toolName);
+        await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
         deliveredCount++;
       }
     }
@@ -245,7 +252,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
     // If we had valid images but couldn't deliver any, notify the user
     if (deliveredCount === 0 && validImages.length > 0) {
       log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
-      const driveUrl = validImages.find(i => i.driveId)?.url;
+      const driveUrl = validImages.find(i => i.driveUrl || i.driveId)?.driveUrl;
       const fallbackMsg = driveUrl
         ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
         : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
@@ -269,13 +276,18 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
         let sent = false;
         if (result._imageBuffers?.[i]?.buffer) {
           try {
+            log.info('Delivering creative package image via native buffer', { index: i, bufferSize: result._imageBuffers[i].buffer.length });
             await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
             sent = true;
+            log.info('Creative package image delivered via native buffer', { index: i });
           } catch (e) {
-            log.warn('Native creative package image delivery failed', { error: e.message });
+            log.warn('Native creative package image delivery failed', { error: e.message, index: i });
           }
+        } else {
+          log.warn('No buffer available for creative package image', { index: i });
         }
         if (!sent) {
+          log.info('Falling back to URL-based creative package delivery', { index: i, url: url?.slice(0, 80), isDriveUrl: url?.includes('drive.google.com') });
           await safeSendMedia(sendImage, url, caption, toolName);
         }
       } else {
@@ -1517,7 +1529,8 @@ Return ONLY the JSON array, no other text.`;
         const mapped = {
           format: img.format,
           label: img.dimensions?.label || img.format,
-          url: img.url,
+          url: img.url,           // original provider URL (temp but fetchable by WhatsApp)
+          deliveryUrl: img.url,   // always the raw provider URL for WhatsApp delivery
           provider: img.provider,
           error: img.error,
         };
@@ -1527,7 +1540,9 @@ Return ONLY the JSON array, no other text.`;
             const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
             if (driveResult) {
               if (driveResult.webContentLink) {
-                mapped.url = driveResult.webContentLink;
+                // Drive URL for permanent reference — but NOT for WhatsApp delivery
+                // (WhatsApp can't fetch Drive URLs due to auth/redirect walls)
+                mapped.driveUrl = driveResult.webContentLink;
                 mapped.driveId = driveResult.id;
               }
               imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
@@ -1627,29 +1642,28 @@ Return ONLY the JSON array, no other text.`;
       // Persist generated images to Google Drive + keep buffers for WhatsApp direct upload
       const client = getClient(toolInput.clientName);
       const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const persistedImageUrls = [];
+      const persistedImageUrls = [];   // original provider URLs for WhatsApp delivery
       const _pkgImageBuffers = [];
       for (const img of pkg.images) {
         if (img.error || !img.url) continue;
+        const originalUrl = img.url;   // keep original for delivery
         try {
           const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
           if (driveResult) {
             if (driveResult.webContentLink) {
-              img.url = driveResult.webContentLink;
-              persistedImageUrls.push(driveResult.webContentLink);
-            } else {
-              persistedImageUrls.push(img.url);
+              // Store Drive URL separately — don't replace original for delivery
+              img.driveUrl = driveResult.webContentLink;
+              img.driveId = driveResult.id;
             }
             _pkgImageBuffers.push({ buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType });
           } else {
-            persistedImageUrls.push(img.url);
             _pkgImageBuffers.push(null);
           }
         } catch (e) {
           log.warn('Failed to persist creative package image to Drive', { error: e.message });
-          persistedImageUrls.push(img.url);
           _pkgImageBuffers.push(null);
         }
+        persistedImageUrls.push(originalUrl); // always use original provider URL
       }
 
       // Save companion Sheet to Drive
