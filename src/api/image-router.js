@@ -208,15 +208,23 @@ export async function generateAdImages(opts = {}) {
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
   const results = [];
+  const PER_FORMAT_TIMEOUT_MS = 120_000; // 120s max per format (provider1 timeout + provider2 attempt)
 
   for (const format of formats) {
     try {
-      const image = await generateImage({
-        ...opts,
-        prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Clean composition, no text overlays.`,
-        format,
-      });
+      log.info(`Generating image for format: ${format}`, { platform: opts.platform, formatIndex: results.length + 1, totalFormats: formats.length });
+      const image = await Promise.race([
+        generateImage({
+          ...opts,
+          prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Clean composition, no text overlays.`,
+          format,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Image generation timed out for format ${format} after ${PER_FORMAT_TIMEOUT_MS / 1000}s`)), PER_FORMAT_TIMEOUT_MS)
+        ),
+      ]);
       results.push(image);
+      log.info(`Image generated for format: ${format}`, { provider: image.provider });
     } catch (e) {
       log.error(`All providers failed for format ${format}`, { error: e.message });
       results.push({ format, error: e.message, provider: 'none' });

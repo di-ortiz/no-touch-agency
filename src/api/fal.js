@@ -81,7 +81,7 @@ export async function generateImage(opts = {}) {
           output_format: 'jpeg',
           guidance_scale: 3.5,
         },
-        { headers: getHeaders(), timeout: 120000 },
+        { headers: getHeaders(), timeout: 60000 },
       );
 
       const image = response.data?.images?.[0];
@@ -104,7 +104,7 @@ export async function generateImage(opts = {}) {
         dimensions: { ...imageSize, label: FORMAT_LABELS[format] || format },
         provider: 'fal',
       };
-    }, { retries: 2, label: 'fal.ai image', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'fal.ai image', shouldRetry: isRetryableHttpError })
   );
 }
 

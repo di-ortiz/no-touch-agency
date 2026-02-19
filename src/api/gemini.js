@@ -118,7 +118,7 @@ export async function generateImage(opts = {}) {
         dimensions: { ...dims, label: FORMAT_LABELS[format] || format },
         provider: 'gemini',
       };
-    }, { retries: 2, label: 'Imagen 3', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'Imagen 3', shouldRetry: isRetryableHttpError })
   );
 }
 

@@ -137,7 +137,7 @@ function stripBinaryBuffers(key, value) {
 }
 
 // Tool execution timeout: prevent any single tool from hanging forever
-const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation
+const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
 const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
 
