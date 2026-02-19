@@ -136,6 +136,90 @@ function stripBinaryBuffers(key, value) {
   return value;
 }
 
+// --- Tool result size management ---
+// Haiku has ~200K context window. With system prompt (~5K), tools schema (~15K), and conversation
+// history, we need to keep tool results bounded to avoid blowing past the limit during multi-step
+// tool loops (e.g. competitor research → ad library → creative generation = 5+ rounds).
+const MAX_TOOL_RESULT_CHARS = 12_000; // ~3K tokens per tool result
+const MAX_MESSAGES_CHARS = 300_000;   // ~75K tokens — safe margin for Haiku's 200K window
+
+/**
+ * Truncate a single tool result string if it exceeds the limit.
+ * Preserves the start (most useful info) and appends a truncation notice.
+ */
+function truncateToolResult(resultJson) {
+  if (resultJson.length <= MAX_TOOL_RESULT_CHARS) return resultJson;
+  log.info('Truncating large tool result', { originalLength: resultJson.length, maxLength: MAX_TOOL_RESULT_CHARS });
+  return resultJson.slice(0, MAX_TOOL_RESULT_CHARS) + '...[truncated — result too large]';
+}
+
+/**
+ * Estimate total character length of the messages array (rough proxy for tokens).
+ * Counts string content and serializes objects.
+ */
+function estimateMessagesSize(messages) {
+  let total = 0;
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      total += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (typeof block === 'string') {
+          total += block.length;
+        } else if (block.content) {
+          total += typeof block.content === 'string' ? block.content.length : JSON.stringify(block.content).length;
+        } else if (block.text) {
+          total += block.text.length;
+        } else {
+          total += JSON.stringify(block).length;
+        }
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * Trim the messages array to fit within the token budget.
+ * Strategy: find tool_result blocks (the biggest offenders) and truncate them
+ * starting from the oldest, until total size is under budget.
+ */
+function trimMessagesToFit(messages) {
+  let size = estimateMessagesSize(messages);
+  if (size <= MAX_MESSAGES_CHARS) return;
+
+  const originalSize = size;
+
+  // Collect indices of tool_result messages (role: 'user' with array content)
+  const toolResultIndices = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (Array.isArray(messages[i].content)) {
+      toolResultIndices.push(i);
+    }
+  }
+
+  // Truncate tool results from oldest first
+  for (const idx of toolResultIndices) {
+    if (size <= MAX_MESSAGES_CHARS) break;
+    const msg = messages[idx];
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j];
+      if (block.content && typeof block.content === 'string' && block.content.length > 500) {
+        const oldLen = block.content.length;
+        block.content = block.content.slice(0, 400) + '...[trimmed to fit context window]';
+        size -= (oldLen - block.content.length);
+      }
+    }
+  }
+
+  log.info('Trimmed messages to fit context window', {
+    originalChars: originalSize,
+    trimmedChars: size,
+    savedChars: originalSize - size,
+    messageCount: messages.length,
+  });
+}
+
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
@@ -2889,7 +2973,7 @@ async function handleTelegramCommand(message, chatId) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -2901,8 +2985,9 @@ async function handleTelegramCommand(message, chatId) {
       }
 
       // Continue conversation with tool results
-      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'assistant', content: response.raw?.content || [{ type: 'text', text: response.text || '' }] });
       messages.push({ role: 'user', content: toolResults });
+      trimMessagesToFit(messages);
 
       response = await askClaude({
         systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
@@ -3331,7 +3416,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
@@ -3341,8 +3426,9 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
         }
       }
 
-      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'assistant', content: response.raw?.content || [{ type: 'text', text: response.text || '' }] });
       messages.push({ role: 'user', content: toolResults });
+      trimMessagesToFit(messages);
 
       response = await askClaude({
         systemPrompt,
@@ -3570,7 +3656,7 @@ async function handleCommand(message) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -3582,8 +3668,9 @@ async function handleCommand(message) {
       }
 
       // Continue conversation with tool results
-      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'assistant', content: response.raw?.content || [{ type: 'text', text: response.text || '' }] });
       messages.push({ role: 'user', content: toolResults });
+      trimMessagesToFit(messages);
 
       response = await askClaude({
         systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
@@ -3911,7 +3998,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline
@@ -3922,8 +4009,9 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
         }
       }
 
-      messages.push({ role: 'assistant', content: response.raw.content });
+      messages.push({ role: 'assistant', content: response.raw?.content || [{ type: 'text', text: response.text || '' }] });
       messages.push({ role: 'user', content: toolResults });
+      trimMessagesToFit(messages);
 
       response = await askClaude({
         systemPrompt,
