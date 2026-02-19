@@ -14,7 +14,7 @@ function getHeaders() {
   };
 }
 
-function isConfigured() {
+export function isConfigured() {
   return !!config.FIRECRAWL_API_KEY;
 }
 

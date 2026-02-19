@@ -2708,8 +2708,8 @@ Return ONLY the JSON array, no other text.`;
       return { error: `Unknown tool: ${toolName}` };
   }
   } catch (err) {
-    log.error(`Tool ${toolName} failed`, { error: err.message });
-    return { error: err.message };
+    log.error(`Tool ${toolName} failed`, { error: err.message, errorType: err.constructor?.name, stack: err.stack?.split('\n').slice(0, 3).join(' | ') });
+    return { error: err.message || 'Unknown tool error' };
   }
 }
 
@@ -2976,8 +2976,10 @@ async function handleTelegramCommand(message, chatId) {
           const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          // Deliver generated media inline (images, videos)
-          await deliverMediaInline(tool.name, result, 'telegram', chatId);
+          // Deliver media separately — must not affect tool result for Claude
+          try { await deliverMediaInline(tool.name, result, 'telegram', chatId); } catch (mediaErr) {
+            log.warn('Media delivery failed', { tool: tool.name, error: mediaErr.message });
+          }
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -3012,11 +3014,15 @@ async function handleTelegramCommand(message, chatId) {
     }
     await reply(tgFinalText);
   } catch (error) {
-    log.error('Telegram command loop failed', { error: error.message, stack: error.stack });
+    log.error('Telegram command loop failed', { error: error.message, stack: error.stack, errorType: error.constructor?.name, status: error.status });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
-    const errorMsg = isRateLimit
+    const isTimeout = error.message?.includes('timed out');
+    const isOverloaded = error.status === 529;
+    const errorMsg = isRateLimit || isOverloaded
       ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
-      : 'Something went wrong while processing your request. Please try again.';
+      : isTimeout
+        ? 'That request took too long to process. Try asking for something more specific or breaking it into smaller steps.'
+        : 'Something went wrong while processing your request. Please try again.';
     addToHistory(chatId, 'assistant', errorMsg);
     await reply(errorMsg);
   }
@@ -3419,7 +3425,9 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
           const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          await deliverMediaInline(tool.name, result, 'telegram', chatId);
+          try { await deliverMediaInline(tool.name, result, 'telegram', chatId); } catch (mediaErr) {
+            log.warn('Media delivery failed', { tool: tool.name, error: mediaErr.message });
+          }
         } catch (e) {
           log.error('Client tool failed (Telegram)', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -3467,7 +3475,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       }
     }
   } catch (error) {
-    log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack });
+    log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack, errorType: error.constructor?.name, status: error.status });
     try {
       // Include error hint so we can diagnose from Telegram logs
       const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
@@ -3659,8 +3667,10 @@ async function handleCommand(message) {
           const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          // Deliver generated media inline (images, videos)
-          await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
+          // Deliver media separately — must not affect tool result for Claude
+          try { await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId); } catch (mediaErr) {
+            log.warn('Media delivery failed', { tool: tool.name, error: mediaErr.message });
+          }
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -3695,11 +3705,15 @@ async function handleCommand(message) {
     }
     await sendWhatsApp(ownerFinalText);
   } catch (error) {
-    log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
+    log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack, errorType: error.constructor?.name, status: error.status });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
-    const errorMsg = isRateLimit
+    const isTimeout = error.message?.includes('timed out');
+    const isOverloaded = error.status === 529;
+    const errorMsg = isRateLimit || isOverloaded
       ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
-      : 'Something went wrong while processing your request. Please try again.';
+      : isTimeout
+        ? 'That request took too long to process. Try asking for something more specific or breaking it into smaller steps.'
+        : 'Something went wrong while processing your request. Please try again.';
     addToHistory(ownerChatId, 'assistant', errorMsg);
     await sendWhatsApp(errorMsg);
   }
@@ -4001,8 +4015,10 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
           const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          // Deliver generated media (images/videos) inline
-          await deliverMediaInline(tool.name, result, 'whatsapp', from);
+          // Deliver media separately — must not affect tool result for Claude
+          try { await deliverMediaInline(tool.name, result, 'whatsapp', from); } catch (mediaErr) {
+            log.warn('Media delivery failed', { tool: tool.name, error: mediaErr.message });
+          }
         } catch (e) {
           log.error('Client tool failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
@@ -4051,7 +4067,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       }
     }
   } catch (error) {
-    log.error('Client message handling failed', { from, error: error.message, stack: error.stack });
+    log.error('Client message handling failed', { from, error: error.message, stack: error.stack, errorType: error.constructor?.name, status: error.status });
     try {
       await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
     } catch (e) { /* best effort */ }
