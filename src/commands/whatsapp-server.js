@@ -267,53 +267,133 @@ async function executeCSAToolWithTimeout(toolName, toolInput) {
 async function safeSendMedia(sendFn, url, caption, toolName) {
   try {
     await sendFn(url, caption);
+    return true;
   } catch (e) {
-    log.warn('Failed to deliver media item', { error: e.message, toolName, url: url?.slice(0, 100) });
+    log.warn('safeSendMedia failed', { error: e.message, toolName, url: url?.slice(0, 100) });
+    return false;
   }
 }
 
 /**
- * Send a screenshot or base64 image via WhatsApp.
- * Handles both base64 data URLs and regular URLs, using native buffer upload when needed.
+ * Send an image to the chat. Handles URLs, base64 data URLs, and buffers.
+ * ALWAYS provides user-visible feedback: either the image or a text fallback with the URL.
  */
-async function sendScreenshotImage(imageData, caption, channel, chatId) {
-  if (!imageData) return;
+async function sendImageToChat(imageSource, caption, channel, chatId, opts = {}) {
+  const sendText = (msg) =>
+    channel === 'telegram' ? sendTelegram(msg, chatId) : sendWhatsApp(msg, chatId);
 
-  if (channel === 'telegram') {
-    // Telegram can handle both URLs and base64
-    if (imageData.startsWith('data:image')) {
-      // Convert base64 to buffer for Telegram
-      const base64 = imageData.replace(/^data:image\/\w+;base64,/, '');
-      const buffer = Buffer.from(base64, 'base64');
-      // For Telegram, we need to use URL-based delivery — write buffer to a temp approach
-      // Fall back to just logging — Telegram can't easily receive raw buffers
-      log.warn('Base64 screenshot delivery not supported for Telegram', { captionPreview: caption?.slice(0, 50) });
-      return;
+  if (!imageSource) return false;
+
+  // Case 1: Buffer (already in memory)
+  if (Buffer.isBuffer(imageSource)) {
+    if (channel === 'whatsapp') {
+      try {
+        await sendWhatsAppImageNative(imageSource, opts.mimeType || 'image/png', null, caption, chatId);
+        log.info('Image sent via buffer', { caption: caption?.slice(0, 40), size: imageSource.length });
+        return true;
+      } catch (e) {
+        log.warn('Buffer image delivery failed', { error: e.message });
+      }
     }
-    await safeSendMedia((u, c) => sendTelegramPhoto(u, c, chatId), imageData, caption, 'screenshot');
-    return;
+    // Telegram doesn't support raw buffers easily — skip
+    return false;
   }
 
-  // WhatsApp
-  if (imageData.startsWith('data:image')) {
-    // Base64 data URL → decode to buffer → native upload
-    const mimeMatch = imageData.match(/^data:(image\/\w+);base64,/);
+  // Case 2: Base64 data URL → decode to buffer → native upload
+  if (typeof imageSource === 'string' && imageSource.startsWith('data:image')) {
+    const mimeMatch = imageSource.match(/^data:(image\/\w+);base64,/);
     const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
-    const base64 = imageData.replace(/^data:image\/\w+;base64,/, '');
+    const base64 = imageSource.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(base64, 'base64');
-    log.info('Sending base64 screenshot via native upload', { bufferSize: buffer.length, mimeType, caption: caption?.slice(0, 50) });
-    try {
-      await sendWhatsAppImageNative(buffer, mimeType, null, caption, chatId);
-    } catch (e) {
-      log.warn('Base64 screenshot native upload failed', { error: e.message });
+
+    if (buffer.length < 100) {
+      log.warn('Base64 screenshot too small, skipping', { size: buffer.length });
+      return false;
     }
-  } else if (imageData.startsWith('http')) {
-    // Regular URL
-    try {
-      await sendWhatsAppImage(imageData, caption, chatId);
-    } catch (e) {
-      log.warn('Screenshot URL delivery failed', { error: e.message, url: imageData?.slice(0, 100) });
+
+    if (channel === 'whatsapp') {
+      try {
+        await sendWhatsAppImageNative(buffer, mimeType, null, caption, chatId);
+        log.info('Base64 image sent via native upload', { size: buffer.length, caption: caption?.slice(0, 40) });
+        return true;
+      } catch (e) {
+        log.warn('Base64 native upload failed', { error: e.message });
+      }
     }
+    return false;
+  }
+
+  // Case 3: Regular URL
+  if (typeof imageSource === 'string' && imageSource.startsWith('http')) {
+    if (channel === 'whatsapp') {
+      try {
+        await sendWhatsAppImage(imageSource, caption, chatId);
+        log.info('Image sent via URL', { url: imageSource.slice(0, 80), caption: caption?.slice(0, 40) });
+        return true;
+      } catch (e) {
+        log.warn('URL image delivery failed', { error: e.message, url: imageSource.slice(0, 80) });
+      }
+    } else {
+      try {
+        await sendTelegramPhoto(imageSource, caption, chatId);
+        return true;
+      } catch (e) {
+        log.warn('Telegram image delivery failed', { error: e.message });
+      }
+    }
+
+    // Image URL failed — send as clickable link text so user can at least view it
+    if (opts.sendUrlFallback !== false) {
+      try {
+        await sendText(`${caption || 'Image'}: ${imageSource}`);
+      } catch (_) { /* best effort */ }
+    }
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Try to extract actual image URLs from a Meta Ad snapshot HTML page.
+ * The ad_snapshot_url is an HTML page — download it and look for embedded image URLs.
+ * Facebook CDN images (scontent.*.fbcdn.net) are publicly accessible.
+ */
+async function extractMetaAdImages(snapshotUrl) {
+  try {
+    const response = await axios.get(snapshotUrl, {
+      timeout: 8000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      maxRedirects: 3,
+    });
+    const html = typeof response.data === 'string' ? response.data : '';
+    if (!html) return [];
+
+    // Find Facebook CDN image URLs in the HTML
+    const imageUrls = [];
+    const cdnRegex = /https?:\/\/scontent[^"'\s<>]+\.(?:jpg|jpeg|png|webp)[^"'\s<>]*/gi;
+    let match;
+    while ((match = cdnRegex.exec(html)) !== null) {
+      const url = match[0].replace(/&amp;/g, '&');
+      if (!imageUrls.includes(url)) imageUrls.push(url);
+    }
+
+    // Also try generic image URLs in the page
+    if (imageUrls.length === 0) {
+      const imgRegex = /https?:\/\/[^"'\s<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s<>]*)?/gi;
+      while ((match = imgRegex.exec(html)) !== null) {
+        const url = match[0].replace(/&amp;/g, '&');
+        // Skip tiny images, tracking pixels, icons
+        if (url.includes('pixel') || url.includes('tr?') || url.includes('1x1') || url.includes('icon')) continue;
+        if (!imageUrls.includes(url)) imageUrls.push(url);
+      }
+    }
+
+    log.info('Extracted images from Meta ad snapshot', { snapshotUrl: snapshotUrl.slice(0, 60), found: imageUrls.length });
+    return imageUrls.slice(0, 3); // Max 3 images per ad
+  } catch (e) {
+    log.warn('Failed to extract images from Meta ad snapshot', { error: e.message });
+    return [];
   }
 }
 
@@ -339,18 +419,18 @@ async function captureScreenshot(url) {
 
 // Helper: deliver generated media (images/videos) inline after tool execution
 // For WhatsApp + generated images: uses direct buffer upload (native photo delivery).
-// For Telegram and other media: uses URL-based delivery.
+// For other media: tries URL-based, then Firecrawl screenshot, then text fallback.
 async function deliverMediaInline(toolName, result, channel, chatId) {
-  const sendImage = (url, caption) =>
-    channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
+  const sendText = (msg) =>
+    channel === 'telegram' ? sendTelegram(msg, chatId) : sendWhatsApp(msg, chatId);
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  // Generated ad images — use native buffer upload for WhatsApp
+  // --- Generated ad images (DALL-E / Flux / Imagen) ---
   if (toolName === 'generate_ad_images' && result.images) {
     const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
-    log.info('Delivering ad images inline', {
+    log.info('deliverMediaInline: generate_ad_images', {
       total: result.images.length,
       valid: validImages.length,
       hasBuffers,
@@ -362,129 +442,113 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       const img = result.images[i];
       if ((!img.url && !img.deliveryUrl) || img.error) continue;
       const caption = img.label || img.format || 'Ad image';
-      // Use the original provider URL for delivery — Drive URLs are blocked by WhatsApp
       const deliveryUrl = img.deliveryUrl || img.url;
 
-      if (channel === 'whatsapp') {
-        let sent = false;
+      // Try 1: In-memory buffer (from Google Drive download)
+      if (result._imageBuffers?.[i]?.buffer) {
+        const sent = await sendImageToChat(
+          result._imageBuffers[i].buffer, caption, channel, chatId,
+          { mimeType: result._imageBuffers[i].mimeType, sendUrlFallback: false }
+        );
+        if (sent) { deliveredCount++; continue; }
+      }
 
-        // Try 1: Native buffer upload (fastest, most reliable when buffer available)
-        if (result._imageBuffers?.[i]?.buffer) {
-          try {
-            log.info('Delivering image via native buffer upload', { format: img.format, bufferSize: result._imageBuffers[i].buffer.length });
-            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, deliveryUrl, caption, chatId);
-            sent = true;
-            deliveredCount++;
-            log.info('Image delivered via native buffer', { format: img.format });
-          } catch (e) {
-            log.warn('Native image delivery failed at deliverMediaInline', { error: e.message, format: img.format });
-          }
-        } else {
-          log.warn('No image buffer available for native upload', { format: img.format, hasBuffer: !!result._imageBuffers?.[i] });
-        }
+      // Try 2: Provider URL (DALL-E CDN — works if fresh)
+      const sent = await sendImageToChat(deliveryUrl, caption, channel, chatId, { sendUrlFallback: false });
+      if (sent) { deliveredCount++; continue; }
 
-        // Try 2: URL-based fallback using original provider URL (NOT Drive URL)
-        if (!sent) {
-          log.info('Falling back to URL-based image delivery', { format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80), isDriveUrl: deliveryUrl?.includes('drive.google.com') });
-          try {
-            await sendWhatsAppImage(deliveryUrl, caption, chatId);
-            sent = true;
-            deliveredCount++;
-            log.info('Image delivered via URL fallback', { format: img.format });
-          } catch (e) {
-            log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
-          }
-        }
-      } else {
-        // Telegram / other channels
-        await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
-        deliveredCount++;
+      // Try 3: Drive URL as text (permanent link)
+      if (img.driveUrl) {
+        try { await sendText(`${caption}: ${img.driveUrl}`); deliveredCount++; } catch (_) {}
       }
     }
 
-    // If we had valid images but couldn't deliver any, notify the user
     if (deliveredCount === 0 && validImages.length > 0) {
-      log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
-      const driveUrl = validImages.find(i => i.driveUrl || i.driveId)?.driveUrl;
-      const fallbackMsg = driveUrl
-        ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
-        : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
+      log.error('Failed to deliver ANY generated images', { validCount: validImages.length, channel });
+      const driveUrl = validImages.find(i => i.driveUrl)?.driveUrl;
       try {
-        if (channel === 'whatsapp') await sendWhatsApp(fallbackMsg, chatId);
-        else await sendTelegram(fallbackMsg, chatId);
-      } catch (_) { /* best effort */ }
+        await sendText(driveUrl
+          ? `I generated your images but had trouble sending them here. View them: ${driveUrl}`
+          : 'I generated your images but had trouble delivering them. They should be in your Google Drive creatives folder.');
+      } catch (_) {}
     }
   }
-  // Generated ad video (Sora 2)
+
+  // --- Generated ad video (Sora 2) ---
   if (toolName === 'generate_ad_video' && result.videoUrl) {
     await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
   }
-  // Creative package — use native buffer upload for WhatsApp
+
+  // --- Creative package images ---
   if (toolName === 'generate_creative_package' && result.imageUrls) {
+    log.info('deliverMediaInline: generate_creative_package', { imageCount: result.imageUrls.length, channel });
     for (let i = 0; i < result.imageUrls.length; i++) {
       const url = result.imageUrls[i];
       if (!url) continue;
-      const caption = 'Creative package image';
-      if (channel === 'whatsapp') {
-        let sent = false;
-        if (result._imageBuffers?.[i]?.buffer) {
-          try {
-            log.info('Delivering creative package image via native buffer', { index: i, bufferSize: result._imageBuffers[i].buffer.length });
-            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
-            sent = true;
-            log.info('Creative package image delivered via native buffer', { index: i });
-          } catch (e) {
-            log.warn('Native creative package image delivery failed', { error: e.message, index: i });
-          }
-        } else {
-          log.warn('No buffer available for creative package image', { index: i });
-        }
-        if (!sent) {
-          log.info('Falling back to URL-based creative package delivery', { index: i, url: url?.slice(0, 80), isDriveUrl: url?.includes('drive.google.com') });
-          await safeSendMedia(sendImage, url, caption, toolName);
-        }
-      } else {
-        await safeSendMedia(sendImage, url, caption, toolName);
+      const caption = `Creative ${i + 1}`;
+
+      // Try buffer first, then URL
+      if (result._imageBuffers?.[i]?.buffer) {
+        const sent = await sendImageToChat(
+          result._imageBuffers[i].buffer, caption, channel, chatId,
+          { mimeType: result._imageBuffers[i].mimeType, sendUrlFallback: false }
+        );
+        if (sent) continue;
       }
+      await sendImageToChat(url, caption, channel, chatId);
     }
   }
-  // Ad library search results — screenshot the snapshot pages (ad_snapshot_url is an HTML page, NOT an image)
+
+  // --- Meta Ad Library: extract images from snapshot pages ---
   if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
     const adsWithSnapshots = result.ads.filter(ad => ad.snapshotUrl);
-    log.info('Meta Ad Library: delivering ad snapshots', { totalAds: result.ads.length, withSnapshots: adsWithSnapshots.length, channel });
+    log.info('deliverMediaInline: search_ad_library', { totalAds: result.ads.length, withSnapshots: adsWithSnapshots.length });
 
-    // Screenshot the first 5 snapshot pages — each is an HTML page that renders the ad creative
-    const MAX_AD_SCREENSHOTS = 5;
-    for (const ad of adsWithSnapshots.slice(0, MAX_AD_SCREENSHOTS)) {
-      const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
-      try {
-        const screenshot = await captureScreenshot(ad.snapshotUrl);
-        if (screenshot) {
-          log.info('Ad snapshot captured, delivering', { pageName: ad.pageName, screenshotType: screenshot.startsWith('data:') ? 'base64' : 'url' });
-          await sendScreenshotImage(screenshot, caption, channel, chatId);
-        } else {
-          log.warn('No screenshot returned for ad', { pageName: ad.pageName, snapshotUrl: ad.snapshotUrl?.slice(0, 80) });
+    const MAX_ADS = 5;
+    let deliveredAny = false;
+    for (const ad of adsWithSnapshots.slice(0, MAX_ADS)) {
+      const caption = ad.pageName
+        ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}`
+        : (ad.headline || 'Ad preview');
+
+      // Method 1: Try to extract actual image URLs from the snapshot HTML (fast, no Firecrawl)
+      const extractedImages = await extractMetaAdImages(ad.snapshotUrl);
+      if (extractedImages.length > 0) {
+        for (const imgUrl of extractedImages) {
+          const sent = await sendImageToChat(imgUrl, caption, channel, chatId, { sendUrlFallback: false });
+          if (sent) { deliveredAny = true; break; } // One image per ad is enough
         }
-      } catch (e) {
-        log.warn('Failed to screenshot ad snapshot page', { error: e.message, pageName: ad.pageName });
+        if (deliveredAny) continue;
       }
+
+      // Method 2: Firecrawl screenshot (slower, may be blocked by Facebook)
+      const screenshot = await captureScreenshot(ad.snapshotUrl);
+      if (screenshot) {
+        const sent = await sendImageToChat(screenshot, caption, channel, chatId, { sendUrlFallback: false });
+        if (sent) { deliveredAny = true; continue; }
+      }
+
+      // Method 3: Send snapshot URL as text (so user can at least click to view)
+      try { await sendText(`📋 ${caption}\n${ad.snapshotUrl}`); deliveredAny = true; } catch (_) {}
+    }
+
+    if (!deliveredAny && adsWithSnapshots.length > 0) {
+      log.warn('Could not deliver any Meta Ad Library images');
     }
   }
-  // Google Ads Transparency — send screenshots and extracted ad images
+
+  // --- Google Ads Transparency: screenshots + extracted images ---
   if (toolName === 'search_google_ads_transparency' && result.creatives) {
-    log.info('Google Transparency: delivering creatives', { count: result.creatives.length, channel });
+    log.info('deliverMediaInline: search_google_ads_transparency', { count: result.creatives.length });
 
     for (const creative of result.creatives) {
       if (!creative.previewUrl) continue;
       const caption = creative.label || `Google Ad — ${creative.format || 'preview'}`;
 
-      // Handle both base64 screenshots and regular URLs
-      if (creative.previewUrl.startsWith('data:image') || creative.isScreenshot) {
-        await sendScreenshotImage(creative.previewUrl, caption, channel, chatId);
-      } else if (creative.format === 'VIDEO') {
+      if (creative.format === 'VIDEO') {
         await safeSendMedia(sendVideo, creative.previewUrl, caption, toolName);
       } else {
-        await safeSendMedia(sendImage, creative.previewUrl, caption, toolName);
+        await sendImageToChat(creative.previewUrl, caption, channel, chatId);
       }
     }
   }
