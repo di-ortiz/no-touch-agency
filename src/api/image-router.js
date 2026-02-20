@@ -207,7 +207,7 @@ export async function generateAdImages(opts = {}) {
   };
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
-  const PER_FORMAT_TIMEOUT_MS = 120_000; // 120s max per format (provider1 timeout + provider2 attempt)
+  const PER_FORMAT_TIMEOUT_MS = 180_000; // 180s max per format (allows 3 sequential provider fallbacks: 45s + 60s + 60s = 165s)
 
   log.info(`Generating ${formats.length} format(s) in parallel`, { platform: opts.platform, formats });
 

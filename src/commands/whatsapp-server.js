@@ -224,16 +224,17 @@ function trimMessagesToFit(messages) {
 const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation (includes multi-format + provider fallback)
 const MEDIUM_TOOL_TIMEOUT_MS = 90 * 1000; // 90s for scraping tools that render JS pages
 const DEFAULT_TOOL_TIMEOUT_MS = 45 * 1000; // 45s for regular tools (API calls, searches)
-const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'design_landing_page', 'create_presentation', 'generate_weekly_report']);
 const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit']);
 // Overall loop timeout: if the entire tool-use loop takes longer than this, bail out
-const LOOP_TIMEOUT_MS = 3 * 60 * 1000; // 3 min total for all tool rounds
+const LOOP_TIMEOUT_MS = 8 * 60 * 1000; // 8 min total for all tool rounds (image gen can take 2-3 min + Drive uploads + follow-up rounds)
 
 // Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
 const TOOL_PROGRESS_MESSAGES = {
   generate_ad_images: 'Generating your ad images... This might take a minute.',
   generate_ad_video: 'Creating your video... This will take a few minutes.',
   generate_creative_package: 'Building your creative package... This will take a few minutes.',
+  design_landing_page: 'Designing your landing page mockup... This might take a minute.',
   browse_website: 'Browsing the website...',
   search_ad_library: 'Searching the ad library...',
   get_page_ads: 'Looking up ads for this page...',
@@ -426,8 +427,8 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  // --- Generated ad images (DALL-E / Flux / Imagen) ---
-  if (toolName === 'generate_ad_images' && result.images) {
+  // --- Generated ad images (DALL-E / Flux / Imagen) + Landing page mockups ---
+  if ((toolName === 'generate_ad_images' || toolName === 'design_landing_page') && result.images) {
     const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
     log.info('deliverMediaInline: generate_ad_images', {
@@ -1076,6 +1077,11 @@ const CSA_TOOLS = [
     name: 'generate_creative_package',
     description: 'Generate a FULL creative package: text ads + ad images + optional video, all assembled into a Google Slides presentation deck for client approval. IMPORTANT: Gather a complete creative brief before calling this tool — the more context you provide (audience, offer, style, mood, brand colors, competitor insights, website insights), the better the output.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Primary platform' }, campaignName: { type: 'string', description: 'Campaign name for the deck' }, objective: { type: 'string', description: 'Campaign objective (awareness, leads, conversions, traffic)' }, audience: { type: 'string', description: 'Detailed target audience (demographics, interests, pain points)' }, offer: { type: 'string', description: 'Offer/promotion/value proposition' }, concept: { type: 'string', description: 'Detailed creative concept — visual direction, mood, style, what the ads should convey' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle, minimalist, editorial, cinematic, bold/vibrant' }, mood: { type: 'string', description: 'Emotion to evoke: urgency, trust, excitement, aspiration, exclusivity' }, brandColors: { type: 'string', description: 'Brand color palette' }, references: { type: 'string', description: 'Visual references or inspiration' }, websiteInsights: { type: 'string', description: 'Key insights from browsing client website' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research' }, textVariations: { type: 'number', description: 'Number of text ad variations (default: 5)' }, generateImages: { type: 'boolean', description: 'Generate images with DALL-E 3 (default: true)' }, generateVideo: { type: 'boolean', description: 'Generate video with Sora 2 (default: false)' } }, required: ['clientName', 'platform'] },
+  },
+  {
+    name: 'design_landing_page',
+    description: 'Generate a visual landing page design mockup as an image. Creates a professional, conversion-optimized landing page concept and generates a visual mockup using DALL-E. The mockup is sent as an image on WhatsApp so the client can review and iterate. Use this when clients ask for landing page designs, conversion pages, or sales pages.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, purpose: { type: 'string', description: 'Landing page purpose: lead generation, product sales, webinar signup, app download, service booking, etc.' }, headline: { type: 'string', description: 'Main headline or value proposition for the page' }, offer: { type: 'string', description: 'The offer, product, or service being promoted' }, audience: { type: 'string', description: 'Target audience description' }, style: { type: 'string', description: 'Visual style: modern/minimalist, bold/vibrant, corporate/professional, luxury/premium, playful/creative, dark-mode' }, brandColors: { type: 'string', description: 'Brand color palette (hex codes or color names)' }, sections: { type: 'string', description: 'Sections to include (comma-separated): hero, features, testimonials, pricing, FAQ, CTA, social-proof, about, gallery' }, cta: { type: 'string', description: 'Call-to-action text (e.g. "Start Free Trial", "Book a Demo")' }, references: { type: 'string', description: 'Reference URLs or style inspiration' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok', 'general'], description: 'Ad platform this landing page is for (affects layout recommendations)' }, variation: { type: 'string', description: 'For A/B testing: "A", "B", or describe what to change from previous version' } }, required: ['clientName', 'purpose'] },
   },
   // --- Web Browsing ---
   {
@@ -1760,38 +1766,38 @@ Return ONLY the JSON array, no other text.`;
       });
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
+      // Runs ALL uploads in parallel to avoid sequential 10s+ waits per image
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const mappedImages = [];
-      const _imageBuffers = []; // kept in-memory for deliverMediaInline, not serialized to JSON
-      for (const img of images) {
-        const mapped = {
-          format: img.format,
-          label: img.dimensions?.label || img.format,
-          url: img.url,           // original provider URL (temp but fetchable by WhatsApp)
-          deliveryUrl: img.url,   // always the raw provider URL for WhatsApp delivery
-          provider: img.provider,
-          error: img.error,
-        };
-        let imgBuffer = null;
-        if (img.url && !img.error) {
-          try {
-            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
-            if (driveResult) {
-              if (driveResult.webContentLink) {
-                // Drive URL for permanent reference — but NOT for WhatsApp delivery
-                // (WhatsApp can't fetch Drive URLs due to auth/redirect walls)
-                mapped.driveUrl = driveResult.webContentLink;
-                mapped.driveId = driveResult.id;
+      const uploadResults = await Promise.allSettled(
+        images.map(async (img) => {
+          const mapped = {
+            format: img.format,
+            label: img.dimensions?.label || img.format,
+            url: img.url,
+            deliveryUrl: img.url,
+            provider: img.provider,
+            error: img.error,
+          };
+          let imgBuffer = null;
+          if (img.url && !img.error) {
+            try {
+              const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+              if (driveResult) {
+                if (driveResult.webContentLink) {
+                  mapped.driveUrl = driveResult.webContentLink;
+                  mapped.driveId = driveResult.id;
+                }
+                imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
               }
-              imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+            } catch (e) {
+              log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
             }
-          } catch (e) {
-            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
           }
-        }
-        mappedImages.push(mapped);
-        _imageBuffers.push(imgBuffer);
-      }
+          return { mapped, imgBuffer };
+        })
+      );
+      const mappedImages = uploadResults.map(r => r.status === 'fulfilled' ? r.value.mapped : { format: 'unknown', error: r.reason?.message });
+      const _imageBuffers = uploadResults.map(r => r.status === 'fulfilled' ? r.value.imgBuffer : null);
 
       // Save companion Sheet to Drive
       let sheetUrl = null;
@@ -1878,31 +1884,28 @@ Return ONLY the JSON array, no other text.`;
       });
 
       // Persist generated images to Google Drive + keep buffers for WhatsApp direct upload
+      // Runs ALL uploads in parallel for speed
       const client = getClient(toolInput.clientName);
       const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const persistedImageUrls = [];   // original provider URLs for WhatsApp delivery
-      const _pkgImageBuffers = [];
-      for (const img of pkg.images) {
-        if (img.error || !img.url) continue;
-        const originalUrl = img.url;   // keep original for delivery
-        try {
-          const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
-          if (driveResult) {
-            if (driveResult.webContentLink) {
-              // Store Drive URL separately — don't replace original for delivery
+      const validPkgImages = pkg.images.filter(img => !img.error && img.url);
+      const pkgUploadResults = await Promise.allSettled(
+        validPkgImages.map(async (img) => {
+          const originalUrl = img.url;
+          try {
+            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
+            if (driveResult?.webContentLink) {
               img.driveUrl = driveResult.webContentLink;
               img.driveId = driveResult.id;
             }
-            _pkgImageBuffers.push({ buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType });
-          } else {
-            _pkgImageBuffers.push(null);
+            return { url: originalUrl, buffer: driveResult ? { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType } : null };
+          } catch (e) {
+            log.warn('Failed to persist creative package image to Drive', { error: e.message });
+            return { url: originalUrl, buffer: null };
           }
-        } catch (e) {
-          log.warn('Failed to persist creative package image to Drive', { error: e.message });
-          _pkgImageBuffers.push(null);
-        }
-        persistedImageUrls.push(originalUrl); // always use original provider URL
-      }
+        })
+      );
+      const persistedImageUrls = pkgUploadResults.map(r => r.status === 'fulfilled' ? r.value.url : null).filter(Boolean);
+      const _pkgImageBuffers = pkgUploadResults.map(r => r.status === 'fulfilled' ? r.value.buffer : null);
 
       // Save companion Sheet to Drive
       let sheetUrl = null;
@@ -1942,6 +1945,92 @@ Return ONLY the JSON array, no other text.`;
       };
       pkgResult._imageBuffers = _pkgImageBuffers;
       return pkgResult;
+    }
+    case 'design_landing_page': {
+      const providerStatus = imageRouter.getProviderStatus();
+      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
+      if (!anyConfigured) return { error: 'No image generation providers configured.' };
+      const client = getClient(toolInput.clientName);
+
+      // Build a detailed landing page design prompt
+      const sections = toolInput.sections || 'hero, features, testimonials, CTA';
+      const lpPrompt = await creativeEngine.generateImagePrompt({
+        clientName: toolInput.clientName,
+        platform: toolInput.platform || 'general',
+        product: toolInput.offer,
+        concept: `Full-page landing page design mockup for ${toolInput.purpose}. ` +
+          `${toolInput.headline ? `Headline: "${toolInput.headline}". ` : ''}` +
+          `${toolInput.cta ? `CTA button: "${toolInput.cta}". ` : ''}` +
+          `Sections: ${sections}. ` +
+          `Style: ${toolInput.style || 'modern and conversion-optimized'}. ` +
+          `${toolInput.variation ? `Variation ${toolInput.variation}. ` : ''}` +
+          'Show the COMPLETE page layout as a web design mockup — header, hero section with headline and CTA button, ' +
+          'content sections, and footer. Professional UI/UX design, realistic web page screenshot appearance.',
+        audience: toolInput.audience || client?.target_audience,
+        mood: toolInput.style || 'professional and trustworthy',
+        style: 'web design mockup, UI/UX screenshot, landing page layout',
+        brandColors: toolInput.brandColors || client?.brand_colors,
+        references: toolInput.references,
+      });
+
+      const images = await imageRouter.generateAdImages({
+        prompt: lpPrompt,
+        platform: 'general',
+        formats: ['general'],
+        quality: 'hd',
+        style: 'natural',
+        workflow: 'landing-page-design',
+        clientId: client?.id,
+      });
+
+      // Persist to Drive
+      const lpFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const lpImage = images.find(i => i.url && !i.error);
+      let driveUrl = null;
+      let imgBuffer = null;
+      if (lpImage?.url) {
+        try {
+          const driveResult = await googleDrive.uploadImageFromUrl(
+            lpImage.url,
+            `${toolInput.clientName || 'lp'}-landing-page-${toolInput.variation || 'v1'}-${Date.now()}.png`,
+            lpFolderId
+          );
+          if (driveResult) {
+            driveUrl = driveResult.webContentLink;
+            imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+          }
+        } catch (e) {
+          log.warn('Failed to persist landing page mockup to Drive', { error: e.message });
+        }
+      }
+
+      const lpResult = {
+        clientName: toolInput.clientName,
+        purpose: toolInput.purpose,
+        headline: toolInput.headline,
+        cta: toolInput.cta,
+        style: toolInput.style,
+        variation: toolInput.variation,
+        sections,
+        images: lpImage ? [{
+          format: 'landing_page',
+          label: `Landing page${toolInput.variation ? ' — ' + toolInput.variation : ''}`,
+          url: lpImage.url,
+          deliveryUrl: lpImage.url,
+          driveUrl,
+          provider: lpImage.provider,
+        }] : [],
+        totalGenerated: lpImage ? 1 : 0,
+        designPrompt: lpPrompt,
+        status: lpImage ? 'mockup_ready' : 'generation_failed',
+        message: lpImage
+          ? 'Landing page mockup generated! Review the design and tell me what to change — I can adjust colors, layout, copy, sections, or create A/B variations.'
+          : 'Landing page mockup generation failed. Let me try again with a different approach.',
+      };
+      if (imgBuffer) {
+        lpResult._imageBuffers = [imgBuffer];
+      }
+      return lpResult;
     }
     // --- Website Browsing ---
     case 'browse_website': {
@@ -3099,7 +3188,7 @@ async function handleTelegramCommand(message, chatId) {
       workflow: 'telegram-csa',
     });
 
-    // Handle tool use loop (max 10 rounds, 3 min total)
+    // Handle tool use loop (max 10 rounds, 8 min total)
     let rounds = 0;
     const loopStart = Date.now();
     const toolsSummary = [];
@@ -3547,7 +3636,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 10 rounds, 3 min total)
+    // Tool-use loop (max 10 rounds, 8 min total)
     let rounds = 0;
     const loopStart = Date.now();
     const toolsSummary = [];
@@ -3792,7 +3881,7 @@ async function handleCommand(message) {
       workflow: 'whatsapp-csa',
     });
 
-    // Handle tool use loop (max 10 rounds, 3 min total)
+    // Handle tool use loop (max 10 rounds, 8 min total)
     let rounds = 0;
     const loopStart = Date.now();
     const toolsSummary = []; // track what tools ran for history context
@@ -4138,7 +4227,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 10 rounds, 3 min total)
+    // Tool-use loop (max 10 rounds, 8 min total)
     let rounds = 0;
     const loopStart = Date.now();
     const toolsSummary = [];
