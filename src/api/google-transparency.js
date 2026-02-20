@@ -6,37 +6,108 @@ const log = logger.child({ platform: 'google-transparency' });
 const BASE_URL = 'https://adstransparency.google.com';
 
 /**
+ * Build the correct Google Ads Transparency Center URL.
+ *
+ * The Transparency Center uses these URL params:
+ *   - domain: advertiser domain (e.g. "v4company.com")
+ *   - region: 2-letter country code (e.g. "BR", "US") or omit for worldwide
+ *
+ * @param {string} query - Domain or advertiser name
+ * @param {string} region - Region code (e.g. "BR", "US", "anywhere")
+ * @returns {string} The transparency center URL
+ */
+function buildTransparencyUrl(query, region) {
+  const params = new URLSearchParams();
+
+  // Normalize region — "anywhere" or empty means no filter
+  const regionCode = (region && region.toLowerCase() !== 'anywhere') ? region.toUpperCase() : '';
+  if (regionCode) params.set('region', regionCode);
+
+  // If query looks like a domain, use domain= param; otherwise use it as-is
+  const isDomain = /^[a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/.test(query.trim());
+  if (isDomain) {
+    params.set('domain', query.trim().toLowerCase());
+  } else {
+    // Try to extract domain if it's embedded in the query (e.g. "V4 Company v4company.com")
+    const domainMatch = query.match(/([a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,})/);
+    if (domainMatch) {
+      params.set('domain', domainMatch[1].toLowerCase());
+    } else {
+      // Use as text query — the transparency center search box
+      params.set('q', query.trim());
+    }
+  }
+
+  return `${BASE_URL}/?${params.toString()}`;
+}
+
+/**
  * Search the Google Ads Transparency Center for an advertiser.
  *
- * The Transparency Center has no public REST API — it's a JS-heavy SPA
- * powered by internal protobuf/gRPC calls. We use Firecrawl to:
- *   1. Web-search for the advertiser's page on the Transparency Center
- *   2. Scrape the found page to extract ad data from rendered content
- *
- * Always returns a direct URL so the user can check manually.
+ * Strategy:
+ *   1. Build the correct transparency URL with domain= and region= params
+ *   2. Try to scrape that URL directly with Firecrawl (renders JS)
+ *   3. Fall back to Firecrawl web search if direct scrape yields nothing
+ *   4. Always return the correct URL so the user can check manually
  */
 export async function searchAdvertiser(opts = {}) {
   if (!opts.query) throw new Error('Search query is required');
 
   const query = opts.query;
-  const searchUrl = `${BASE_URL}/advertiser?q=${encodeURIComponent(query)}`;
+  const region = opts.region || '';
+  const transparencyUrl = buildTransparencyUrl(query, region);
 
   if (!firecrawl.isConfigured()) {
     log.info('Firecrawl not configured, returning direct URL', { query });
     return {
       advertisers: [],
       query,
-      transparencyUrl: searchUrl,
+      transparencyUrl,
       source: 'google_ads_transparency_center',
       dataRetrieved: false,
-      message: `Cannot access Google Ads Transparency Center programmatically. View directly: ${searchUrl}`,
+      message: `Cannot access Google Ads Transparency Center programmatically. View directly: ${transparencyUrl}`,
     };
   }
 
+  // --- Method 1: Direct scrape of the transparency URL ---
   try {
-    log.info('Searching for advertiser on Google Ads Transparency Center', { query });
+    log.info('Direct scraping Google Ads Transparency Center', { url: transparencyUrl, query });
 
-    // Use Firecrawl web search to find the advertiser's transparency page
+    const result = await firecrawl.scrape(transparencyUrl, {
+      formats: ['markdown'],
+      waitFor: 5000,
+      timeout: 15000,
+      onlyMainContent: false,
+    });
+
+    const md = result.markdown || '';
+
+    if (md && md.length > 100) {
+      const parsed = parseTransparencyPage(md);
+
+      // If we found meaningful content, return it
+      if (parsed.totalAds > 0 || parsed.advertiserName || parsed.creatives.length > 0 || md.length > 500) {
+        return {
+          advertisers: parsed.advertiserName ? [{ name: parsed.advertiserName, url: transparencyUrl }] : [],
+          query,
+          transparencyUrl,
+          source: 'google_ads_transparency_center',
+          dataRetrieved: true,
+          pageContent: md.slice(0, 6000),
+          parsedData: parsed,
+        };
+      }
+    }
+
+    log.info('Direct scrape returned minimal content, trying web search', { query, mdLength: md.length });
+  } catch (e) {
+    log.warn('Direct scrape failed, trying web search fallback', { error: e.message, query });
+  }
+
+  // --- Method 2: Firecrawl web search fallback ---
+  try {
+    log.info('Searching web for advertiser transparency page', { query });
+
     const searchResults = await firecrawl.search(
       `"${query}" site:adstransparency.google.com`,
       { limit: 5 }
@@ -44,7 +115,7 @@ export async function searchAdvertiser(opts = {}) {
 
     const results = searchResults.results || [];
 
-    // Find a direct advertiser page (URL contains /advertiser/)
+    // Find a direct advertiser page
     const advertiserPage = results.find(r =>
       r.url?.includes('adstransparency.google.com/advertiser/')
     );
@@ -65,7 +136,7 @@ export async function searchAdvertiser(opts = {}) {
       };
     }
 
-    // No direct advertiser page — return whatever search found
+    // Return whatever search found
     const relatedResults = results.slice(0, 3).map(r => ({
       title: r.title || '',
       url: r.url || '',
@@ -75,22 +146,22 @@ export async function searchAdvertiser(opts = {}) {
     return {
       advertisers: [],
       query,
-      transparencyUrl: searchUrl,
+      transparencyUrl,
       relatedResults,
       source: 'google_ads_transparency_center',
       dataRetrieved: false,
-      message: `No direct advertiser page found for "${query}". Search manually: ${searchUrl}`,
+      message: `No advertiser page found for "${query}". Search manually: ${transparencyUrl}`,
     };
   } catch (e) {
-    log.warn('Google Transparency search failed', { error: e.message, query });
+    log.warn('Google Transparency web search also failed', { error: e.message, query });
     return {
       advertisers: [],
       query,
-      transparencyUrl: searchUrl,
+      transparencyUrl,
       source: 'google_ads_transparency_center',
       dataRetrieved: false,
       error: e.message,
-      message: `Could not search Google Ads Transparency Center. View directly: ${searchUrl}`,
+      message: `Could not search Google Ads Transparency Center. View directly: ${transparencyUrl}`,
     };
   }
 }
@@ -117,9 +188,9 @@ export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
 
     const result = await firecrawl.scrape(advertiserUrl, {
       formats: ['markdown'],
-      waitFor: 5000, // Wait for JS to render ad creatives
+      waitFor: 5000,
       timeout: 15000,
-      onlyMainContent: false, // Need full page including ad listings
+      onlyMainContent: false,
     });
 
     const md = result.markdown || '';
@@ -143,7 +214,7 @@ export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
       dateRange: parsed.dateRange,
       advertiserName: parsed.advertiserName,
       transparencyUrl: advertiserUrl,
-      pageContent: md.slice(0, 6000), // Raw content for Claude to interpret
+      pageContent: md.slice(0, 6000),
       source: 'google_ads_transparency_center',
       dataRetrieved: true,
     };
@@ -168,7 +239,8 @@ export async function searchAndGetCreatives(opts = {}) {
   if (!opts.query) throw new Error('Search query is required');
 
   const query = opts.query;
-  const fallbackUrl = `${BASE_URL}/advertiser?q=${encodeURIComponent(query)}`;
+  const region = opts.region || '';
+  const fallbackUrl = buildTransparencyUrl(query, region);
 
   // Step 1: Find the advertiser
   let searchResult;
@@ -183,7 +255,26 @@ export async function searchAndGetCreatives(opts = {}) {
       creatives: [],
       transparencyUrl: fallbackUrl,
       dataRetrieved: false,
-      message: `Google Ads Transparency Center search failed. Try searching Meta Ad Library instead, or visit directly: ${fallbackUrl}`,
+      message: `Google Ads Transparency Center search failed. Try the Meta Ad Library instead, or visit directly: ${fallbackUrl}`,
+    };
+  }
+
+  // If direct scrape already returned parsed data with creatives, use it
+  if (searchResult.parsedData) {
+    const pd = searchResult.parsedData;
+    return {
+      query,
+      advertiserFound: true,
+      advertiser: { name: pd.advertiserName || query, url: searchResult.transparencyUrl },
+      advertisers: searchResult.advertisers,
+      creatives: pd.creatives.slice(0, opts.limit || 10),
+      totalCreatives: pd.totalAds,
+      adFormats: pd.adFormats,
+      dateRange: pd.dateRange,
+      transparencyUrl: searchResult.transparencyUrl,
+      pageContent: searchResult.pageContent,
+      source: 'google_ads_transparency_center',
+      dataRetrieved: true,
     };
   }
 
@@ -198,13 +289,13 @@ export async function searchAndGetCreatives(opts = {}) {
       transparencyUrl: searchResult.transparencyUrl || fallbackUrl,
       relatedResults: searchResult.relatedResults || [],
       dataRetrieved: false,
-      message: searchResult.message || `No advertiser found for "${query}" on Google Ads Transparency Center. This does NOT mean they aren't running ads — the search may have failed to find their page. Check manually: ${fallbackUrl}`,
+      message: searchResult.message || `No advertiser found for "${query}" on Google Ads Transparency Center. This does NOT mean they aren't running ads — the search may have failed. Check manually: ${fallbackUrl}`,
     };
   }
 
   const topAdvertiser = advertisers[0];
 
-  // Step 2: Scrape the advertiser's page for creatives
+  // Step 2: Scrape the advertiser's page for creatives (only if we found via web search, not direct scrape)
   if (topAdvertiser.url) {
     try {
       const creativesResult = await getAdvertiserCreatives(topAdvertiser.url, opts);
@@ -237,7 +328,6 @@ export async function searchAndGetCreatives(opts = {}) {
     }
   }
 
-  // Advertiser found but no URL to scrape
   return {
     query,
     advertiserFound: true,
@@ -296,7 +386,6 @@ function parseTransparencyPage(markdown) {
   }
 
   // Try to extract individual creative entries from repeated patterns
-  // The transparency center shows creatives as cards with format + date info
   const creativeBlocks = markdown.split(/(?:^|\n)(?=(?:Text|Image|Video)\s+ad)/i);
   for (const block of creativeBlocks) {
     if (block.length < 10) continue;
@@ -310,14 +399,10 @@ function parseTransparencyPage(markdown) {
       previewUrl: null,
     };
 
-    // Extract dates from block
-    const dates = block.match(
-      /(\w+\s+\d{1,2},?\s+\d{4})/g
-    );
+    const dates = block.match(/(\w+\s+\d{1,2},?\s+\d{4})/g);
     if (dates && dates.length >= 1) creative.firstShown = dates[0];
     if (dates && dates.length >= 2) creative.lastShown = dates[1];
 
-    // Extract any image URLs from block
     const imgMatch = block.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/) ||
       block.match(/(https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|gif|webp))/i);
     if (imgMatch) creative.previewUrl = imgMatch[1];

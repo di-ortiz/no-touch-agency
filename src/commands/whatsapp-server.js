@@ -1101,8 +1101,8 @@ const CSA_TOOLS = [
   // --- Google Ads Transparency Center ---
   {
     name: 'search_google_ads_transparency',
-    description: 'Search the Google Ads Transparency Center for an advertiser via web scraping. Shows what Google Ads a company is running. IMPORTANT: If no results are found, it does NOT mean the advertiser has no ads — the scraping may have failed. Always share the transparencyUrl with the user so they can check directly. Try searching by both company name and domain.',
-    input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Advertiser name or domain to search' }, region: { type: 'string', description: 'Region filter (default: "anywhere")' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['query'] },
+    description: 'Search the Google Ads Transparency Center for an advertiser\'s Google Ads. IMPORTANT: Use the advertiser\'s DOMAIN (e.g. "v4company.com") as the query for best results. Also pass the region as a 2-letter country code (e.g. "BR" for Brazil, "US" for United States) based on the client\'s market. If no results are found, it does NOT mean they have no ads — always share the transparencyUrl link with the user so they can check directly.',
+    input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Advertiser DOMAIN preferred (e.g. "v4company.com") or company name' }, region: { type: 'string', description: '2-letter country code for the market, e.g. "BR", "US", "MX", "PT". Use the client\'s country. Default: worldwide.' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['query'] },
   },
   // --- Google Keyword Planner (via Google Ads API) ---
   {
