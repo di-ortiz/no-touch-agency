@@ -328,9 +328,17 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
   // Always download the image (needed for both Drive upload and WhatsApp direct send)
   let imageBuffer, mimeType;
   try {
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    imageBuffer = Buffer.from(response.data);
-    mimeType = response.headers['content-type'] || 'image/png';
+    // Handle base64 data URIs (e.g. from Gemini Imagen) — no HTTP fetch needed
+    if (imageUrl?.startsWith('data:')) {
+      const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) throw new Error('Invalid data URI format');
+      mimeType = match[1];
+      imageBuffer = Buffer.from(match[2], 'base64');
+    } else {
+      const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      imageBuffer = Buffer.from(response.data);
+      mimeType = response.headers['content-type'] || 'image/png';
+    }
   } catch (e) {
     log.warn('Failed to download image from URL', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
     return null;

@@ -118,20 +118,18 @@ export async function generateImage(opts = {}) {
     return callFalModel(opts.model, opts.prompt, imageSize, format, opts);
   }
 
-  // Race Flux Schnell (fast) vs Flux Pro (quality) — return whichever wins
+  // Race Flux Schnell (fast, ~5s) vs Flux Pro (quality, ~15-30s)
+  // Promise.any returns the FIRST to resolve — true racing
   const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1'];
-  const raceResults = await Promise.allSettled(
-    models.map(model => callFalModel(model, opts.prompt, imageSize, format, opts))
-  );
-
-  // Return the first successful result (prefer Schnell since it resolves first)
-  for (const r of raceResults) {
-    if (r.status === 'fulfilled') return r.value;
+  try {
+    return await Promise.any(
+      models.map(model => callFalModel(model, opts.prompt, imageSize, format, opts))
+    );
+  } catch (aggError) {
+    // AggregateError — both models failed
+    const firstError = aggError.errors?.[0];
+    throw firstError || new Error('All fal.ai models failed');
   }
-
-  // Both failed — throw last error for provider fallback
-  const lastError = raceResults.find(r => r.status === 'rejected')?.reason;
-  throw lastError || new Error('All fal.ai models failed');
 }
 
 /**

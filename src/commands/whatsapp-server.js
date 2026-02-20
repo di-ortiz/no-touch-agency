@@ -204,6 +204,9 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
 
   // Helper: deliver a single image using buffer when available, URL as fallback
   async function deliverImageWithBuffer(bufferObj, deliveryUrl, caption) {
+    // Check if URL is an HTTP URL (not a data URI) — data URIs can't be fetched by WhatsApp/Telegram
+    const hasHttpUrl = deliveryUrl && !deliveryUrl.startsWith('data:');
+
     if (channel === 'whatsapp') {
       let sent = false;
       if (bufferObj?.buffer) {
@@ -214,10 +217,15 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
           log.warn('Native WhatsApp image delivery failed', { error: e.message });
         }
       }
-      if (!sent) {
-        await sendWhatsAppImage(deliveryUrl, caption, chatId);
-        sent = true;
+      if (!sent && hasHttpUrl) {
+        try {
+          await sendWhatsAppImage(deliveryUrl, caption, chatId);
+          sent = true;
+        } catch (e) {
+          log.warn('WhatsApp URL image delivery also failed', { error: e.message });
+        }
       }
+      if (!sent) throw new Error('No delivery method succeeded');
       return sent;
     } else {
       // Telegram: use buffer upload when available
@@ -229,18 +237,27 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
           log.warn('Telegram buffer photo delivery failed, trying URL', { error: e.message });
         }
       }
-      await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
-      return true;
+      if (hasHttpUrl) {
+        await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
+        return true;
+      }
+      throw new Error('No delivery method available');
     }
   }
 
   // Generated ad images — use native buffer upload for both WhatsApp and Telegram
   if (toolName === 'generate_ad_images' && result.images) {
-    const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
+    // An image is deliverable if it has a buffer OR a URL (not just URL — buffer-only is fine too)
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
+    const deliverableImages = result.images.filter((img, idx) => {
+      if (img.error) return false;
+      if (result._imageBuffers?.[idx]?.buffer) return true; // has buffer — can deliver even without URL
+      if (img.url || img.deliveryUrl) return true; // has URL — can try to download
+      return false;
+    });
     log.info('Delivering ad images inline', {
       total: result.images.length,
-      valid: validImages.length,
+      deliverable: deliverableImages.length,
       hasBuffers,
       channel,
     });
@@ -248,24 +265,37 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
     let deliveredCount = 0;
     for (let i = 0; i < result.images.length; i++) {
       const img = result.images[i];
-      if ((!img.url && !img.deliveryUrl) || img.error) continue;
+      const bufferObj = result._imageBuffers?.[i];
+      // Skip if no buffer AND no URL, or if error
+      if (img.error) continue;
+      if (!bufferObj?.buffer && !img.url && !img.deliveryUrl) continue;
       const caption = img.label || img.format || 'Ad image';
       const deliveryUrl = img.deliveryUrl || img.url;
 
       try {
-        const sent = await deliverImageWithBuffer(result._imageBuffers?.[i], deliveryUrl, caption);
+        const sent = await deliverImageWithBuffer(bufferObj, deliveryUrl, caption);
         if (sent) deliveredCount++;
       } catch (e) {
         log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
       }
     }
 
-    if (deliveredCount === 0 && validImages.length > 0) {
-      log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
-      const driveUrl = validImages.find(i => i.driveUrl || i.driveId)?.driveUrl;
-      const fallbackMsg = driveUrl
-        ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
-        : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
+    if (deliveredCount === 0) {
+      // Either ALL generation failed (no valid images) or ALL delivery failed
+      const allFailed = result.images.every(i => i.error);
+      const errors = result.images.filter(i => i.error).map(i => i.error);
+      log.error('Zero images delivered to user', { allFailed, deliverable: deliverableImages.length, errors });
+
+      const driveUrl = result.images.find(i => i.driveUrl || i.driveId)?.driveUrl;
+      let fallbackMsg;
+      if (allFailed) {
+        const errorHint = errors[0] || 'unknown error';
+        fallbackMsg = `Sorry, image generation failed: ${errorHint}. Please try again.`;
+      } else if (driveUrl) {
+        fallbackMsg = `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`;
+      } else {
+        fallbackMsg = 'I generated your images but had trouble delivering them in chat. Please try again.';
+      }
       try {
         if (channel === 'whatsapp') await sendWhatsApp(fallbackMsg, chatId);
         else await sendTelegram(fallbackMsg, chatId);
@@ -1580,6 +1610,28 @@ Return ONLY the JSON array, no other text.`;
             mapped.driveId = driveResult.id;
           }
           imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+        }
+        // Fallback: if Drive returned null but image has a URL, download bytes directly for WhatsApp upload
+        if (!imgBuffer && img.url && !img.error) {
+          try {
+            if (img.url.startsWith('data:')) {
+              // Gemini returns base64 data URIs — decode directly
+              const match = img.url.match(/^data:([^;]+);base64,(.+)$/);
+              if (match) {
+                imgBuffer = { buffer: Buffer.from(match[2], 'base64'), mimeType: match[1] };
+              }
+            } else if (img.base64) {
+              // Provider included raw base64 (Gemini)
+              imgBuffer = { buffer: Buffer.from(img.base64, 'base64'), mimeType: img.mimeType || 'image/png' };
+            } else {
+              // HTTP URL — download directly
+              const { default: axios } = await import('axios');
+              const resp = await axios.get(img.url, { responseType: 'arraybuffer', timeout: 15000 });
+              imgBuffer = { buffer: Buffer.from(resp.data), mimeType: resp.headers['content-type'] || 'image/png' };
+            }
+          } catch (dlErr) {
+            log.warn('Direct image buffer download failed', { error: dlErr.message, format: img.format });
+          }
         }
         mappedImages.push(mapped);
         _imageBuffers.push(imgBuffer);

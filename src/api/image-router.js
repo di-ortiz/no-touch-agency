@@ -71,27 +71,20 @@ function getAvailableProviders(preferred) {
 
 /**
  * Check if an error indicates we should try the next provider.
- * (quota exhaustion, auth failure, rate limit, or safety block)
+ * Default: ALWAYS fall back unless it's clearly a prompt/input issue that
+ * would fail identically on every provider.
  */
 function isFallbackError(error) {
   const msg = (error.message || '').toLowerCase();
-  const status = error.status || error.response?.status;
 
-  // Rate limit or quota
-  if (status === 429) return true;
-  if (msg.includes('rate_limit') || msg.includes('quota') || msg.includes('billing')) return true;
+  // Only these errors are NOT worth retrying on another provider — same prompt will fail the same way
+  const promptErrors = ['invalid_prompt', 'prompt_too_long', 'bad_request'];
+  for (const pe of promptErrors) {
+    if (msg.includes(pe)) return false;
+  }
 
-  // Auth / config
-  if (status === 401 || status === 403) return true;
-  if (msg.includes('api_key') || msg.includes('not configured') || msg.includes('unauthorized')) return true;
-
-  // Safety / content policy (different providers handle different content)
-  if (msg.includes('safety') || msg.includes('content_policy') || msg.includes('blocked')) return true;
-
-  // Server errors (provider might be down)
-  if (status >= 500) return true;
-
-  return false;
+  // Everything else: timeout, network, rate limit, auth, safety, server error, unexpected response — try next provider
+  return true;
 }
 
 // ============================================================
