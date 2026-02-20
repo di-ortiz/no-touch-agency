@@ -222,8 +222,10 @@ function trimMessagesToFit(messages) {
 
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation (includes multi-format + provider fallback)
+const MEDIUM_TOOL_TIMEOUT_MS = 90 * 1000; // 90s for scraping tools that render JS pages
 const DEFAULT_TOOL_TIMEOUT_MS = 45 * 1000; // 45s for regular tools (API calls, searches)
 const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit']);
 // Overall loop timeout: if the entire tool-use loop takes longer than this, bail out
 const LOOP_TIMEOUT_MS = 3 * 60 * 1000; // 3 min total for all tool rounds
 
@@ -252,7 +254,7 @@ const TOOL_PROGRESS_MESSAGES = {
 };
 
 async function executeCSAToolWithTimeout(toolName, toolInput) {
-  const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
+  const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : MEDIUM_TOOLS.has(toolName) ? MEDIUM_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
   return Promise.race([
     executeCSATool(toolName, toolInput),
     new Promise((_, reject) =>
@@ -389,14 +391,15 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
     }
   }
-  // Google Ads Transparency — send creative previews
+  // Google Ads Transparency — send creative previews + screenshots
   if (toolName === 'search_google_ads_transparency' && result.creatives) {
     for (const creative of result.creatives) {
       if (!creative.previewUrl) continue;
+      const caption = creative.label || `Google Ad — ${creative.format || 'preview'}`;
       if (creative.format === 'VIDEO') {
-        await safeSendMedia(sendVideo, creative.previewUrl, `Google Ad — ${creative.format}`, toolName);
+        await safeSendMedia(sendVideo, creative.previewUrl, caption, toolName);
       } else {
-        await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
+        await safeSendMedia(sendImage, creative.previewUrl, caption, toolName);
       }
     }
   }
@@ -1101,7 +1104,7 @@ const CSA_TOOLS = [
   // --- Google Ads Transparency Center ---
   {
     name: 'search_google_ads_transparency',
-    description: 'Search the Google Ads Transparency Center for an advertiser\'s Google Ads. IMPORTANT: Use the advertiser\'s DOMAIN (e.g. "v4company.com") as the query for best results. Also pass the region as a 2-letter country code (e.g. "BR" for Brazil, "US" for United States) based on the client\'s market. If no results are found, it does NOT mean they have no ads — always share the transparencyUrl link with the user so they can check directly.',
+    description: 'Search the Google Ads Transparency Center for an advertiser\'s Google Ads. Use the advertiser\'s DOMAIN (e.g. "v4company.com") as the query. Pass the region as a 2-letter country code (e.g. "BR", "US") based on the client\'s market. IMPORTANT: Present ALL results directly in-chat — show the pageContent text, describe every ad creative found, list ad formats/counts, and share any adTexts headlines. The images/screenshots will be sent automatically. Include the transparencyUrl as a supplementary link at the end, NOT as the main answer.',
     input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Advertiser DOMAIN preferred (e.g. "v4company.com") or company name' }, region: { type: 'string', description: '2-letter country code for the market, e.g. "BR", "US", "MX", "PT". Use the client\'s country. Default: worldwide.' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['query'] },
   },
   // --- Google Keyword Planner (via Google Ads API) ---

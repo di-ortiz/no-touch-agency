@@ -63,6 +63,7 @@ export async function scrape(url, opts = {}) {
       html: data.html || '',
       metadata: data.metadata || {},
       links: data.links || [],
+      screenshot: data.screenshot || '',
     };
   });
 }

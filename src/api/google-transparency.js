@@ -11,29 +11,21 @@ const BASE_URL = 'https://adstransparency.google.com';
  * The Transparency Center uses these URL params:
  *   - domain: advertiser domain (e.g. "v4company.com")
  *   - region: 2-letter country code (e.g. "BR", "US") or omit for worldwide
- *
- * @param {string} query - Domain or advertiser name
- * @param {string} region - Region code (e.g. "BR", "US", "anywhere")
- * @returns {string} The transparency center URL
  */
 function buildTransparencyUrl(query, region) {
   const params = new URLSearchParams();
 
-  // Normalize region — "anywhere" or empty means no filter
   const regionCode = (region && region.toLowerCase() !== 'anywhere') ? region.toUpperCase() : '';
   if (regionCode) params.set('region', regionCode);
 
-  // If query looks like a domain, use domain= param; otherwise use it as-is
   const isDomain = /^[a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/.test(query.trim());
   if (isDomain) {
     params.set('domain', query.trim().toLowerCase());
   } else {
-    // Try to extract domain if it's embedded in the query (e.g. "V4 Company v4company.com")
     const domainMatch = query.match(/([a-zA-Z0-9]([a-zA-Z0-9-]*\.)+[a-zA-Z]{2,})/);
     if (domainMatch) {
       params.set('domain', domainMatch[1].toLowerCase());
     } else {
-      // Use as text query — the transparency center search box
       params.set('q', query.trim());
     }
   }
@@ -42,11 +34,37 @@ function buildTransparencyUrl(query, region) {
 }
 
 /**
+ * Scrape the Google Ads Transparency Center page and extract everything.
+ *
+ * Requests both markdown (for text/links) and screenshot (for visual snapshot).
+ * Extracts ALL images found in the page as ad creatives.
+ */
+async function scrapeTransparencyPage(url) {
+  const result = await firecrawl.scrape(url, {
+    formats: ['markdown', 'screenshot'],
+    waitFor: 8000, // Extra time for ad thumbnails to render
+    timeout: 20000,
+    onlyMainContent: false, // Need FULL page including ad grid
+  });
+
+  const md = result.markdown || '';
+  const screenshot = result.screenshot || '';
+
+  log.info('Transparency page scraped', {
+    url,
+    mdLength: md.length,
+    hasScreenshot: !!screenshot,
+  });
+
+  return { markdown: md, screenshot };
+}
+
+/**
  * Search the Google Ads Transparency Center for an advertiser.
  *
  * Strategy:
  *   1. Build the correct transparency URL with domain= and region= params
- *   2. Try to scrape that URL directly with Firecrawl (renders JS)
+ *   2. Scrape that URL directly with Firecrawl (renders JS, captures screenshot)
  *   3. Fall back to Firecrawl web search if direct scrape yields nothing
  *   4. Always return the correct URL so the user can check manually
  */
@@ -58,7 +76,6 @@ export async function searchAdvertiser(opts = {}) {
   const transparencyUrl = buildTransparencyUrl(query, region);
 
   if (!firecrawl.isConfigured()) {
-    log.info('Firecrawl not configured, returning direct URL', { query });
     return {
       advertisers: [],
       query,
@@ -69,23 +86,25 @@ export async function searchAdvertiser(opts = {}) {
     };
   }
 
-  // --- Method 1: Direct scrape of the transparency URL ---
+  // --- Method 1: Direct scrape of the correct transparency URL ---
   try {
     log.info('Direct scraping Google Ads Transparency Center', { url: transparencyUrl, query });
 
-    const result = await firecrawl.scrape(transparencyUrl, {
-      formats: ['markdown'],
-      waitFor: 5000,
-      timeout: 15000,
-      onlyMainContent: false,
-    });
-
-    const md = result.markdown || '';
+    const { markdown: md, screenshot } = await scrapeTransparencyPage(transparencyUrl);
 
     if (md && md.length > 100) {
       const parsed = parseTransparencyPage(md);
 
-      // If we found meaningful content, return it
+      // Add screenshot as the first creative if available (full-page view of all ads)
+      if (screenshot) {
+        parsed.creatives.unshift({
+          format: 'IMAGE',
+          previewUrl: screenshot,
+          label: `Google Ads Transparency — ${query}`,
+          isScreenshot: true,
+        });
+      }
+
       if (parsed.totalAds > 0 || parsed.advertiserName || parsed.creatives.length > 0 || md.length > 500) {
         return {
           advertisers: parsed.advertiserName ? [{ name: parsed.advertiserName, url: transparencyUrl }] : [],
@@ -93,13 +112,13 @@ export async function searchAdvertiser(opts = {}) {
           transparencyUrl,
           source: 'google_ads_transparency_center',
           dataRetrieved: true,
-          pageContent: md.slice(0, 6000),
+          pageContent: md.slice(0, 10000),
           parsedData: parsed,
         };
       }
     }
 
-    log.info('Direct scrape returned minimal content, trying web search', { query, mdLength: md.length });
+    log.info('Direct scrape returned minimal content, trying web search', { query, mdLength: md?.length || 0 });
   } catch (e) {
     log.warn('Direct scrape failed, trying web search fallback', { error: e.message, query });
   }
@@ -115,7 +134,6 @@ export async function searchAdvertiser(opts = {}) {
 
     const results = searchResults.results || [];
 
-    // Find a direct advertiser page
     const advertiserPage = results.find(r =>
       r.url?.includes('adstransparency.google.com/advertiser/')
     );
@@ -136,7 +154,6 @@ export async function searchAdvertiser(opts = {}) {
       };
     }
 
-    // Return whatever search found
     const relatedResults = results.slice(0, 3).map(r => ({
       title: r.title || '',
       url: r.url || '',
@@ -168,7 +185,6 @@ export async function searchAdvertiser(opts = {}) {
 
 /**
  * Scrape an advertiser's Transparency Center page for ad creatives.
- * Uses Firecrawl to render the JS-heavy page and extract content.
  */
 export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
   if (!advertiserUrl) throw new Error('Advertiser URL is required');
@@ -186,26 +202,29 @@ export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
   try {
     log.info('Scraping advertiser page for creatives', { url: advertiserUrl });
 
-    const result = await firecrawl.scrape(advertiserUrl, {
-      formats: ['markdown'],
-      waitFor: 5000,
-      timeout: 15000,
-      onlyMainContent: false,
-    });
-
-    const md = result.markdown || '';
+    const { markdown: md, screenshot } = await scrapeTransparencyPage(advertiserUrl);
 
     if (!md || md.length < 50) {
       return {
-        creatives: [],
+        creatives: screenshot ? [{ format: 'IMAGE', previewUrl: screenshot, label: 'Ads page screenshot' }] : [],
         totalFound: 0,
         transparencyUrl: advertiserUrl,
-        dataRetrieved: false,
-        message: `Page rendered but no content extracted. View directly: ${advertiserUrl}`,
+        dataRetrieved: !!screenshot,
+        pageContent: md,
+        message: screenshot ? '' : `Page rendered but no content extracted. View directly: ${advertiserUrl}`,
       };
     }
 
     const parsed = parseTransparencyPage(md);
+
+    if (screenshot) {
+      parsed.creatives.unshift({
+        format: 'IMAGE',
+        previewUrl: screenshot,
+        label: 'Google Ads Transparency — full page',
+        isScreenshot: true,
+      });
+    }
 
     return {
       creatives: parsed.creatives.slice(0, opts.limit || 20),
@@ -214,7 +233,7 @@ export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
       dateRange: parsed.dateRange,
       advertiserName: parsed.advertiserName,
       transparencyUrl: advertiserUrl,
-      pageContent: md.slice(0, 6000),
+      pageContent: md.slice(0, 10000),
       source: 'google_ads_transparency_center',
       dataRetrieved: true,
     };
@@ -242,7 +261,7 @@ export async function searchAndGetCreatives(opts = {}) {
   const region = opts.region || '';
   const fallbackUrl = buildTransparencyUrl(query, region);
 
-  // Step 1: Find the advertiser
+  // Step 1: Find the advertiser (also scrapes the page)
   let searchResult;
   try {
     searchResult = await searchAdvertiser(opts);
@@ -259,7 +278,7 @@ export async function searchAndGetCreatives(opts = {}) {
     };
   }
 
-  // If direct scrape already returned parsed data with creatives, use it
+  // If direct scrape already returned parsed data, use it directly
   if (searchResult.parsedData) {
     const pd = searchResult.parsedData;
     return {
@@ -267,7 +286,7 @@ export async function searchAndGetCreatives(opts = {}) {
       advertiserFound: true,
       advertiser: { name: pd.advertiserName || query, url: searchResult.transparencyUrl },
       advertisers: searchResult.advertisers,
-      creatives: pd.creatives.slice(0, opts.limit || 10),
+      creatives: pd.creatives.slice(0, opts.limit || 15),
       totalCreatives: pd.totalAds,
       adFormats: pd.adFormats,
       dateRange: pd.dateRange,
@@ -295,7 +314,7 @@ export async function searchAndGetCreatives(opts = {}) {
 
   const topAdvertiser = advertisers[0];
 
-  // Step 2: Scrape the advertiser's page for creatives (only if we found via web search, not direct scrape)
+  // Step 2: Scrape the advertiser's page for creatives
   if (topAdvertiser.url) {
     try {
       const creativesResult = await getAdvertiserCreatives(topAdvertiser.url, opts);
@@ -314,7 +333,7 @@ export async function searchAndGetCreatives(opts = {}) {
         dataRetrieved: creativesResult.dataRetrieved,
       };
     } catch (e) {
-      log.warn('Failed to fetch creatives, returning advertiser info only', { error: e.message });
+      log.warn('Failed to fetch creatives', { error: e.message });
       return {
         query,
         advertiserFound: true,
@@ -336,16 +355,21 @@ export async function searchAndGetCreatives(opts = {}) {
     creatives: [],
     transparencyUrl: fallbackUrl,
     dataRetrieved: false,
-    message: `Found advertiser "${topAdvertiser.name}" but could not retrieve creatives automatically. View their ads at: ${fallbackUrl}`,
+    message: `Found advertiser "${topAdvertiser.name}" but could not retrieve creatives. View their ads at: ${fallbackUrl}`,
   };
 }
 
 // --- Page Parser ---
 
 /**
- * Parse the rendered Transparency Center page markdown to extract ad info.
- * The page content varies based on how much JS rendered, so we extract
- * what we can and pass the raw content to Claude for interpretation.
+ * Parse the rendered Transparency Center page markdown.
+ *
+ * Aggressively extracts:
+ *   - ALL image URLs (ad thumbnails, display creatives)
+ *   - Text blocks that look like ad copy (headlines, descriptions)
+ *   - Metadata (advertiser name, ad count, formats, dates)
+ *
+ * Returns raw pageContent so Claude can also interpret the full text.
  */
 function parseTransparencyPage(markdown) {
   const result = {
@@ -354,21 +378,21 @@ function parseTransparencyPage(markdown) {
     adFormats: [],
     dateRange: null,
     creatives: [],
+    adTexts: [], // Text ad headlines/descriptions found on page
   };
 
   if (!markdown) return result;
 
-  // Try to extract advertiser name (usually first heading or prominent text)
+  // --- Extract metadata ---
+
   const nameMatch = markdown.match(/^#\s+(.+)/m) ||
     markdown.match(/advertiser[:\s]+([^\n]+)/i);
   if (nameMatch) result.advertiserName = nameMatch[1].trim();
 
-  // Try to extract total ad count
   const countMatch = markdown.match(/(\d[\d,]+)\s+ads?\b/i) ||
     markdown.match(/showing\s+(\d[\d,]+)/i);
   if (countMatch) result.totalAds = parseInt(countMatch[1].replace(/,/g, ''), 10);
 
-  // Try to extract ad formats (Text, Image, Video)
   const formatMatches = markdown.matchAll(/(Text|Image|Video)\s*(?:ads?)?\s*[:(]\s*(\d[\d,]*)/gi);
   for (const m of formatMatches) {
     result.adFormats.push({
@@ -377,7 +401,6 @@ function parseTransparencyPage(markdown) {
     });
   }
 
-  // Try to extract date range
   const dateMatch = markdown.match(
     /(?:from|since|between|date[s]?[:\s])\s*([\w\s,]+\d{4})\s*(?:to|[-–])\s*([\w\s,]+\d{4})/i
   );
@@ -385,32 +408,90 @@ function parseTransparencyPage(markdown) {
     result.dateRange = { from: dateMatch[1].trim(), to: dateMatch[2].trim() };
   }
 
-  // Try to extract individual creative entries from repeated patterns
-  const creativeBlocks = markdown.split(/(?:^|\n)(?=(?:Text|Image|Video)\s+ad)/i);
-  for (const block of creativeBlocks) {
-    if (block.length < 10) continue;
-    const formatMatch = block.match(/^(Text|Image|Video)\s+ad/i);
-    if (!formatMatch) continue;
+  // --- Extract ALL images as ad creatives ---
+  // The transparency center renders ads as thumbnail images.
+  // Grab every image from the markdown — filter out obvious non-ad images.
 
-    const creative = {
-      format: formatMatch[1].toUpperCase(),
-      firstShown: null,
-      lastShown: null,
-      previewUrl: null,
-    };
+  const seenUrls = new Set();
 
-    const dates = block.match(/(\w+\s+\d{1,2},?\s+\d{4})/g);
-    if (dates && dates.length >= 1) creative.firstShown = dates[0];
-    if (dates && dates.length >= 2) creative.lastShown = dates[1];
+  // Markdown images: ![alt](url)
+  const mdImageRegex = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+  let match;
+  while ((match = mdImageRegex.exec(markdown)) !== null) {
+    const url = match[2];
+    if (isAdImage(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      result.creatives.push({
+        format: 'IMAGE',
+        previewUrl: url,
+        label: match[1] || 'Ad creative',
+      });
+    }
+  }
 
-    const imgMatch = block.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/) ||
-      block.match(/(https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|gif|webp))/i);
-    if (imgMatch) creative.previewUrl = imgMatch[1];
+  // Standalone image URLs in text (not already captured)
+  const standaloneImgRegex = /(https?:\/\/[^\s"'<>()]+\.(?:png|jpg|jpeg|gif|webp)(?:[^\s"'<>()]*)?)/gi;
+  while ((match = standaloneImgRegex.exec(markdown)) !== null) {
+    const url = match[1];
+    if (isAdImage(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      result.creatives.push({
+        format: 'IMAGE',
+        previewUrl: url,
+        label: 'Ad creative',
+      });
+    }
+  }
 
-    result.creatives.push(creative);
+  // --- Extract text ad content ---
+  // Look for blocks that look like Google text ads (headline + description patterns)
+
+  // Pattern: repeated blocks with headline-like text followed by URL + description
+  const textAdRegex = /(?:^|\n)([A-Z][^\n]{10,80})\n((?:https?:\/\/|www\.)[^\n]+)\n([^\n]{20,150})/gm;
+  while ((match = textAdRegex.exec(markdown)) !== null) {
+    result.adTexts.push({
+      headline: match[1].trim(),
+      displayUrl: match[2].trim(),
+      description: match[3].trim(),
+    });
+  }
+
+  // Simpler pattern: lines that look like ad headlines (short, title-case, no markdown)
+  const headlineRegex = /(?:^|\n)(?:###?\s+)?([A-Z][A-Za-z0-9\s|—–\-:!?&,]{10,80})(?:\n|$)/gm;
+  const potentialHeadlines = [];
+  while ((match = headlineRegex.exec(markdown)) !== null) {
+    const text = match[1].trim();
+    // Skip obvious non-ad text
+    if (!/google|transparency|center|filter|region|date range|about|privacy|terms/i.test(text)) {
+      potentialHeadlines.push(text);
+    }
+  }
+  // Only include if we found several (suggests they're ad headlines)
+  if (potentialHeadlines.length >= 3) {
+    for (const headline of potentialHeadlines.slice(0, 20)) {
+      if (!result.adTexts.some(t => t.headline === headline)) {
+        result.adTexts.push({ headline, displayUrl: '', description: '' });
+      }
+    }
   }
 
   return result;
+}
+
+/**
+ * Check if a URL looks like an ad creative image (not a UI icon/logo).
+ */
+function isAdImage(url) {
+  if (!url || !url.startsWith('http')) return false;
+  // Skip obvious non-ad images
+  const skipPatterns = [
+    'favicon', 'logo', 'icon', 'sprite', 'arrow', 'chevron',
+    'close', 'menu', 'search', 'spinner', 'loading',
+    'google.com/images/branding', 'gstatic.com/images',
+    'data:image', '1x1', 'pixel', 'tracking',
+  ];
+  const lower = url.toLowerCase();
+  return !skipPatterns.some(p => lower.includes(p));
 }
 
 export default {
