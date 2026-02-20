@@ -272,6 +272,71 @@ async function safeSendMedia(sendFn, url, caption, toolName) {
   }
 }
 
+/**
+ * Send a screenshot or base64 image via WhatsApp.
+ * Handles both base64 data URLs and regular URLs, using native buffer upload when needed.
+ */
+async function sendScreenshotImage(imageData, caption, channel, chatId) {
+  if (!imageData) return;
+
+  if (channel === 'telegram') {
+    // Telegram can handle both URLs and base64
+    if (imageData.startsWith('data:image')) {
+      // Convert base64 to buffer for Telegram
+      const base64 = imageData.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(base64, 'base64');
+      // For Telegram, we need to use URL-based delivery — write buffer to a temp approach
+      // Fall back to just logging — Telegram can't easily receive raw buffers
+      log.warn('Base64 screenshot delivery not supported for Telegram', { captionPreview: caption?.slice(0, 50) });
+      return;
+    }
+    await safeSendMedia((u, c) => sendTelegramPhoto(u, c, chatId), imageData, caption, 'screenshot');
+    return;
+  }
+
+  // WhatsApp
+  if (imageData.startsWith('data:image')) {
+    // Base64 data URL → decode to buffer → native upload
+    const mimeMatch = imageData.match(/^data:(image\/\w+);base64,/);
+    const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+    const base64 = imageData.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64, 'base64');
+    log.info('Sending base64 screenshot via native upload', { bufferSize: buffer.length, mimeType, caption: caption?.slice(0, 50) });
+    try {
+      await sendWhatsAppImageNative(buffer, mimeType, null, caption, chatId);
+    } catch (e) {
+      log.warn('Base64 screenshot native upload failed', { error: e.message });
+    }
+  } else if (imageData.startsWith('http')) {
+    // Regular URL
+    try {
+      await sendWhatsAppImage(imageData, caption, chatId);
+    } catch (e) {
+      log.warn('Screenshot URL delivery failed', { error: e.message, url: imageData?.slice(0, 100) });
+    }
+  }
+}
+
+/**
+ * Capture a screenshot of a URL using Firecrawl.
+ * Returns the screenshot data (base64 data URL or hosted URL), or null if failed.
+ */
+async function captureScreenshot(url) {
+  if (!firecrawlApi.isConfigured()) return null;
+  try {
+    const result = await firecrawlApi.scrape(url, {
+      formats: ['screenshot'],
+      waitFor: 3000,
+      timeout: 10000,
+      onlyMainContent: false,
+    });
+    return result.screenshot || null;
+  } catch (e) {
+    log.warn('Screenshot capture failed', { error: e.message, url: url?.slice(0, 100) });
+    return null;
+  }
+}
+
 // Helper: deliver generated media (images/videos) inline after tool execution
 // For WhatsApp + generated images: uses direct buffer upload (native photo delivery).
 // For Telegram and other media: uses URL-based delivery.
@@ -383,20 +448,40 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       }
     }
   }
-  // Ad library search results — send snapshot previews (URL-based is fine, these are stable URLs)
+  // Ad library search results — screenshot the snapshot pages (ad_snapshot_url is an HTML page, NOT an image)
   if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
-    for (const ad of result.ads) {
-      if (!ad.snapshotUrl) continue;
+    const adsWithSnapshots = result.ads.filter(ad => ad.snapshotUrl);
+    log.info('Meta Ad Library: delivering ad snapshots', { totalAds: result.ads.length, withSnapshots: adsWithSnapshots.length, channel });
+
+    // Screenshot the first 5 snapshot pages — each is an HTML page that renders the ad creative
+    const MAX_AD_SCREENSHOTS = 5;
+    for (const ad of adsWithSnapshots.slice(0, MAX_AD_SCREENSHOTS)) {
       const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
-      await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
+      try {
+        const screenshot = await captureScreenshot(ad.snapshotUrl);
+        if (screenshot) {
+          log.info('Ad snapshot captured, delivering', { pageName: ad.pageName, screenshotType: screenshot.startsWith('data:') ? 'base64' : 'url' });
+          await sendScreenshotImage(screenshot, caption, channel, chatId);
+        } else {
+          log.warn('No screenshot returned for ad', { pageName: ad.pageName, snapshotUrl: ad.snapshotUrl?.slice(0, 80) });
+        }
+      } catch (e) {
+        log.warn('Failed to screenshot ad snapshot page', { error: e.message, pageName: ad.pageName });
+      }
     }
   }
-  // Google Ads Transparency — send creative previews + screenshots
+  // Google Ads Transparency — send screenshots and extracted ad images
   if (toolName === 'search_google_ads_transparency' && result.creatives) {
+    log.info('Google Transparency: delivering creatives', { count: result.creatives.length, channel });
+
     for (const creative of result.creatives) {
       if (!creative.previewUrl) continue;
       const caption = creative.label || `Google Ad — ${creative.format || 'preview'}`;
-      if (creative.format === 'VIDEO') {
+
+      // Handle both base64 screenshots and regular URLs
+      if (creative.previewUrl.startsWith('data:image') || creative.isScreenshot) {
+        await sendScreenshotImage(creative.previewUrl, caption, channel, chatId);
+      } else if (creative.format === 'VIDEO') {
         await safeSendMedia(sendVideo, creative.previewUrl, caption, toolName);
       } else {
         await safeSendMedia(sendImage, creative.previewUrl, caption, toolName);
