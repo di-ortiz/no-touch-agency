@@ -50,12 +50,59 @@ const FORMAT_LABELS = {
 };
 
 /**
- * Generate an image using fal.ai Flux Pro v1.1.
+ * Call a single fal.ai model. Used internally by generateImage for racing.
+ */
+async function callFalModel(model, prompt, imageSize, format, opts) {
+  return rateLimited('fal', async () => {
+    log.info('Generating fal.ai image', { model, format, prompt: prompt?.slice(0, 100) });
+
+    const response = await axios.post(
+      `${FAL_BASE}/${model}`,
+      {
+        prompt,
+        image_size: imageSize,
+        num_images: 1,
+        enable_safety_checker: true,
+        output_format: 'jpeg',
+        guidance_scale: model.includes('schnell') ? undefined : 3.5,
+      },
+      { headers: getHeaders(), timeout: 60000 },
+    );
+
+    const image = response.data?.images?.[0];
+    if (!image?.url) throw new Error(`No image URL returned from fal.ai (${model})`);
+
+    // Schnell ~$0.003, Pro ~$0.04
+    const cost = model.includes('schnell') ? 0.3 : 4.0;
+    recordCost({
+      platform: 'fal',
+      model,
+      workflow: opts.workflow || 'creative-generation',
+      clientId: opts.clientId,
+      costCentsOverride: cost,
+      metadata: { format },
+    });
+
+    log.info('fal.ai image generated', { model, format, url: image.url?.slice(0, 80) });
+    return {
+      url: image.url,
+      format,
+      dimensions: { ...imageSize, label: FORMAT_LABELS[format] || format },
+      provider: 'fal',
+      model,
+    };
+  });
+}
+
+/**
+ * Generate an image using fal.ai — races Flux Schnell (fast, ~5s) vs
+ * Flux Pro (higher quality, ~15-30s). Returns whichever finishes first.
+ * If both fail, throws the last error for fallback to next provider.
  *
  * @param {object} opts
  * @param {string} opts.prompt - Image generation prompt
  * @param {string} opts.format - Ad format key (default: 'general')
- * @param {string} opts.model - Flux model variant (default: 'fal-ai/flux-pro/v1.1')
+ * @param {string} opts.model - Force a specific model (skips racing)
  * @param {string} opts.workflow - Workflow name for cost tracking
  * @param {string} opts.clientId - Client ID for cost tracking
  * @returns {object} { url, format, dimensions, provider }
@@ -65,47 +112,26 @@ export async function generateImage(opts = {}) {
 
   const format = opts.format || 'general';
   const imageSize = FORMAT_SIZE_MAP[format] || FORMAT_SIZE_MAP.general;
-  const model = opts.model || 'fal-ai/flux-pro/v1.1';
 
-  return rateLimited('fal', () =>
-    retry(async () => {
-      log.info('Generating fal.ai image', { model, format, prompt: opts.prompt?.slice(0, 100) });
+  // If a specific model is requested, use it directly
+  if (opts.model) {
+    return callFalModel(opts.model, opts.prompt, imageSize, format, opts);
+  }
 
-      const response = await axios.post(
-        `${FAL_BASE}/${model}`,
-        {
-          prompt: opts.prompt,
-          image_size: imageSize,
-          num_images: 1,
-          enable_safety_checker: true,
-          output_format: 'jpeg',
-          guidance_scale: 3.5,
-        },
-        { headers: getHeaders(), timeout: 60000 },
-      );
-
-      const image = response.data?.images?.[0];
-      if (!image?.url) throw new Error('No image URL returned from fal.ai');
-
-      // Flux Pro v1.1 costs ~$0.04 per image
-      recordCost({
-        platform: 'fal',
-        model,
-        workflow: opts.workflow || 'creative-generation',
-        clientId: opts.clientId,
-        costCentsOverride: 4.0,
-        metadata: { format },
-      });
-
-      log.info('fal.ai image generated', { format, url: image.url?.slice(0, 80) });
-      return {
-        url: image.url,
-        format,
-        dimensions: { ...imageSize, label: FORMAT_LABELS[format] || format },
-        provider: 'fal',
-      };
-    }, { retries: 0, label: 'fal.ai image', shouldRetry: isRetryableHttpError })
+  // Race Flux Schnell (fast) vs Flux Pro (quality) — return whichever wins
+  const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1'];
+  const raceResults = await Promise.allSettled(
+    models.map(model => callFalModel(model, opts.prompt, imageSize, format, opts))
   );
+
+  // Return the first successful result (prefer Schnell since it resolves first)
+  for (const r of raceResults) {
+    if (r.status === 'fulfilled') return r.value;
+  }
+
+  // Both failed — throw last error for provider fallback
+  const lastError = raceResults.find(r => r.status === 'rejected')?.reason;
+  throw lastError || new Error('All fal.ai models failed');
 }
 
 /**

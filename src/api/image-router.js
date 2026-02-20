@@ -10,9 +10,9 @@ const log = logger.child({ platform: 'image-router' });
  * Image generation router with smart provider fallback.
  *
  * Provider priority (tries each in order, falls back on failure):
- *   1. DALL-E 3  (OpenAI)    — highest quality, most reliable
- *   2. fal.ai    (Flux Pro)   — fast, great quality, different aesthetic
- *   3. Imagen 3  (Gemini)     — Google's model, good for variety
+ *   1. fal.ai    (Flux Schnell + Flux Pro racing) — fastest, great quality
+ *   2. DALL-E 3  (OpenAI)    — highest quality, reliable fallback
+ *   3. Imagen 3  (Gemini)     — Google's model, last resort
  *
  * On quota exhaustion, auth failure, or rate limit → automatically tries next provider.
  * Returns whichever provider succeeds first.
@@ -50,8 +50,8 @@ function recordProviderSuccess(provider) {
  */
 function getAvailableProviders(preferred) {
   const all = [
+    { key: 'fal', name: 'Flux (fal.ai)', configured: fal.isConfigured() },
     { key: 'dalle', name: 'DALL-E 3', configured: !!config.OPENAI_API_KEY },
-    { key: 'fal', name: 'Flux Pro (fal.ai)', configured: fal.isConfigured() },
     { key: 'gemini', name: 'Imagen 3 (Gemini)', configured: gemini.isConfigured() },
   ];
 
