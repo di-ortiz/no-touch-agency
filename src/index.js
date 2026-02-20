@@ -16,7 +16,6 @@ import { runClientCheckIn } from './workflows/client-check-in.js';
 import { runClientMorningBriefing } from './workflows/client-morning-briefing.js';
 import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost-alert.js';
 import { runWeeklySEOCheck, runMonthlyContentAnalysis } from './workflows/seo-monitor.js';
-import { runTeamDailyDigest } from './workflows/team-daily-digest.js';
 import { sendAlert } from './api/whatsapp.js';
 import config from './config.js';
 import fs from 'fs';
@@ -65,7 +64,6 @@ async function main() {
     eveningCostAlert: runEveningCostAlert,
     weeklySEOCheck: runWeeklySEOCheck,
     monthlyContentAnalysis: runMonthlyContentAnalysis,
-    teamDailyDigest: runTeamDailyDigest,
   });
 
   // 3. Run ClickUp monitor at startup and schedule it
