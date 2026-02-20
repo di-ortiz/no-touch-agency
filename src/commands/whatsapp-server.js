@@ -3506,7 +3506,8 @@ app.get('/health', (req, res) => {
 
 // --- WhatsApp Conversational Command Handler ---
 async function handleCommand(message) {
-  const ownerChatId = 'whatsapp-owner';
+  const ownerChatId = 'whatsapp-owner'; // history key — NOT a phone number
+  const ownerPhone = config.WHATSAPP_OWNER_PHONE; // actual phone number for media delivery
 
   // Check for approval responses first (exact format, bypass AI)
   const approvalMatch = message.match(/^(APPROVE|DENY|DETAILS)\s+([a-f0-9-]+)/i);
@@ -3553,7 +3554,7 @@ async function handleCommand(message) {
       if (response.text) {
         await sendWhatsApp(response.text);
       } else if (rounds >= 2) {
-        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it...');
+        await sendThinkingIndicator('whatsapp', ownerPhone, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -3565,7 +3566,7 @@ async function handleCommand(message) {
         // Send progress message for every tool
         const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
         if (progressMsg) {
-          await sendThinkingIndicator('whatsapp', ownerChatId, progressMsg);
+          await sendThinkingIndicator('whatsapp', ownerPhone, progressMsg);
         }
 
         try {
@@ -3573,8 +3574,8 @@ async function handleCommand(message) {
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          // Deliver generated media inline (images, videos)
-          await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
+          // Deliver generated media inline — use actual phone number, not history key
+          await deliverMediaInline(tool.name, result, 'whatsapp', ownerPhone);
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });
