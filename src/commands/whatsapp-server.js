@@ -136,6 +136,15 @@ function stripBinaryBuffers(key, value) {
   return value;
 }
 
+// Truncate tool result JSON to prevent conversation context from ballooning.
+// Large results (SEO audits, ad library, keyword data) can be 50K+ chars each,
+// causing subsequent askClaude calls to timeout from excessive input tokens.
+const MAX_TOOL_RESULT_CHARS = 12000;
+function truncateToolResult(resultJson) {
+  if (resultJson.length <= MAX_TOOL_RESULT_CHARS) return resultJson;
+  return resultJson.slice(0, MAX_TOOL_RESULT_CHARS) + '... [truncated — result was ' + resultJson.length + ' chars. Key data shown above. Ask for specific details if needed.]';
+}
+
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
@@ -2967,7 +2976,7 @@ async function handleTelegramCommand(message, chatId) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -3409,7 +3418,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
@@ -3649,7 +3658,7 @@ async function handleCommand(message) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline — use actual phone number, not history key
@@ -3990,7 +3999,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline
