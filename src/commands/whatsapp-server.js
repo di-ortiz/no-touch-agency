@@ -1,7 +1,7 @@
 import express from 'express';
 import { askClaude } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia } from '../api/whatsapp.js';
-import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
+import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppVideoBuffer, sendWhatsAppDocument, sendWhatsAppDocumentBuffer, uploadWhatsAppMedia } from '../api/whatsapp.js';
+import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramPhotoBuffer, sendTelegramVideo, sendTelegramVideoBuffer, sendTelegramDocument, sendTelegramDocumentBuffer } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, getLatestPendingClient, activatePendingClient,
@@ -132,7 +132,7 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
 // JSON replacer: strip binary image buffers from tool results before sending to Claude.
 // _imageBuffers are only needed by deliverMediaInline for native WhatsApp upload, not by the AI.
 function stripBinaryBuffers(key, value) {
-  if (key === '_imageBuffers') return undefined;
+  if (key === '_imageBuffers' || key === '_pdfBuffer') return undefined;
   return value;
 }
 
@@ -184,16 +184,48 @@ async function safeSendMedia(sendFn, url, caption, toolName) {
   }
 }
 
-// Helper: deliver generated media (images/videos) inline after tool execution
-// For WhatsApp + generated images: uses direct buffer upload (native photo delivery).
-// For Telegram and other media: uses URL-based delivery.
+// Helper: deliver generated media (images/videos/documents) inline after tool execution.
+// Uses buffer upload (native delivery) whenever possible for both WhatsApp and Telegram.
+// Falls back to URL-based delivery, then text URL as last resort.
 async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendImage = (url, caption) =>
     channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  // Generated ad images — use native buffer upload for WhatsApp
+  // Helper: deliver a single image using buffer when available, URL as fallback
+  async function deliverImageWithBuffer(bufferObj, deliveryUrl, caption) {
+    if (channel === 'whatsapp') {
+      let sent = false;
+      if (bufferObj?.buffer) {
+        try {
+          await sendWhatsAppImageNative(bufferObj.buffer, bufferObj.mimeType, deliveryUrl, caption, chatId);
+          sent = true;
+        } catch (e) {
+          log.warn('Native WhatsApp image delivery failed', { error: e.message });
+        }
+      }
+      if (!sent) {
+        await sendWhatsAppImage(deliveryUrl, caption, chatId);
+        sent = true;
+      }
+      return sent;
+    } else {
+      // Telegram: use buffer upload when available
+      if (bufferObj?.buffer) {
+        try {
+          await sendTelegramPhotoBuffer(bufferObj.buffer, bufferObj.mimeType, caption, chatId);
+          return true;
+        } catch (e) {
+          log.warn('Telegram buffer photo delivery failed, trying URL', { error: e.message });
+        }
+      }
+      await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
+      return true;
+    }
+  }
+
+  // Generated ad images — use native buffer upload for both WhatsApp and Telegram
   if (toolName === 'generate_ad_images' && result.images) {
     const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
@@ -209,47 +241,16 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       const img = result.images[i];
       if ((!img.url && !img.deliveryUrl) || img.error) continue;
       const caption = img.label || img.format || 'Ad image';
-      // Use the original provider URL for delivery — Drive URLs are blocked by WhatsApp
       const deliveryUrl = img.deliveryUrl || img.url;
 
-      if (channel === 'whatsapp') {
-        let sent = false;
-
-        // Try 1: Native buffer upload (fastest, most reliable when buffer available)
-        if (result._imageBuffers?.[i]?.buffer) {
-          try {
-            log.info('Delivering image via native buffer upload', { format: img.format, bufferSize: result._imageBuffers[i].buffer.length });
-            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, deliveryUrl, caption, chatId);
-            sent = true;
-            deliveredCount++;
-            log.info('Image delivered via native buffer', { format: img.format });
-          } catch (e) {
-            log.warn('Native image delivery failed at deliverMediaInline', { error: e.message, format: img.format });
-          }
-        } else {
-          log.warn('No image buffer available for native upload', { format: img.format, hasBuffer: !!result._imageBuffers?.[i] });
-        }
-
-        // Try 2: URL-based fallback using original provider URL (NOT Drive URL)
-        if (!sent) {
-          log.info('Falling back to URL-based image delivery', { format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80), isDriveUrl: deliveryUrl?.includes('drive.google.com') });
-          try {
-            await sendWhatsAppImage(deliveryUrl, caption, chatId);
-            sent = true;
-            deliveredCount++;
-            log.info('Image delivered via URL fallback', { format: img.format });
-          } catch (e) {
-            log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
-          }
-        }
-      } else {
-        // Telegram / other channels
-        await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
-        deliveredCount++;
+      try {
+        const sent = await deliverImageWithBuffer(result._imageBuffers?.[i], deliveryUrl, caption);
+        if (sent) deliveredCount++;
+      } catch (e) {
+        log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
       }
     }
 
-    // If we had valid images but couldn't deliver any, notify the user
     if (deliveredCount === 0 && validImages.length > 0) {
       log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
       const driveUrl = validImages.find(i => i.driveUrl || i.driveId)?.driveUrl;
@@ -266,33 +267,47 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
   if (toolName === 'generate_ad_video' && result.videoUrl) {
     await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
   }
-  // Creative package — use native buffer upload for WhatsApp
+  // Creative package — use native buffer upload for both WhatsApp and Telegram
   if (toolName === 'generate_creative_package' && result.imageUrls) {
     for (let i = 0; i < result.imageUrls.length; i++) {
       const url = result.imageUrls[i];
       if (!url) continue;
       const caption = 'Creative package image';
-      if (channel === 'whatsapp') {
-        let sent = false;
-        if (result._imageBuffers?.[i]?.buffer) {
-          try {
-            log.info('Delivering creative package image via native buffer', { index: i, bufferSize: result._imageBuffers[i].buffer.length });
-            await sendWhatsAppImageNative(result._imageBuffers[i].buffer, result._imageBuffers[i].mimeType, url, caption, chatId);
-            sent = true;
-            log.info('Creative package image delivered via native buffer', { index: i });
-          } catch (e) {
-            log.warn('Native creative package image delivery failed', { error: e.message, index: i });
-          }
-        } else {
-          log.warn('No buffer available for creative package image', { index: i });
-        }
-        if (!sent) {
-          log.info('Falling back to URL-based creative package delivery', { index: i, url: url?.slice(0, 80), isDriveUrl: url?.includes('drive.google.com') });
-          await safeSendMedia(sendImage, url, caption, toolName);
-        }
-      } else {
-        await safeSendMedia(sendImage, url, caption, toolName);
+      try {
+        await deliverImageWithBuffer(result._imageBuffers?.[i], url, caption);
+      } catch (e) {
+        log.warn('Creative package image delivery failed', { error: e.message, index: i });
       }
+    }
+  }
+  // PDF reports — send pre-downloaded buffer as native document
+  if ((toolName === 'generate_performance_pdf' || toolName === 'generate_competitor_pdf') && result._pdfBuffer) {
+    const filename = `${result.clientName || 'Report'} - ${toolName.includes('competitor') ? 'Competitor Report' : 'Performance Report'}.pdf`;
+    const caption = result.message || filename;
+    try {
+      if (channel === 'whatsapp') {
+        await sendWhatsAppDocumentBuffer(result._pdfBuffer, 'application/pdf', filename, caption, chatId);
+      } else {
+        await sendTelegramDocumentBuffer(result._pdfBuffer, 'application/pdf', filename, caption, chatId);
+      }
+      log.info('PDF report delivered as native document', { toolName, filename, channel, size: result._pdfBuffer.length });
+    } catch (e) {
+      log.warn('PDF native delivery failed, URL still in text response', { error: e.message, toolName });
+    }
+  }
+  // Presentation decks — send pre-downloaded PDF buffer as native document
+  if ((toolName === 'build_media_plan_deck' || toolName === 'build_competitor_deck' || toolName === 'build_performance_deck' || toolName === 'create_chart_presentation') && result._pdfBuffer) {
+    const filename = `${result.clientName || 'Presentation'} - Deck.pdf`;
+    const caption = result.message || filename;
+    try {
+      if (channel === 'whatsapp') {
+        await sendWhatsAppDocumentBuffer(result._pdfBuffer, 'application/pdf', filename, caption, chatId);
+      } else {
+        await sendTelegramDocumentBuffer(result._pdfBuffer, 'application/pdf', filename, caption, chatId);
+      }
+      log.info('Presentation delivered as PDF document', { toolName, filename, channel, size: result._pdfBuffer.length });
+    } catch (e) {
+      log.warn('Presentation PDF delivery failed, URL still in text response', { error: e.message, toolName });
     }
   }
   // Ad library search results — send snapshot previews (URL-based is fine, these are stable URLs)
@@ -2406,13 +2421,24 @@ Return ONLY the JSON array, no other text.`;
         log.error('Failed to create media plan record sheet', { error: e.message });
       }
 
-      return {
+      const mediaPlanResult = {
         clientName: toolInput.clientName,
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
         message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
       };
+      // Pre-download presentation as PDF for inline delivery
+      try {
+        const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
+        if (deckPdf && deckPdf.length > 100) {
+          mediaPlanResult._pdfBuffer = deckPdf;
+          log.info('Media plan deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download media plan deck PDF', { error: e.message });
+      }
+      return mediaPlanResult;
     }
     case 'build_competitor_deck': {
       const client = getClient(toolInput.clientName);
@@ -2449,13 +2475,23 @@ Return ONLY the JSON array, no other text.`;
         log.error('Failed to create competitor record sheet', { error: e.message });
       }
 
-      return {
+      const competitorDeckResult = {
         clientName: toolInput.clientName,
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
         message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
       };
+      try {
+        const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
+        if (deckPdf && deckPdf.length > 100) {
+          competitorDeckResult._pdfBuffer = deckPdf;
+          log.info('Competitor deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download competitor deck PDF', { error: e.message });
+      }
+      return competitorDeckResult;
     }
     case 'build_performance_deck': {
       const client = getClient(toolInput.clientName);
@@ -2498,13 +2534,23 @@ Return ONLY the JSON array, no other text.`;
         log.error('Failed to create performance record sheet', { error: e.message });
       }
 
-      return {
+      const performanceDeckResult = {
         clientName: toolInput.clientName,
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
         message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
       };
+      try {
+        const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
+        if (deckPdf && deckPdf.length > 100) {
+          performanceDeckResult._pdfBuffer = deckPdf;
+          log.info('Performance deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download performance deck PDF', { error: e.message });
+      }
+      return performanceDeckResult;
     }
 
     // --- PDF Reports ---
@@ -2526,7 +2572,18 @@ Return ONLY the JSON array, no other text.`;
         clientId: client?.id,
       });
       if (!result) return { error: 'Failed to generate report. Check Google credentials.' };
-      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      // Pre-download PDF via Google Drive API for native delivery (don't rely on export URL)
+      const toolResult = { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      try {
+        const pdfBuffer = await googleDrive.exportDocumentAsBuffer(result.docId, 'application/pdf');
+        if (pdfBuffer && pdfBuffer.length > 100) {
+          toolResult._pdfBuffer = pdfBuffer;
+          log.info('PDF buffer downloaded for inline delivery', { docId: result.docId, size: pdfBuffer.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download PDF buffer', { error: e.message, docId: result.docId });
+      }
+      return toolResult;
     }
     case 'generate_competitor_pdf': {
       const client = getClient(toolInput.clientName);
@@ -2541,7 +2598,18 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to generate competitor report. Check Google credentials.' };
-      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      // Pre-download PDF via Google Drive API for native delivery
+      const toolResult = { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      try {
+        const pdfBuffer = await googleDrive.exportDocumentAsBuffer(result.docId, 'application/pdf');
+        if (pdfBuffer && pdfBuffer.length > 100) {
+          toolResult._pdfBuffer = pdfBuffer;
+          log.info('Competitor PDF buffer downloaded for inline delivery', { docId: result.docId, size: pdfBuffer.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download competitor PDF buffer', { error: e.message, docId: result.docId });
+      }
+      return toolResult;
     }
 
     // --- Charts ---
@@ -2555,7 +2623,17 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
       if (!result) return { error: 'Failed to create chart presentation. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
+      const chartResult = { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
+      try {
+        const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
+        if (deckPdf && deckPdf.length > 100) {
+          chartResult._pdfBuffer = deckPdf;
+          log.info('Chart presentation PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
+        }
+      } catch (e) {
+        log.warn('Failed to pre-download chart presentation PDF', { error: e.message });
+      }
+      return chartResult;
     }
     case 'create_single_chart': {
       const result = await chartBuilderService.createChart({
@@ -3506,7 +3584,8 @@ app.get('/health', (req, res) => {
 
 // --- WhatsApp Conversational Command Handler ---
 async function handleCommand(message) {
-  const ownerChatId = 'whatsapp-owner';
+  const ownerChatId = 'whatsapp-owner'; // history key — NOT a phone number
+  const ownerPhone = config.WHATSAPP_OWNER_PHONE; // actual phone number for media delivery
 
   // Check for approval responses first (exact format, bypass AI)
   const approvalMatch = message.match(/^(APPROVE|DENY|DETAILS)\s+([a-f0-9-]+)/i);
@@ -3553,7 +3632,7 @@ async function handleCommand(message) {
       if (response.text) {
         await sendWhatsApp(response.text);
       } else if (rounds >= 2) {
-        await sendThinkingIndicator('whatsapp', ownerChatId, 'Still working on it...');
+        await sendThinkingIndicator('whatsapp', ownerPhone, 'Still working on it...');
       }
 
       // Execute all tool calls
@@ -3565,7 +3644,7 @@ async function handleCommand(message) {
         // Send progress message for every tool
         const progressMsg = TOOL_PROGRESS_MESSAGES[tool.name];
         if (progressMsg) {
-          await sendThinkingIndicator('whatsapp', ownerChatId, progressMsg);
+          await sendThinkingIndicator('whatsapp', ownerPhone, progressMsg);
         }
 
         try {
@@ -3573,8 +3652,8 @@ async function handleCommand(message) {
           const resultJson = JSON.stringify(result, stripBinaryBuffers);
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
-          // Deliver generated media inline (images, videos)
-          await deliverMediaInline(tool.name, result, 'whatsapp', ownerChatId);
+          // Deliver generated media inline — use actual phone number, not history key
+          await deliverMediaInline(tool.name, result, 'whatsapp', ownerPhone);
         } catch (e) {
           log.error('Tool execution failed', { tool: tool.name, error: e.message });
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: JSON.stringify({ error: e.message }), is_error: true });

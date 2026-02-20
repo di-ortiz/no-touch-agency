@@ -121,6 +121,28 @@ export async function exportDocument(fileId, mimeType = 'text/plain') {
   );
 }
 
+/**
+ * Export a Google Workspace file (Doc/Slides/Sheet) as a binary Buffer.
+ * Use this for PDF/PPTX/XLSX exports that need to be uploaded to WhatsApp/Telegram.
+ * @param {string} fileId - The Google Drive file ID
+ * @param {string} mimeType - Export MIME type (e.g. 'application/pdf')
+ * @returns {Buffer|null} The exported file as a Buffer, or null on failure
+ */
+export async function exportDocumentAsBuffer(fileId, mimeType = 'application/pdf') {
+  const drive = getDrive();
+  if (!drive) return null;
+
+  return rateLimited('google', () =>
+    retry(async () => {
+      const res = await drive.files.export(
+        { fileId, mimeType },
+        { responseType: 'arraybuffer' },
+      );
+      return Buffer.from(res.data);
+    }, { retries: 3, label: 'Google Drive export as buffer' })
+  );
+}
+
 // --- Create & Upload ---
 
 export async function createFolder(name, parentId) {
@@ -363,7 +385,7 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
 }
 
 export default {
-  listFiles, getFile, downloadFile, exportDocument,
+  listFiles, getFile, downloadFile, exportDocument, exportDocumentAsBuffer,
   createFolder, createDocument, appendToDocument, uploadFile, uploadImageFromUrl,
   ensureClientFolders,
   shareFolderWithAnyone, shareFolderWithEmail,
