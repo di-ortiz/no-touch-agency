@@ -207,7 +207,7 @@ export async function generateAdImages(opts = {}) {
   };
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
-  const PER_FORMAT_TIMEOUT_MS = 180_000; // 180s max per format — enough for provider1 (45s×3 retries) + provider2 attempt
+  const PER_FORMAT_TIMEOUT_MS = 90_000; // 90s max per format — enough for DALL-E (30s) + fallback to fal.ai (60s). No retries, just fast fallback.
 
   log.info(`Generating ${formats.length} format(s) in parallel`, { platform: opts.platform, formats });
 

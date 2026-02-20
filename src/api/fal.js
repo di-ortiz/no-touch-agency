@@ -104,7 +104,7 @@ export async function generateImage(opts = {}) {
         dimensions: { ...imageSize, label: FORMAT_LABELS[format] || format },
         provider: 'fal',
       };
-    }, { retries: 1, label: 'fal.ai image', shouldRetry: isRetryableHttpError })
+    }, { retries: 0, label: 'fal.ai image', shouldRetry: isRetryableHttpError })
   );
 }
 
