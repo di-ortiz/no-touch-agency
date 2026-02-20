@@ -1546,10 +1546,25 @@ Return ONLY the JSON array, no other text.`;
       });
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
+      // Run all uploads in PARALLEL to avoid sequential 10-30s per image adding up
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const driveResults = await Promise.allSettled(
+        images.map(async (img) => {
+          if (!img.url || img.error) return null;
+          try {
+            return await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+          } catch (e) {
+            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+            return null;
+          }
+        })
+      );
+
       const mappedImages = [];
       const _imageBuffers = []; // kept in-memory for deliverMediaInline, not serialized to JSON
-      for (const img of images) {
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const driveResult = driveResults[i].status === 'fulfilled' ? driveResults[i].value : null;
         const mapped = {
           format: img.format,
           label: img.dimensions?.label || img.format,
@@ -1559,21 +1574,12 @@ Return ONLY the JSON array, no other text.`;
           error: img.error,
         };
         let imgBuffer = null;
-        if (img.url && !img.error) {
-          try {
-            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
-            if (driveResult) {
-              if (driveResult.webContentLink) {
-                // Drive URL for permanent reference — but NOT for WhatsApp delivery
-                // (WhatsApp can't fetch Drive URLs due to auth/redirect walls)
-                mapped.driveUrl = driveResult.webContentLink;
-                mapped.driveId = driveResult.id;
-              }
-              imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
-            }
-          } catch (e) {
-            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+        if (driveResult) {
+          if (driveResult.webContentLink) {
+            mapped.driveUrl = driveResult.webContentLink;
+            mapped.driveId = driveResult.id;
           }
+          imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
         }
         mappedImages.push(mapped);
         _imageBuffers.push(imgBuffer);
