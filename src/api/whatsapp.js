@@ -244,10 +244,44 @@ export async function sendWhatsAppImage(imageUrl, caption, to) {
 }
 
 /**
- * Send a WhatsApp video message via Meta Cloud API.
+ * Send a WhatsApp video by downloading from URL, uploading buffer to WhatsApp Media API,
+ * and sending via media_id. Falls back to link-based, then text.
  */
 export async function sendWhatsAppVideo(videoUrl, caption, to) {
   const recipient = to || config.WHATSAPP_OWNER_PHONE;
+
+  // Try 1: Download → upload buffer → send via media_id (most reliable)
+  try {
+    const videoResponse = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000 });
+    const buffer = Buffer.from(videoResponse.data);
+    const mimeType = videoResponse.headers['content-type'] || 'video/mp4';
+    if (buffer.length < 100) throw new Error(`Video buffer too small (${buffer.length} bytes)`);
+
+    const mediaId = await uploadWhatsAppMedia(buffer, mimeType, `video-${Date.now()}.mp4`);
+    await rateLimited('whatsapp', () =>
+      retry(async () => {
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'video',
+            video: { id: mediaId, ...(caption ? { caption } : {}) },
+          },
+          { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+        log.debug('WhatsApp video sent via direct upload', { to: recipient, mediaId });
+        return result.data;
+      }, { retries: 2, label: 'WhatsApp video send (direct)' })
+    );
+    return;
+  } catch (directError) {
+    log.warn('WhatsApp direct video upload failed, trying link-based', { error: directError.message });
+  }
+
+  // Try 2: Link-based delivery (WhatsApp fetches URL)
   try {
     await rateLimited('whatsapp', async () => {
       return retry(async () => {
@@ -263,21 +297,89 @@ export async function sendWhatsAppVideo(videoUrl, caption, to) {
           { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
-        log.debug('WhatsApp video sent', { to: recipient });
+        log.debug('WhatsApp video sent via link', { to: recipient });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp video send' });
+      }, { retries: 2, label: 'WhatsApp video send (link)' });
     });
-  } catch (error) {
-    log.warn('WhatsApp video send failed, falling back to text URL', { error: error.message });
+  } catch (linkError) {
+    log.warn('WhatsApp video send failed completely, falling back to text URL', { error: linkError.message });
     await sendWhatsApp(`${caption ? `${caption}\n` : ''}${videoUrl}`, to);
   }
 }
 
 /**
- * Send a WhatsApp document message via Meta Cloud API.
+ * Send a WhatsApp video using a pre-downloaded buffer.
+ * Skips the download step — use when you already have the bytes.
+ */
+export async function sendWhatsAppVideoBuffer(buffer, mimeType, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  if (!Buffer.isBuffer(buffer) || buffer.length < 100) {
+    throw new Error(`Invalid video buffer: ${Buffer.isBuffer(buffer) ? buffer.length + ' bytes' : typeof buffer}`);
+  }
+
+  const mediaId = await uploadWhatsAppMedia(buffer, mimeType || 'video/mp4', `video-${Date.now()}.mp4`);
+  await rateLimited('whatsapp', () =>
+    retry(async () => {
+      const result = await axios.post(
+        `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: recipient,
+          type: 'video',
+          video: { id: mediaId, ...(caption ? { caption } : {}) },
+        },
+        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+      log.debug('WhatsApp video sent via buffer upload', { to: recipient, mediaId });
+      return result.data;
+    }, { retries: 2, label: 'WhatsApp video send (buffer)' })
+  );
+}
+
+/**
+ * Send a WhatsApp document by downloading from URL, uploading buffer to WhatsApp Media API,
+ * and sending via media_id. Falls back to link-based, then text.
  */
 export async function sendWhatsAppDocument(documentUrl, filename, caption, to) {
   const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  const effectiveFilename = filename || 'document.pdf';
+  const mimeTypeMap = { '.pdf': 'application/pdf', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.csv': 'text/csv' };
+  const ext = effectiveFilename.includes('.') ? '.' + effectiveFilename.split('.').pop().toLowerCase() : '.pdf';
+
+  // Try 1: Download → upload buffer → send via media_id (most reliable)
+  try {
+    const docResponse = await axios.get(documentUrl, { responseType: 'arraybuffer', timeout: 60000 });
+    const buffer = Buffer.from(docResponse.data);
+    const mimeType = docResponse.headers['content-type'] || mimeTypeMap[ext] || 'application/octet-stream';
+    if (buffer.length < 100) throw new Error(`Document buffer too small (${buffer.length} bytes)`);
+
+    const mediaId = await uploadWhatsAppMedia(buffer, mimeType, effectiveFilename);
+    await rateLimited('whatsapp', () =>
+      retry(async () => {
+        const result = await axios.post(
+          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: recipient,
+            type: 'document',
+            document: { id: mediaId, filename: effectiveFilename, ...(caption ? { caption } : {}) },
+          },
+          { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+        log.debug('WhatsApp document sent via direct upload', { to: recipient, mediaId, filename: effectiveFilename });
+        return result.data;
+      }, { retries: 2, label: 'WhatsApp document send (direct)' })
+    );
+    return;
+  } catch (directError) {
+    log.warn('WhatsApp direct document upload failed, trying link-based', { error: directError.message, url: documentUrl?.slice(0, 80) });
+  }
+
+  // Try 2: Link-based delivery (WhatsApp fetches URL)
   try {
     await rateLimited('whatsapp', async () => {
       return retry(async () => {
@@ -288,19 +390,51 @@ export async function sendWhatsAppDocument(documentUrl, filename, caption, to) {
             recipient_type: 'individual',
             to: recipient,
             type: 'document',
-            document: { link: documentUrl, filename: filename || 'document.pdf', ...(caption ? { caption } : {}) },
+            document: { link: documentUrl, filename: effectiveFilename, ...(caption ? { caption } : {}) },
           },
           { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
-        log.debug('WhatsApp document sent', { to: recipient, filename });
+        log.debug('WhatsApp document sent via link', { to: recipient, filename: effectiveFilename });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp document send' });
+      }, { retries: 2, label: 'WhatsApp document send (link)' });
     });
-  } catch (error) {
-    log.warn('WhatsApp document send failed, falling back to text URL', { error: error.message });
+  } catch (linkError) {
+    log.warn('WhatsApp document send failed completely, falling back to text URL', { error: linkError.message });
     await sendWhatsApp(`${caption ? `${caption}\n` : ''}${documentUrl}`, to);
   }
+}
+
+/**
+ * Send a WhatsApp document using a pre-downloaded buffer.
+ * Skips the download step — use when you already have the bytes (e.g. exported PDF from Google Docs).
+ */
+export async function sendWhatsAppDocumentBuffer(buffer, mimeType, filename, caption, to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  const effectiveFilename = filename || 'document.pdf';
+  if (!Buffer.isBuffer(buffer) || buffer.length < 100) {
+    throw new Error(`Invalid document buffer: ${Buffer.isBuffer(buffer) ? buffer.length + ' bytes' : typeof buffer}`);
+  }
+
+  const mediaId = await uploadWhatsAppMedia(buffer, mimeType || 'application/pdf', effectiveFilename);
+  await rateLimited('whatsapp', () =>
+    retry(async () => {
+      const result = await axios.post(
+        `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: recipient,
+          type: 'document',
+          document: { id: mediaId, filename: effectiveFilename, ...(caption ? { caption } : {}) },
+        },
+        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
+      log.debug('WhatsApp document sent via buffer upload', { to: recipient, mediaId, filename: effectiveFilename });
+      return result.data;
+    }, { retries: 2, label: 'WhatsApp document send (buffer)' })
+  );
 }
 
 function splitMessage(text, maxLength) {
@@ -323,4 +457,4 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppImageDirect, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };
+export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppImageDirect, sendWhatsAppVideo, sendWhatsAppVideoBuffer, sendWhatsAppDocument, sendWhatsAppDocumentBuffer, uploadWhatsAppMedia, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };
