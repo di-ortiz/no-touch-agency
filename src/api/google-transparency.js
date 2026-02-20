@@ -1,7 +1,6 @@
 import axios from 'axios';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
-import { retry, isRetryableHttpError } from '../utils/retry.js';
 
 const log = logger.child({ platform: 'google-transparency' });
 
@@ -11,110 +10,119 @@ const BASE_URL = 'https://adstransparency.google.com';
  * Search the Google Ads Transparency Center for advertiser creatives.
  *
  * Uses the public RPC endpoint that powers the Transparency Center web UI.
- * Returns ad creatives with their format, preview URL, and date ranges.
+ * No retries — this is a scraping endpoint that may block server IPs.
+ * Fails fast so Sofia can fall back to Meta Ad Library or DataForSEO.
  *
  * @param {object} opts
  * @param {string} opts.query - Advertiser name or domain to search
  * @param {string} opts.region - Region code (default: 'anywhere')
  * @param {number} opts.limit - Max results (default: 10)
- * @returns {Array} Array of advertiser results with creative data
+ * @returns {object} Advertiser results with creative data
  */
 export async function searchAdvertiser(opts = {}) {
   if (!opts.query) throw new Error('Search query is required');
 
-  return rateLimited('google', () =>
-    retry(async () => {
-      log.info('Searching Google Ads Transparency Center', { query: opts.query });
+  return rateLimited('google', async () => {
+    log.info('Searching Google Ads Transparency Center', { query: opts.query });
 
-      // Step 1: Search for the advertiser
-      const searchRes = await axios.get(`${BASE_URL}/anji/_/rpc/SearchService/SearchAdvertisers`, {
-        params: {
-          q: opts.query,
-          region: opts.region || 'anywhere',
-        },
-        headers: {
-          'User-Agent': 'Mozilla/5.0 AgencyBot/1.0',
-          Accept: 'application/json',
-        },
-        timeout: 15000,
-      });
+    const searchRes = await axios.get(`${BASE_URL}/anji/_/rpc/SearchService/SearchAdvertisers`, {
+      params: {
+        q: opts.query,
+        region: opts.region || 'anywhere',
+      },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'application/json',
+      },
+      timeout: 8000, // fail fast
+      validateStatus: (s) => s < 500, // don't throw on 4xx — just return empty
+    });
 
-      const advertisers = parseSearchResults(searchRes.data);
-      if (advertisers.length === 0) {
-        log.info('No advertisers found', { query: opts.query });
-        return { advertisers: [], creatives: [], query: opts.query };
-      }
+    if (searchRes.status >= 400) {
+      log.warn('Google Transparency returned non-OK status', { status: searchRes.status, query: opts.query });
+      return { advertisers: [], query: opts.query, source: 'google_ads_transparency_center' };
+    }
 
-      return {
-        query: opts.query,
-        advertisers: advertisers.slice(0, opts.limit || 10),
-        source: 'google_ads_transparency_center',
-      };
-    }, { retries: 2, label: 'Google Transparency search', shouldRetry: isRetryableHttpError })
-  );
+    const advertisers = parseSearchResults(searchRes.data);
+    if (advertisers.length === 0) {
+      log.info('No advertisers found', { query: opts.query });
+      return { advertisers: [], creatives: [], query: opts.query };
+    }
+
+    return {
+      query: opts.query,
+      advertisers: advertisers.slice(0, opts.limit || 10),
+      source: 'google_ads_transparency_center',
+    };
+  });
 }
 
 /**
  * Get creatives for a specific advertiser by their ID.
- *
- * @param {string} advertiserId - Google Ads advertiser ID
- * @param {object} opts
- * @param {string} opts.region - Region filter
- * @param {string} opts.format - Ad format filter (TEXT, IMAGE, VIDEO)
- * @param {number} opts.limit - Max results
- * @returns {object} Advertiser info with creatives list
  */
 export async function getAdvertiserCreatives(advertiserId, opts = {}) {
-  return rateLimited('google', () =>
-    retry(async () => {
-      log.info('Fetching advertiser creatives', { advertiserId });
+  return rateLimited('google', async () => {
+    log.info('Fetching advertiser creatives', { advertiserId });
 
-      const res = await axios.get(`${BASE_URL}/anji/_/rpc/SearchService/SearchCreatives`, {
-        params: {
-          advertiser_id: advertiserId,
-          region: opts.region || 'anywhere',
-          format: opts.format || '',
-        },
-        headers: {
-          'User-Agent': 'Mozilla/5.0 AgencyBot/1.0',
-          Accept: 'application/json',
-        },
-        timeout: 15000,
-      });
+    const res = await axios.get(`${BASE_URL}/anji/_/rpc/SearchService/SearchCreatives`, {
+      params: {
+        advertiser_id: advertiserId,
+        region: opts.region || 'anywhere',
+        format: opts.format || '',
+      },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'application/json',
+      },
+      timeout: 8000,
+      validateStatus: (s) => s < 500,
+    });
 
-      const creatives = parseCreativeResults(res.data);
-      return {
-        advertiserId,
-        creatives: creatives.slice(0, opts.limit || 20),
-        totalFound: creatives.length,
-        source: 'google_ads_transparency_center',
-      };
-    }, { retries: 2, label: 'Google Transparency creatives', shouldRetry: isRetryableHttpError })
-  );
+    if (res.status >= 400) {
+      log.warn('Google Transparency creatives returned non-OK status', { status: res.status, advertiserId });
+      return { advertiserId, creatives: [], totalFound: 0 };
+    }
+
+    const creatives = parseCreativeResults(res.data);
+    return {
+      advertiserId,
+      creatives: creatives.slice(0, opts.limit || 20),
+      totalFound: creatives.length,
+      source: 'google_ads_transparency_center',
+    };
+  });
 }
 
 /**
  * Combined search: find advertiser + get their creatives in one call.
- *
- * @param {object} opts
- * @param {string} opts.query - Brand or domain to search
- * @param {string} opts.region - Region
- * @param {number} opts.limit - Max creatives
- * @returns {object} Full transparency report
  */
 export async function searchAndGetCreatives(opts = {}) {
-  const searchResult = await searchAdvertiser(opts);
+  let searchResult;
+  try {
+    searchResult = await searchAdvertiser(opts);
+  } catch (e) {
+    // Fail fast — don't let network errors waste time
+    log.warn('Google Transparency search failed', { error: e.message, query: opts.query });
+    return {
+      query: opts.query,
+      advertiserFound: false,
+      advertisers: [],
+      creatives: [],
+      error: e.message,
+      message: `Google Ads Transparency Center is currently unavailable. Try searching the Meta Ad Library instead, or visit directly: ${BASE_URL}/?q=${encodeURIComponent(opts.query || '')}`,
+    };
+  }
+
   if (!searchResult.advertisers || searchResult.advertisers.length === 0) {
     return {
       query: opts.query,
       advertiserFound: false,
       advertisers: [],
       creatives: [],
-      message: `No advertisers found for "${opts.query}" on Google Ads Transparency Center.`,
+      message: `No advertisers found for "${opts.query}" on Google Ads Transparency Center. You can view it directly at: ${BASE_URL}/?q=${encodeURIComponent(opts.query || '')}`,
     };
   }
 
-  // Get creatives for the top advertiser match
   const topAdvertiser = searchResult.advertisers[0];
   if (!topAdvertiser.id) {
     return {
@@ -153,7 +161,6 @@ export async function searchAndGetCreatives(opts = {}) {
 
 function parseSearchResults(data) {
   if (!data) return [];
-  // The RPC endpoint returns nested arrays; handle gracefully
   try {
     if (Array.isArray(data)) {
       return data.map(item => ({
@@ -183,7 +190,7 @@ function parseCreativeResults(data) {
     if (Array.isArray(data)) {
       return data.map(item => ({
         id: item[0] || null,
-        format: item[1] || 'UNKNOWN', // TEXT, IMAGE, VIDEO
+        format: item[1] || 'UNKNOWN',
         firstShown: item[2] || null,
         lastShown: item[3] || null,
         previewUrl: item[4] || null,

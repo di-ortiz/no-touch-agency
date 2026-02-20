@@ -221,9 +221,11 @@ function trimMessagesToFit(messages) {
 }
 
 // Tool execution timeout: prevent any single tool from hanging forever
-const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
-const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
+const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation (includes multi-format + provider fallback)
+const DEFAULT_TOOL_TIMEOUT_MS = 45 * 1000; // 45s for regular tools (API calls, searches)
 const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+// Overall loop timeout: if the entire tool-use loop takes longer than this, bail out
+const LOOP_TIMEOUT_MS = 3 * 60 * 1000; // 3 min total for all tool rounds
 
 // Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
 const TOOL_PROGRESS_MESSAGES = {
@@ -2945,11 +2947,12 @@ async function handleTelegramCommand(message, chatId) {
       workflow: 'telegram-csa',
     });
 
-    // Handle tool use loop (max 10 rounds to allow multi-step tasks)
+    // Handle tool use loop (max 10 rounds, 3 min total)
     let rounds = 0;
+    const loopStart = Date.now();
     const toolsSummary = [];
     const allToolResults = []; // Collect all tool results for persistent history
-    while (response.stopReason === 'tool_use' && rounds < 10) {
+    while (response.stopReason === 'tool_use' && rounds < 10 && (Date.now() - loopStart) < LOOP_TIMEOUT_MS) {
       rounds++;
 
       // Send text from every round so user always sees progress
@@ -3392,11 +3395,12 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
+    // Tool-use loop (max 10 rounds, 3 min total)
     let rounds = 0;
+    const loopStart = Date.now();
     const toolsSummary = [];
     const allToolResults = []; // Collect all tool results for persistent history
-    while (response.stopReason === 'tool_use' && rounds < 10) {
+    while (response.stopReason === 'tool_use' && rounds < 10 && (Date.now() - loopStart) < LOOP_TIMEOUT_MS) {
       rounds++;
 
       // Send text from every round so user always sees progress
@@ -3636,11 +3640,12 @@ async function handleCommand(message) {
       workflow: 'whatsapp-csa',
     });
 
-    // Handle tool use loop (max 10 rounds to allow multi-step tasks)
+    // Handle tool use loop (max 10 rounds, 3 min total)
     let rounds = 0;
+    const loopStart = Date.now();
     const toolsSummary = []; // track what tools ran for history context
     const allToolResults = []; // Collect all tool results for persistent history
-    while (response.stopReason === 'tool_use' && rounds < 10) {
+    while (response.stopReason === 'tool_use' && rounds < 10 && (Date.now() - loopStart) < LOOP_TIMEOUT_MS) {
       rounds++;
 
       // Send text from every round so user always sees progress
@@ -3981,11 +3986,12 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       workflow: 'client-chat',
     });
 
-    // Tool-use loop (max 10 rounds to allow multi-step tasks like keyword research)
+    // Tool-use loop (max 10 rounds, 3 min total)
     let rounds = 0;
+    const loopStart = Date.now();
     const toolsSummary = [];
     const allToolResults = []; // Collect all tool results for persistent history
-    while (response.stopReason === 'tool_use' && rounds < 10) {
+    while (response.stopReason === 'tool_use' && rounds < 10 && (Date.now() - loopStart) < LOOP_TIMEOUT_MS) {
       rounds++;
 
       // Send text from every round so user always sees progress

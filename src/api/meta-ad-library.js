@@ -75,7 +75,7 @@ export async function searchAds(opts = {}) {
       try {
         const res = await axios.get(`${BASE_URL}/ads_archive`, {
           params,
-          timeout: 30000,
+          timeout: 15000,
         });
 
         recordCost({ platform: 'meta', workflow: 'ad-library', costCentsOverride: 0 });
@@ -95,7 +95,7 @@ export async function searchAds(opts = {}) {
         }
         throw error;
       }
-    }, { retries: 3, label: 'Meta Ad Library search', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'Meta Ad Library search', shouldRetry: isRetryableHttpError })
   );
 }
 
