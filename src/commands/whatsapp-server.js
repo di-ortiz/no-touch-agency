@@ -1101,7 +1101,7 @@ const CSA_TOOLS = [
   // --- Google Ads Transparency Center ---
   {
     name: 'search_google_ads_transparency',
-    description: 'Search the Google Ads Transparency Center for an advertiser. Shows what Google Ads a company is running, including ad formats, date ranges, and preview links. Great for researching competitor Google Ads activity.',
+    description: 'Search the Google Ads Transparency Center for an advertiser via web scraping. Shows what Google Ads a company is running. IMPORTANT: If no results are found, it does NOT mean the advertiser has no ads — the scraping may have failed. Always share the transparencyUrl with the user so they can check directly. Try searching by both company name and domain.',
     input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Advertiser name or domain to search' }, region: { type: 'string', description: 'Region filter (default: "anywhere")' }, limit: { type: 'number', description: 'Max results (default: 10)' } }, required: ['query'] },
   },
   // --- Google Keyword Planner (via Google Ads API) ---
