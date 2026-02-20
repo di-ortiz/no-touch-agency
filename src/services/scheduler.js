@@ -86,6 +86,7 @@ export function initializeSchedule(workflows) {
     eveningCostAlert,
     weeklySEOCheck,
     monthlyContentAnalysis,
+    teamDailyDigest,
   } = workflows;
 
   // Workflow 1: Morning Intelligence Briefing - 8 AM
@@ -132,6 +133,9 @@ export function initializeSchedule(workflows) {
   // SEO Monitoring - weekly check Monday 9 AM, monthly content analysis 1st Monday at 10 AM
   if (weeklySEOCheck) registerJob('weekly-seo-check', '0 9 * * 1', weeklySEOCheck);
   if (monthlyContentAnalysis) registerJob('monthly-content-analysis', '0 10 1-7 * 1', monthlyContentAnalysis);
+
+  // Team Task Tracker - daily digest at 7:30 AM (before other briefings)
+  if (teamDailyDigest) registerJob('team-daily-digest', '30 7 * * *', teamDailyDigest);
 
   log.info(`Initialized ${jobs.size} scheduled jobs`);
 }

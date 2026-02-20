@@ -90,6 +90,16 @@ const envSchema = z.object({
   // fal.ai (Flux image generation)
   FAL_API_KEY: z.string().optional().default(''),
 
+  // Team Task Tracker
+  GMAIL_CLIENT_ID: z.string().optional().default(''),
+  GMAIL_CLIENT_SECRET: z.string().optional().default(''),
+  GMAIL_REDIRECT_URI: z.string().optional().default(''),
+  TRACKER_APP_URL: z.string().optional().default(''),
+  TRACKER_OWNER_EMAIL: z.string().optional().default(''),
+  TRACKER_OWNER_NAME: z.string().optional().default('Diego'),
+  TRACKER_DRIVE_FOLDER_ID: z.string().optional().default(''),
+  TRACKER_DB_PATH: z.string().optional().default('data/tracker.db'),
+
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),

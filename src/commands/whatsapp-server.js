@@ -51,6 +51,7 @@ import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
+import trackerRoutes from '../routes/tracker-routes.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -3503,6 +3504,9 @@ app.post('/webhook/leadsie', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
+
+// --- Team Task Tracker routes ---
+app.use('/api/tracker', trackerRoutes);
 
 // --- WhatsApp Conversational Command Handler ---
 async function handleCommand(message) {
