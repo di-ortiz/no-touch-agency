@@ -197,6 +197,8 @@ async function safeSendMedia(sendFn, url, caption, toolName) {
 // Uses buffer upload (native delivery) whenever possible for both WhatsApp and Telegram.
 // Falls back to URL-based delivery, then text URL as last resort.
 async function deliverMediaInline(toolName, result, channel, chatId) {
+  // Wrap entire delivery in try/catch — media delivery failures must NEVER crash the message handler
+  try {
   const sendImage = (url, caption) =>
     channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
   const sendVideo = (url, caption) =>
@@ -225,7 +227,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
           log.warn('WhatsApp URL image delivery also failed', { error: e.message });
         }
       }
-      if (!sent) throw new Error('No delivery method succeeded');
+      if (!sent) log.warn('No WhatsApp delivery method succeeded', { hasBuffer: !!bufferObj?.buffer, hasHttpUrl });
       return sent;
     } else {
       // Telegram: use buffer upload when available
@@ -241,7 +243,8 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
         await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
         return true;
       }
-      throw new Error('No delivery method available');
+      log.warn('No Telegram delivery method available', { hasBuffer: !!bufferObj?.buffer, hasHttpUrl });
+      return false;
     }
   }
 
@@ -367,6 +370,9 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
         await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
       }
     }
+  }
+  } catch (mediaErr) {
+    log.error('deliverMediaInline crashed — non-fatal', { toolName, error: mediaErr.message, stack: mediaErr.stack });
   }
 }
 
@@ -1624,8 +1630,7 @@ Return ONLY the JSON array, no other text.`;
               // Provider included raw base64 (Gemini)
               imgBuffer = { buffer: Buffer.from(img.base64, 'base64'), mimeType: img.mimeType || 'image/png' };
             } else {
-              // HTTP URL — download directly
-              const { default: axios } = await import('axios');
+              // HTTP URL — download directly (axios already imported at top of file)
               const resp = await axios.get(img.url, { responseType: 'arraybuffer', timeout: 15000 });
               imgBuffer = { buffer: Buffer.from(resp.data), mimeType: resp.headers['content-type'] || 'image/png' };
             }
