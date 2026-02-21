@@ -16,10 +16,6 @@ const log = logger.child({ workflow: 'report-builder' });
  */
 export async function buildReport(opts = {}) {
   const doc = await googleDrive.createDocument(opts.title, opts.content, opts.folderId);
-  if (!doc) {
-    log.warn('Failed to create report document');
-    return null;
-  }
 
   // Export as PDF
   let pdfUrl = null;

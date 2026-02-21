@@ -329,8 +329,6 @@ export async function buildChartPresentation(opts = {}) {
   const presTitle = `${opts.clientName} — ${opts.title || 'Data Charts'} — ${date}`;
 
   const presentation = await googleSlides.createPresentation(presTitle, opts.folderId);
-  if (!presentation) return null;
-
   const { presentationId } = presentation;
   const defaultSlideId = await googleSlides.getDefaultSlideId(presentationId);
 

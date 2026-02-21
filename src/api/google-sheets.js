@@ -38,18 +38,14 @@ function getAuth() {
 
 function getSheets() {
   if (!sheetsClient) {
-    const a = getAuth();
-    if (!a) return null;
-    sheetsClient = google.sheets({ version: 'v4', auth: a });
+    sheetsClient = google.sheets({ version: 'v4', auth: getAuth() });
   }
   return sheetsClient;
 }
 
 function getDrive() {
   if (!driveClient) {
-    const a = getAuth();
-    if (!a) return null;
-    driveClient = google.drive({ version: 'v3', auth: a });
+    driveClient = google.drive({ version: 'v3', auth: getAuth() });
   }
   return driveClient;
 }
@@ -59,7 +55,6 @@ function getDrive() {
 export async function createSpreadsheet(title, folderId) {
   const sheets = getSheets();
   const drive = getDrive();
-  if (!sheets || !drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -97,7 +92,6 @@ export async function createSpreadsheet(title, folderId) {
 
 export async function writeData(spreadsheetId, range, values) {
   const sheets = getSheets();
-  if (!sheets) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -116,7 +110,6 @@ export async function writeData(spreadsheetId, range, values) {
 
 export async function readData(spreadsheetId, range) {
   const sheets = getSheets();
-  if (!sheets) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -133,7 +126,6 @@ export async function readData(spreadsheetId, range) {
 
 export async function formatSheet(spreadsheetId, requests) {
   const sheets = getSheets();
-  if (!sheets) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -162,7 +154,6 @@ export async function createContentCalendar({ clientName, month, posts, folderId
   const title = `${clientName} — Content Calendar — ${month}`;
 
   const spreadsheet = await createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
 
   // Header row
   const headers = ['Date', 'Platform', 'Content Type', 'Copy / Caption', 'Creative Brief', 'CTA', 'Hashtags', 'Status', 'Notes'];
@@ -222,7 +213,6 @@ export async function createReportSheet({ clientName, reportType, data, folderId
   const title = `${clientName} — ${reportType} Report — ${new Date().toISOString().split('T')[0]}`;
 
   const spreadsheet = await createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
 
   // data should be an array of arrays (rows), first row being headers
   if (data && data.length > 0) {

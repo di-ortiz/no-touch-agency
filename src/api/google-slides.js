@@ -38,18 +38,14 @@ function getAuth() {
 
 function getSlides() {
   if (!slidesClient) {
-    const a = getAuth();
-    if (!a) return null;
-    slidesClient = google.slides({ version: 'v1', auth: a });
+    slidesClient = google.slides({ version: 'v1', auth: getAuth() });
   }
   return slidesClient;
 }
 
 function getDrive() {
   if (!driveClient) {
-    const a = getAuth();
-    if (!a) return null;
-    driveClient = google.drive({ version: 'v3', auth: a });
+    driveClient = google.drive({ version: 'v3', auth: getAuth() });
   }
   return driveClient;
 }
@@ -71,7 +67,6 @@ const COLORS = {
 export async function createPresentation(title, folderId) {
   const slides = getSlides();
   const drive = getDrive();
-  if (!slides || !drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -105,7 +100,6 @@ export async function createPresentation(title, folderId) {
  */
 export async function batchUpdate(presentationId, requests) {
   const slides = getSlides();
-  if (!slides) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -141,8 +135,6 @@ export async function buildCreativeDeck(opts = {}) {
   const title = `${opts.clientName} — Creative Deck — ${opts.campaignName || opts.platform || 'Campaign'} — ${date}`;
 
   const presentation = await createPresentation(title, opts.folderId);
-  if (!presentation) return null;
-
   const { presentationId } = presentation;
   const requests = [];
   let slideIndex = 0;
@@ -592,13 +584,8 @@ function createTextBox(slideId, boxId, opts) {
  */
 export async function getDefaultSlideId(presentationId) {
   const s = getSlides();
-  if (!s) return null;
-  try {
-    const pres = await s.presentations.get({ presentationId });
-    return pres.data.slides?.[0]?.objectId || null;
-  } catch {
-    return null;
-  }
+  const pres = await s.presentations.get({ presentationId });
+  return pres.data.slides?.[0]?.objectId || null;
 }
 
 export default {

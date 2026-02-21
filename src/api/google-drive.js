@@ -41,18 +41,14 @@ function getAuth() {
 
 function getDrive() {
   if (!driveClient) {
-    const a = getAuth();
-    if (!a) return null;
-    driveClient = google.drive({ version: 'v3', auth: a });
+    driveClient = google.drive({ version: 'v3', auth: getAuth() });
   }
   return driveClient;
 }
 
 function getDocs() {
   if (!docsClient) {
-    const a = getAuth();
-    if (!a) return null;
-    docsClient = google.docs({ version: 'v1', auth: a });
+    docsClient = google.docs({ version: 'v1', auth: getAuth() });
   }
   return docsClient;
 }
@@ -61,7 +57,6 @@ function getDocs() {
 
 export async function listFiles(folderId, opts = {}) {
   const drive = getDrive();
-  if (!drive) return { files: [] };
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -78,7 +73,6 @@ export async function listFiles(folderId, opts = {}) {
 
 export async function getFile(fileId) {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -93,7 +87,6 @@ export async function getFile(fileId) {
 
 export async function downloadFile(fileId) {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -108,7 +101,6 @@ export async function downloadFile(fileId) {
 
 export async function exportDocument(fileId, mimeType = 'text/plain') {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -130,7 +122,6 @@ export async function exportDocument(fileId, mimeType = 'text/plain') {
  */
 export async function exportDocumentAsBuffer(fileId, mimeType = 'application/pdf') {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -147,7 +138,6 @@ export async function exportDocumentAsBuffer(fileId, mimeType = 'application/pdf
 
 export async function createFolder(name, parentId) {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -168,7 +158,6 @@ export async function createFolder(name, parentId) {
 export async function createDocument(name, content, folderId) {
   const drive = getDrive();
   const docs = getDocs();
-  if (!drive || !docs) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -200,7 +189,6 @@ export async function createDocument(name, content, folderId) {
 
 export async function uploadFile(name, content, mimeType, folderId) {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -225,7 +213,6 @@ export async function uploadFile(name, content, mimeType, folderId) {
  */
 export async function appendToDocument(documentId, text) {
   const docs = getDocs();
-  if (!docs) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -249,10 +236,11 @@ export async function appendToDocument(documentId, text) {
 
 export async function ensureClientFolders(clientName) {
   const rootFolderId = config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-  if (!rootFolderId) return null;
+  if (!rootFolderId) {
+    throw new Error('GOOGLE_DRIVE_ROOT_FOLDER_ID not configured. Set it in environment variables.');
+  }
 
   const clientFolder = await createFolder(clientName, rootFolderId);
-  if (!clientFolder) return null;
 
   const subfolders = ['Brand Assets', 'Reports', 'Strategic Plans', 'Creatives', 'Audits', 'Competitor Research'];
   const folders = { root: clientFolder };
@@ -273,7 +261,6 @@ export async function ensureClientFolders(clientName) {
  */
 export async function shareFolderWithAnyone(folderId, role = 'writer') {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -295,7 +282,6 @@ export async function shareFolderWithAnyone(folderId, role = 'writer') {
  */
 export async function shareFolderWithEmail(folderId, email, role = 'writer') {
   const drive = getDrive();
-  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -344,10 +330,13 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
     return null;
   }
 
-  const drive = getDrive();
-  if (!drive) {
+  let drive;
+  try {
+    drive = getDrive();
+  } catch (credError) {
     // No Google Drive configured — still return the buffer for WhatsApp direct upload
-    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
+    log.error('Google Drive not configured, cannot persist image', { error: credError.message });
+    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: credError.message };
   }
 
   try {
@@ -399,9 +388,9 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
     log.info('Image persisted to Google Drive', { id: uploaded.id, fileName });
     return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink, imageBuffer, mimeType };
   } catch (e) {
-    log.warn('Failed to persist image to Google Drive (buffer still available)', { error: e.message });
+    log.error('FAILED to persist image to Google Drive', { error: e.message, fileName });
     // Drive upload failed but we still have the buffer for WhatsApp direct upload
-    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
+    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: e.message };
   }
 }
 
