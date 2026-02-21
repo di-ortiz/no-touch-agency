@@ -55,6 +55,8 @@ import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { rateLimited } from '../utils/rate-limiter.js';
+import { retry, isRetryableHttpError } from '../utils/retry.js';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
@@ -101,16 +103,21 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
       log.info('Uploading image buffer to WhatsApp Media API', { bufferSize: imageBuffer.length, mimeType: effectiveMime, to: chatId });
       const mediaId = await uploadWhatsAppMedia(imageBuffer, effectiveMime, `image-${Date.now()}${ext}`);
 
-      const sendResult = await axios.post(
-        `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: chatId,
-          type: 'image',
-          image: { id: mediaId, ...(caption ? { caption } : {}) },
-        },
-        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      const sendResult = await rateLimited('whatsapp', () =>
+        retry(async () => {
+          const res = await axios.post(
+            `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: chatId,
+              type: 'image',
+              image: { id: mediaId, ...(caption ? { caption } : {}) },
+            },
+            { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+          );
+          return res;
+        }, { retries: 2, label: 'WhatsApp image send (native)', shouldRetry: isRetryableHttpError })
       );
       const msgId = sendResult.data?.messages?.[0]?.id;
       log.info('WhatsApp image sent via native upload', { to: chatId, mediaId, messageId: msgId });
