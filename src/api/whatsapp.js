@@ -23,37 +23,54 @@ export async function sendWhatsApp(message, to) {
 
   for (const chunk of chunks) {
     await rateLimited('whatsapp', async () => {
-      return retry(async () => {
-        const result = await axios.post(
-          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: recipient,
-            type: 'text',
-            text: { body: chunk },
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
-              'Content-Type': 'application/json',
+      try {
+        return await retry(async () => {
+          const result = await axios.post(
+            `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: recipient,
+              type: 'text',
+              text: { body: chunk },
             },
-          }
-        );
+            {
+              headers: {
+                Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
 
-        recordCost({
-          platform: 'whatsapp-cloud',
-          workflow: 'whatsapp',
-          costCentsOverride: 0.5, // ~$0.005 per message (varies by country)
+          recordCost({
+            platform: 'whatsapp-cloud',
+            workflow: 'whatsapp',
+            costCentsOverride: 0.5, // ~$0.005 per message (varies by country)
+          });
+
+          log.debug('WhatsApp sent', { messageId: result.data?.messages?.[0]?.id, to: recipient });
+          return result.data;
+        }, {
+          retries: 3,
+          label: 'WhatsApp send',
+          shouldRetry: isRetryableHttpError,
         });
-
-        log.debug('WhatsApp sent', { messageId: result.data?.messages?.[0]?.id, to: recipient });
-        return result.data;
-      }, {
-        retries: 3,
-        label: 'WhatsApp send',
-        shouldRetry: isRetryableHttpError,
-      });
+      } catch (e) {
+        // Log full API error details for 4xx errors so we can diagnose token/config issues
+        const apiError = e.response?.data?.error;
+        if (apiError) {
+          log.error('WhatsApp API error', {
+            status: e.response?.status,
+            message: apiError.message,
+            code: apiError.code,
+            subcode: apiError.error_subcode,
+            type: apiError.type,
+            to: recipient,
+            phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+          });
+        }
+        throw e;
+      }
     });
   }
 }

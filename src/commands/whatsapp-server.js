@@ -73,7 +73,7 @@ async function sendThinkingIndicator(channel, chatId, message) {
       await sendWhatsAppThinking(chatId, message);
     }
   } catch (e) {
-    log.debug('Failed to send thinking indicator', { error: e.message });
+    log.warn('Failed to send thinking indicator', { error: e.message, channel, chatId });
   }
 }
 
@@ -1656,22 +1656,33 @@ Return ONLY the JSON array, no other text.`;
         _imageBuffers.push(imgBuffer);
       }
 
-      // Save companion Sheet to Drive
+      // Save companion Sheet to Drive — skip if ALL Drive uploads failed (quota/permissions)
+      // to avoid hanging on the same Google API issue that blocked uploads
       let sheetUrl = null;
       let sheetError = null;
-      try {
-        const sheet = await campaignRecord.createAdImagesRecord({
-          clientName: toolInput.clientName,
-          platform: toolInput.platform,
-          concept: toolInput.concept,
-          imagePrompt,
-          images: mappedImages,
-          folderId: imgFolderId,
-        });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create ad images record sheet', { error: e.message });
-        sheetError = e.message;
+      const allDriveFailed = driveErrors.length > 0 && driveErrors.length >= images.filter(i => !i.error).length;
+      if (allDriveFailed) {
+        log.warn('Skipping sheet creation — all Drive uploads failed, Google API likely unavailable', { driveErrors });
+        sheetError = 'Skipped — Google Drive unavailable';
+      } else {
+        try {
+          const SHEET_TIMEOUT_MS = 30000; // 30s max for sheet creation
+          const sheet = await Promise.race([
+            campaignRecord.createAdImagesRecord({
+              clientName: toolInput.clientName,
+              platform: toolInput.platform,
+              concept: toolInput.concept,
+              imagePrompt,
+              images: mappedImages,
+              folderId: imgFolderId,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Sheet creation timed out after 30s')), SHEET_TIMEOUT_MS)),
+          ]);
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create ad images record sheet', { error: e.message });
+          sheetError = e.message;
+        }
       }
 
       const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
@@ -1774,25 +1785,35 @@ Return ONLY the JSON array, no other text.`;
         persistedImageUrls.push(originalUrl); // always use original provider URL
       }
 
-      // Save companion Sheet to Drive
+      // Save companion Sheet to Drive — skip if ALL Drive uploads failed (quota/permissions)
       let sheetUrl = null;
       let sheetError = null;
-      try {
-        const sheet = await campaignRecord.createCreativeRecord({
-          clientName: pkg.clientName,
-          platform: pkg.platform,
-          campaignName: pkg.campaignName,
-          textAds: pkg.textAds,
-          images: pkg.images,
-          videos: pkg.videos,
-          summary: pkg.summary,
-          presentationUrl: pkg.presentation?.url,
-          folderId: pkgFolderId,
-        });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create creative record sheet', { error: e.message });
-        sheetError = e.message;
+      const allPkgDriveFailed = pkgDriveErrors.length > 0 && pkgDriveErrors.length >= pkg.images.filter(i => !i.error && i.url).length;
+      if (allPkgDriveFailed) {
+        log.warn('Skipping creative sheet creation — all Drive uploads failed', { pkgDriveErrors });
+        sheetError = 'Skipped — Google Drive unavailable';
+      } else {
+        try {
+          const SHEET_TIMEOUT_MS = 30000;
+          const sheet = await Promise.race([
+            campaignRecord.createCreativeRecord({
+              clientName: pkg.clientName,
+              platform: pkg.platform,
+              campaignName: pkg.campaignName,
+              textAds: pkg.textAds,
+              images: pkg.images,
+              videos: pkg.videos,
+              summary: pkg.summary,
+              presentationUrl: pkg.presentation?.url,
+              folderId: pkgFolderId,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Sheet creation timed out after 30s')), SHEET_TIMEOUT_MS)),
+          ]);
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create creative record sheet', { error: e.message });
+          sheetError = e.message;
+        }
       }
 
       const pkgResult = {

@@ -23,17 +23,27 @@ export async function retry(fn, opts = {}) {
       return await fn(attempt);
     } catch (error) {
       lastError = error;
-      if (attempt >= retries || !shouldRetry(error)) {
-        break;
-      }
-      // Use longer delay for rate limits (429) since they're per-minute
-      const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
-      const effectiveBase = isRateLimit ? Math.max(baseDelay, 15000) : baseDelay;
-      const delay = effectiveBase * Math.pow(2, attempt);
-      // Include API response body for better debugging (e.g. Meta API error details)
+      // Extract API response body for debugging (e.g. Meta API error details)
       const responseBody = error.response?.data;
       const detail = typeof responseBody === 'string' ? responseBody.slice(0, 200) :
         (responseBody?.error?.message || responseBody?.error?.error_user_msg || undefined);
+      const status = error.status || error.response?.status;
+
+      if (attempt >= retries || !shouldRetry(error)) {
+        // Log final failure with full detail so 400/403 errors are diagnosable
+        if (detail || status) {
+          logger.error(`${label} failed permanently after ${attempt + 1} attempt(s)`, {
+            error: error.message,
+            status,
+            ...(detail ? { detail } : {}),
+          });
+        }
+        break;
+      }
+      // Use longer delay for rate limits (429) since they're per-minute
+      const isRateLimit = status === 429 || error.message?.includes('rate_limit');
+      const effectiveBase = isRateLimit ? Math.max(baseDelay, 15000) : baseDelay;
+      const delay = effectiveBase * Math.pow(2, attempt);
       logger.warn(`${label} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms`, {
         error: error.message,
         isRateLimit,
