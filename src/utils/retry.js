@@ -30,9 +30,14 @@ export async function retry(fn, opts = {}) {
       const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
       const effectiveBase = isRateLimit ? Math.max(baseDelay, 15000) : baseDelay;
       const delay = effectiveBase * Math.pow(2, attempt);
+      // Include API response body for better debugging (e.g. Meta API error details)
+      const responseBody = error.response?.data;
+      const detail = typeof responseBody === 'string' ? responseBody.slice(0, 200) :
+        (responseBody?.error?.message || responseBody?.error?.error_user_msg || undefined);
       logger.warn(`${label} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay}ms`, {
         error: error.message,
         isRateLimit,
+        ...(detail ? { detail } : {}),
       });
       await sleep(delay);
     }

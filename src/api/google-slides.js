@@ -96,7 +96,7 @@ export async function createPresentation(title, folderId) {
       const url = `https://docs.google.com/presentation/d/${presentationId}/edit`;
       log.info(`Created presentation: ${title}`, { presentationId });
       return { presentationId, url };
-    }, { retries: 3, label: 'Google Slides create' })
+    }, { retries: 3, label: 'Google Slides create', shouldRetry: (err) => !(err.message || '').includes('does not have permission') })
   );
 }
 

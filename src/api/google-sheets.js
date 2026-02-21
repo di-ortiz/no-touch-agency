@@ -89,7 +89,7 @@ export async function createSpreadsheet(title, folderId) {
 
       log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
       return { spreadsheetId, url };
-    }, { retries: 3, label: 'Google Sheets create' })
+    }, { retries: 3, label: 'Google Sheets create', shouldRetry: (err) => !(err.message || '').includes('does not have permission') })
   );
 }
 

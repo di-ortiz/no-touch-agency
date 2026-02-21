@@ -102,7 +102,7 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
       const mediaId = await uploadWhatsAppMedia(imageBuffer, effectiveMime, `image-${Date.now()}${ext}`);
 
       const sendResult = await axios.post(
-        `https://graph.facebook.com/v21.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -4194,7 +4194,7 @@ async function handleMediaUpload(from, mediaType, media, caption) {
 async function getWhatsAppMediaUrl(mediaId) {
   try {
     const res = await axios.get(
-      `https://graph.facebook.com/v21.0/${mediaId}`,
+      `https://graph.facebook.com/v22.0/${mediaId}`,
       { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` } }
     );
     return res.data?.url;

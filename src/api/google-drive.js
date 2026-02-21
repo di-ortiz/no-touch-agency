@@ -351,24 +351,37 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
   }
 
   try {
-    const stream = Readable.from(imageBuffer);
-
-    // Upload to Drive
+    // Upload to Drive with a per-attempt timeout to avoid hanging on quota/permission errors
+    const DRIVE_UPLOAD_TIMEOUT_MS = 30000; // 30s per attempt
     const uploaded = await rateLimited('google', () =>
       retry(async () => {
-        const res = await drive.files.create({
-          requestBody: {
-            name: fileName,
-            parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
-          },
-          media: {
-            mimeType,
-            body: stream,
-          },
-          fields: 'id, name, webViewLink, webContentLink',
-        });
+        // Create a fresh stream for each retry attempt (consumed streams can't be reused)
+        const stream = Readable.from(imageBuffer);
+        const res = await Promise.race([
+          drive.files.create({
+            requestBody: {
+              name: fileName,
+              parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
+            },
+            media: {
+              mimeType,
+              body: stream,
+            },
+            fields: 'id, name, webViewLink, webContentLink',
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Drive upload timed out')), DRIVE_UPLOAD_TIMEOUT_MS)),
+        ]);
         return res.data;
-      }, { retries: 2, label: 'Google Drive upload image from URL' })
+      }, {
+        retries: 1, // Only 1 retry (2 total attempts) to fail faster
+        label: 'Google Drive upload image from URL',
+        // Don't retry quota/permission errors — they won't succeed on retry
+        shouldRetry: (err) => {
+          const msg = err.message || '';
+          if (msg.includes('storage quota') || msg.includes('do not have permission') || msg.includes('caller does not have permission')) return false;
+          return true;
+        },
+      })
     );
 
     // Make publicly viewable
