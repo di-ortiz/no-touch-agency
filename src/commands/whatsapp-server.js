@@ -136,6 +136,15 @@ function stripBinaryBuffers(key, value) {
   return value;
 }
 
+// Truncate tool result JSON to prevent conversation context from ballooning.
+// Large results (SEO audits, ad library, keyword data) can be 50K+ chars each,
+// causing subsequent askClaude calls to timeout from excessive input tokens.
+const MAX_TOOL_RESULT_CHARS = 12000;
+function truncateToolResult(resultJson) {
+  if (resultJson.length <= MAX_TOOL_RESULT_CHARS) return resultJson;
+  return resultJson.slice(0, MAX_TOOL_RESULT_CHARS) + '... [truncated — result was ' + resultJson.length + ' chars. Key data shown above. Ask for specific details if needed.]';
+}
+
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
@@ -188,6 +197,8 @@ async function safeSendMedia(sendFn, url, caption, toolName) {
 // Uses buffer upload (native delivery) whenever possible for both WhatsApp and Telegram.
 // Falls back to URL-based delivery, then text URL as last resort.
 async function deliverMediaInline(toolName, result, channel, chatId) {
+  // Wrap entire delivery in try/catch — media delivery failures must NEVER crash the message handler
+  try {
   const sendImage = (url, caption) =>
     channel === 'telegram' ? sendTelegramPhoto(url, caption, chatId) : sendWhatsAppImage(url, caption, chatId);
   const sendVideo = (url, caption) =>
@@ -195,6 +206,9 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
 
   // Helper: deliver a single image using buffer when available, URL as fallback
   async function deliverImageWithBuffer(bufferObj, deliveryUrl, caption) {
+    // Check if URL is an HTTP URL (not a data URI) — data URIs can't be fetched by WhatsApp/Telegram
+    const hasHttpUrl = deliveryUrl && !deliveryUrl.startsWith('data:');
+
     if (channel === 'whatsapp') {
       let sent = false;
       if (bufferObj?.buffer) {
@@ -205,10 +219,15 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
           log.warn('Native WhatsApp image delivery failed', { error: e.message });
         }
       }
-      if (!sent) {
-        await sendWhatsAppImage(deliveryUrl, caption, chatId);
-        sent = true;
+      if (!sent && hasHttpUrl) {
+        try {
+          await sendWhatsAppImage(deliveryUrl, caption, chatId);
+          sent = true;
+        } catch (e) {
+          log.warn('WhatsApp URL image delivery also failed', { error: e.message });
+        }
       }
+      if (!sent) log.warn('No WhatsApp delivery method succeeded', { hasBuffer: !!bufferObj?.buffer, hasHttpUrl });
       return sent;
     } else {
       // Telegram: use buffer upload when available
@@ -220,18 +239,28 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
           log.warn('Telegram buffer photo delivery failed, trying URL', { error: e.message });
         }
       }
-      await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
-      return true;
+      if (hasHttpUrl) {
+        await safeSendMedia(sendImage, deliveryUrl, caption, toolName);
+        return true;
+      }
+      log.warn('No Telegram delivery method available', { hasBuffer: !!bufferObj?.buffer, hasHttpUrl });
+      return false;
     }
   }
 
   // Generated ad images — use native buffer upload for both WhatsApp and Telegram
   if (toolName === 'generate_ad_images' && result.images) {
-    const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
+    // An image is deliverable if it has a buffer OR a URL (not just URL — buffer-only is fine too)
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
+    const deliverableImages = result.images.filter((img, idx) => {
+      if (img.error) return false;
+      if (result._imageBuffers?.[idx]?.buffer) return true; // has buffer — can deliver even without URL
+      if (img.url || img.deliveryUrl) return true; // has URL — can try to download
+      return false;
+    });
     log.info('Delivering ad images inline', {
       total: result.images.length,
-      valid: validImages.length,
+      deliverable: deliverableImages.length,
       hasBuffers,
       channel,
     });
@@ -239,24 +268,37 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
     let deliveredCount = 0;
     for (let i = 0; i < result.images.length; i++) {
       const img = result.images[i];
-      if ((!img.url && !img.deliveryUrl) || img.error) continue;
+      const bufferObj = result._imageBuffers?.[i];
+      // Skip if no buffer AND no URL, or if error
+      if (img.error) continue;
+      if (!bufferObj?.buffer && !img.url && !img.deliveryUrl) continue;
       const caption = img.label || img.format || 'Ad image';
       const deliveryUrl = img.deliveryUrl || img.url;
 
       try {
-        const sent = await deliverImageWithBuffer(result._imageBuffers?.[i], deliveryUrl, caption);
+        const sent = await deliverImageWithBuffer(bufferObj, deliveryUrl, caption);
         if (sent) deliveredCount++;
       } catch (e) {
         log.error('All image delivery methods failed for format', { error: e.message, format: img.format, deliveryUrl: deliveryUrl?.slice(0, 80) });
       }
     }
 
-    if (deliveredCount === 0 && validImages.length > 0) {
-      log.error('Failed to deliver ANY generated images to user', { validCount: validImages.length, channel });
-      const driveUrl = validImages.find(i => i.driveUrl || i.driveId)?.driveUrl;
-      const fallbackMsg = driveUrl
-        ? `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`
-        : 'I generated your images but had trouble delivering them in chat. They should be saved in your Google Drive creatives folder.';
+    if (deliveredCount === 0) {
+      // Either ALL generation failed (no valid images) or ALL delivery failed
+      const allFailed = result.images.every(i => i.error);
+      const errors = result.images.filter(i => i.error).map(i => i.error);
+      log.error('Zero images delivered to user', { allFailed, deliverable: deliverableImages.length, errors });
+
+      const driveUrl = result.images.find(i => i.driveUrl || i.driveId)?.driveUrl;
+      let fallbackMsg;
+      if (allFailed) {
+        const errorHint = errors[0] || 'unknown error';
+        fallbackMsg = `Sorry, image generation failed: ${errorHint}. Please try again.`;
+      } else if (driveUrl) {
+        fallbackMsg = `I generated your images but had trouble sending them here. You can view them directly: ${driveUrl}`;
+      } else {
+        fallbackMsg = 'I generated your images but had trouble delivering them in chat. Please try again.';
+      }
       try {
         if (channel === 'whatsapp') await sendWhatsApp(fallbackMsg, chatId);
         else await sendTelegram(fallbackMsg, chatId);
@@ -328,6 +370,9 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
         await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
       }
     }
+  }
+  } catch (mediaErr) {
+    log.error('deliverMediaInline crashed — non-fatal', { toolName, error: mediaErr.message, stack: mediaErr.stack });
   }
 }
 
@@ -1537,10 +1582,25 @@ Return ONLY the JSON array, no other text.`;
       });
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
+      // Run all uploads in PARALLEL to avoid sequential 10-30s per image adding up
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const driveResults = await Promise.allSettled(
+        images.map(async (img) => {
+          if (!img.url || img.error) return null;
+          try {
+            return await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+          } catch (e) {
+            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+            return null;
+          }
+        })
+      );
+
       const mappedImages = [];
       const _imageBuffers = []; // kept in-memory for deliverMediaInline, not serialized to JSON
-      for (const img of images) {
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const driveResult = driveResults[i].status === 'fulfilled' ? driveResults[i].value : null;
         const mapped = {
           format: img.format,
           label: img.dimensions?.label || img.format,
@@ -1550,20 +1610,32 @@ Return ONLY the JSON array, no other text.`;
           error: img.error,
         };
         let imgBuffer = null;
-        if (img.url && !img.error) {
+        if (driveResult) {
+          if (driveResult.webContentLink) {
+            mapped.driveUrl = driveResult.webContentLink;
+            mapped.driveId = driveResult.id;
+          }
+          imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+        }
+        // Fallback: if Drive returned null but image has a URL, download bytes directly for WhatsApp upload
+        if (!imgBuffer && img.url && !img.error) {
           try {
-            const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
-            if (driveResult) {
-              if (driveResult.webContentLink) {
-                // Drive URL for permanent reference — but NOT for WhatsApp delivery
-                // (WhatsApp can't fetch Drive URLs due to auth/redirect walls)
-                mapped.driveUrl = driveResult.webContentLink;
-                mapped.driveId = driveResult.id;
+            if (img.url.startsWith('data:')) {
+              // Gemini returns base64 data URIs — decode directly
+              const match = img.url.match(/^data:([^;]+);base64,(.+)$/);
+              if (match) {
+                imgBuffer = { buffer: Buffer.from(match[2], 'base64'), mimeType: match[1] };
               }
-              imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
+            } else if (img.base64) {
+              // Provider included raw base64 (Gemini)
+              imgBuffer = { buffer: Buffer.from(img.base64, 'base64'), mimeType: img.mimeType || 'image/png' };
+            } else {
+              // HTTP URL — download directly (axios already imported at top of file)
+              const resp = await axios.get(img.url, { responseType: 'arraybuffer', timeout: 15000 });
+              imgBuffer = { buffer: Buffer.from(resp.data), mimeType: resp.headers['content-type'] || 'image/png' };
             }
-          } catch (e) {
-            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+          } catch (dlErr) {
+            log.warn('Direct image buffer download failed', { error: dlErr.message, format: img.format });
           }
         }
         mappedImages.push(mapped);
@@ -2967,7 +3039,7 @@ async function handleTelegramCommand(message, chatId) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline (images, videos)
@@ -3409,7 +3481,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           await deliverMediaInline(tool.name, result, 'telegram', chatId);
@@ -3649,7 +3721,7 @@ async function handleCommand(message) {
 
         try {
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media inline — use actual phone number, not history key
@@ -3990,7 +4062,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
             tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
           }
           const result = await executeCSAToolWithTimeout(tool.name, tool.input);
-          const resultJson = JSON.stringify(result, stripBinaryBuffers);
+          const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
           toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           allToolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });
           // Deliver generated media (images/videos) inline

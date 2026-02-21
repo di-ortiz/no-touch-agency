@@ -22,7 +22,7 @@ const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
  * @param {string} opts.clientId - Client ID for cost tracking
  * @param {Array} opts.tools - Tool definitions for tool use
  */
-const CLAUDE_API_TIMEOUT_MS = 90_000; // 90s timeout per API call (includes retries)
+const CLAUDE_API_TIMEOUT_MS = 180_000; // 180s timeout per API call — complex tool-use conversations with large context need more time
 
 export async function askClaude({
   systemPrompt,

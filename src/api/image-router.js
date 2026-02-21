@@ -10,9 +10,9 @@ const log = logger.child({ platform: 'image-router' });
  * Image generation router with smart provider fallback.
  *
  * Provider priority (tries each in order, falls back on failure):
- *   1. DALL-E 3  (OpenAI)    — highest quality, most reliable
- *   2. fal.ai    (Flux Pro)   — fast, great quality, different aesthetic
- *   3. Imagen 3  (Gemini)     — Google's model, good for variety
+ *   1. fal.ai    (Flux Schnell + Flux Pro racing) — fastest, great quality
+ *   2. DALL-E 3  (OpenAI)    — highest quality, reliable fallback
+ *   3. Imagen 3  (Gemini)     — Google's model, last resort
  *
  * On quota exhaustion, auth failure, or rate limit → automatically tries next provider.
  * Returns whichever provider succeeds first.
@@ -50,8 +50,8 @@ function recordProviderSuccess(provider) {
  */
 function getAvailableProviders(preferred) {
   const all = [
+    { key: 'fal', name: 'Flux (fal.ai)', configured: fal.isConfigured() },
     { key: 'dalle', name: 'DALL-E 3', configured: !!config.OPENAI_API_KEY },
-    { key: 'fal', name: 'Flux Pro (fal.ai)', configured: fal.isConfigured() },
     { key: 'gemini', name: 'Imagen 3 (Gemini)', configured: gemini.isConfigured() },
   ];
 
@@ -71,27 +71,20 @@ function getAvailableProviders(preferred) {
 
 /**
  * Check if an error indicates we should try the next provider.
- * (quota exhaustion, auth failure, rate limit, or safety block)
+ * Default: ALWAYS fall back unless it's clearly a prompt/input issue that
+ * would fail identically on every provider.
  */
 function isFallbackError(error) {
   const msg = (error.message || '').toLowerCase();
-  const status = error.status || error.response?.status;
 
-  // Rate limit or quota
-  if (status === 429) return true;
-  if (msg.includes('rate_limit') || msg.includes('quota') || msg.includes('billing')) return true;
+  // Only these errors are NOT worth retrying on another provider — same prompt will fail the same way
+  const promptErrors = ['invalid_prompt', 'prompt_too_long', 'bad_request'];
+  for (const pe of promptErrors) {
+    if (msg.includes(pe)) return false;
+  }
 
-  // Auth / config
-  if (status === 401 || status === 403) return true;
-  if (msg.includes('api_key') || msg.includes('not configured') || msg.includes('unauthorized')) return true;
-
-  // Safety / content policy (different providers handle different content)
-  if (msg.includes('safety') || msg.includes('content_policy') || msg.includes('blocked')) return true;
-
-  // Server errors (provider might be down)
-  if (status >= 500) return true;
-
-  return false;
+  // Everything else: timeout, network, rate limit, auth, safety, server error, unexpected response — try next provider
+  return true;
 }
 
 // ============================================================
@@ -207,7 +200,7 @@ export async function generateAdImages(opts = {}) {
   };
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
-  const PER_FORMAT_TIMEOUT_MS = 120_000; // 120s max per format (provider1 timeout + provider2 attempt)
+  const PER_FORMAT_TIMEOUT_MS = 90_000; // 90s max per format — enough for DALL-E (30s) + fallback to fal.ai (60s). No retries, just fast fallback.
 
   log.info(`Generating ${formats.length} format(s) in parallel`, { platform: opts.platform, formats });
 
