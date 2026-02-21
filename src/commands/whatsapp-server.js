@@ -3761,9 +3761,10 @@ async function handleCommand(message) {
   } catch (error) {
     log.error('WhatsApp command loop failed', { error: error.message, stack: error.stack });
     const isRateLimit = error.status === 429 || error.message?.includes('rate_limit');
+    const errorHint = error.message ? error.message.substring(0, 200) : 'unknown';
     const errorMsg = isRateLimit
       ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
-      : 'Something went wrong while processing your request. Please try again.';
+      : `Something went wrong while processing your request. Please try again.\n\n_Debug: ${errorHint}_`;
     addToHistory(ownerChatId, 'assistant', errorMsg);
     await sendWhatsApp(errorMsg);
   }
