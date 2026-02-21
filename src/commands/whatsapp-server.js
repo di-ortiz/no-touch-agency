@@ -398,9 +398,11 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // Rate limit webhook endpoint
+// Meta sends status webhooks (sent/delivered/read) for every outgoing message,
+// so a single conversation can generate 30+ webhooks/min. Use a generous limit.
 app.use('/webhook', rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: 300,
   message: 'Too many requests',
   validate: { xForwardedForHeader: false, default: true },
 }));
@@ -2865,7 +2867,46 @@ app.post('/webhook/whatsapp', async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    const value = changes?.value;
+
+    // Log every webhook hit for diagnostics (statuses vs messages)
+    const hasMessages = !!value?.messages?.length;
+    const hasStatuses = !!value?.statuses?.length;
+    if (hasMessages) {
+      log.info('WhatsApp webhook: incoming message', {
+        from: value.messages[0].from,
+        type: value.messages[0].type,
+        msgId: value.messages[0].id,
+      });
+    } else if (hasStatuses) {
+      log.debug('WhatsApp webhook: status update', {
+        status: value.statuses[0]?.status,
+        recipientId: value.statuses[0]?.recipient_id,
+      });
+    } else {
+      log.debug('WhatsApp webhook: non-message event', {
+        field: changes?.field,
+        hasEntry: !!entry,
+        hasChanges: !!changes,
+      });
+    }
+
+    // Check for error statuses from Meta (indicates API/config issues)
+    if (hasStatuses) {
+      for (const status of value.statuses) {
+        if (status.status === 'failed' && status.errors?.length) {
+          log.error('WhatsApp message delivery FAILED', {
+            recipientId: status.recipient_id,
+            errorCode: status.errors[0]?.code,
+            errorTitle: status.errors[0]?.title,
+            errorMessage: status.errors[0]?.message,
+            errorHref: status.errors[0]?.href,
+          });
+        }
+      }
+    }
+
+    const message = value?.messages?.[0];
 
     if (!message) return;
 
@@ -2897,6 +2938,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
     const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
 
+    log.info('WhatsApp routing', { from, isOwner, ownerPhone: config.WHATSAPP_OWNER_PHONE?.slice(-4) });
+
     if (isOwner) {
       // Owner gets full command access
       await handleCommand(body);
@@ -2905,8 +2948,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
       await handleClientMessage(from, body);
     }
   } catch (error) {
-    log.error('Command handling failed', { error: error.message });
-    await sendWhatsApp(`❌ Error: ${error.message}`);
+    log.error('Command handling failed', { error: error.message, stack: error.stack });
+    try {
+      await sendWhatsApp(`❌ Error: ${error.message}`);
+    } catch (sendErr) {
+      log.error('CRITICAL: Failed to send error message back to WhatsApp', {
+        originalError: error.message,
+        sendError: sendErr.message,
+        sendStatus: sendErr.response?.status,
+        sendDetail: sendErr.response?.data?.error?.message,
+      });
+    }
   }
 });
 
@@ -3719,8 +3771,44 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
+// --- WhatsApp Connectivity Diagnostic ---
+// Hit GET /debug/whatsapp to test if the WhatsApp API is reachable and the token works.
+// This does NOT send any messages — it just checks phone number metadata.
+app.get('/debug/whatsapp', async (req, res) => {
+  const checks = { timestamp: new Date().toISOString(), phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID };
+  try {
+    // Test 1: Verify the phone number ID + token by fetching phone number metadata
+    const metaRes = await axios.get(
+      `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}`,
+      { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` }, timeout: 10000 }
+    );
+    checks.tokenValid = true;
+    checks.phoneNumber = metaRes.data?.display_phone_number || metaRes.data?.verified_name || 'OK';
+    checks.qualityRating = metaRes.data?.quality_rating;
+    checks.messagingLimit = metaRes.data?.messaging_limit_tier;
+  } catch (e) {
+    checks.tokenValid = false;
+    checks.error = e.response?.data?.error?.message || e.message;
+    checks.errorCode = e.response?.data?.error?.code;
+    checks.httpStatus = e.response?.status;
+  }
+
+  // Test 2: Check Anthropic API
+  try {
+    checks.anthropicKey = config.ANTHROPIC_API_KEY ? `${config.ANTHROPIC_API_KEY.slice(0, 8)}...` : 'MISSING';
+  } catch (e) {
+    checks.anthropicKey = 'ERROR';
+  }
+
+  // Test 3: Owner phone config
+  checks.ownerPhone = config.WHATSAPP_OWNER_PHONE ? `...${config.WHATSAPP_OWNER_PHONE.slice(-4)}` : 'MISSING';
+
+  res.json(checks);
+});
+
 // --- WhatsApp Conversational Command Handler ---
 async function handleCommand(message) {
+  log.info('handleCommand entered', { message: message.substring(0, 80) });
   const ownerChatId = 'whatsapp-owner'; // history key — NOT a phone number
   const ownerPhone = config.WHATSAPP_OWNER_PHONE; // actual phone number for media delivery
 
@@ -3831,7 +3919,16 @@ async function handleCommand(message) {
       ? 'I\'m currently experiencing high demand. Please wait a minute and try again.'
       : `Something went wrong while processing your request. Please try again.\n\n_Debug: ${errorHint}_`;
     addToHistory(ownerChatId, 'assistant', errorMsg);
-    await sendWhatsApp(errorMsg);
+    try {
+      await sendWhatsApp(errorMsg);
+    } catch (sendErr) {
+      log.error('CRITICAL: Cannot send ANY WhatsApp message (owner handler)', {
+        originalError: error.message,
+        sendError: sendErr.message,
+        sendStatus: sendErr.response?.status,
+        sendDetail: sendErr.response?.data?.error?.message,
+      });
+    }
   }
 }
 
@@ -4183,7 +4280,15 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     log.error('Client message handling failed', { from, error: error.message, stack: error.stack });
     try {
       await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
-    } catch (e) { /* best effort */ }
+    } catch (sendErr) {
+      log.error('CRITICAL: Cannot send ANY WhatsApp message (client handler)', {
+        from,
+        originalError: error.message,
+        sendError: sendErr.message,
+        sendStatus: sendErr.response?.status,
+        sendDetail: sendErr.response?.data?.error?.message,
+      });
+    }
   }
 }
 
