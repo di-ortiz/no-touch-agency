@@ -352,12 +352,20 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       log.warn('Presentation PDF delivery failed, URL still in text response', { error: e.message, toolName });
     }
   }
-  // Ad library search results — send snapshot previews (URL-based is fine, these are stable URLs)
+  // Ad library search results — snapshot URLs are HTML pages (not direct images),
+  // so we send them as text links instead of trying to deliver as media.
   if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
-    for (const ad of result.ads) {
-      if (!ad.snapshotUrl) continue;
-      const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
-      await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
+    const adsWithSnapshots = result.ads.filter(ad => ad.snapshotUrl);
+    if (adsWithSnapshots.length > 0) {
+      const links = adsWithSnapshots.map((ad, i) => {
+        const label = ad.pageName || ad.headline || `Ad ${i + 1}`;
+        return `${i + 1}. *${label}*: ${ad.snapshotUrl}`;
+      }).join('\n');
+      const msg = `📎 *Ad Preview Links*\n${links}`;
+      try {
+        if (channel === 'whatsapp') await sendWhatsApp(msg, chatId);
+        else await sendTelegram(msg, chatId);
+      } catch (_) { /* best effort */ }
     }
   }
   // Google Ads Transparency — send creative previews
