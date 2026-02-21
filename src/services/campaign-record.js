@@ -95,7 +95,7 @@ export async function createCreativeRecord({ clientName, platform, campaignName,
   const title = `${clientName} — ${campaignName || 'Creative Package'} — ${date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const tabs = [
     {
@@ -178,7 +178,7 @@ export async function createMediaPlanRecord({ clientName, campaignName, mediaPla
   const title = `${clientName} — Media Plan Data — ${campaignName || date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const mp = mediaPlan || {};
 
@@ -269,7 +269,7 @@ export async function createCompetitorRecord({ clientName, competitors, keywordG
   const title = `${clientName} — Competitor Analysis Data — ${date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const tabs = [
     {
@@ -345,7 +345,7 @@ export async function createPerformanceRecord({ clientName, reportType, dateRang
   const title = `${clientName} — ${reportType || 'Performance'} Report Data — ${dateRange || date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const m = metrics || {};
   const a = analytics || {};
@@ -465,7 +465,7 @@ export async function createTextAdsRecord({ clientName, platform, ads, folderId 
   const title = `${clientName} — Ad Copy — ${(platform || '').toUpperCase()} — ${date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const tabs = [
     {
@@ -504,7 +504,7 @@ export async function createAdImagesRecord({ clientName, platform, concept, imag
   const title = `${clientName} — Ad Visuals — ${(platform || '').toUpperCase()} — ${date}`;
 
   const spreadsheet = await googleSheets.createSpreadsheet(title, folderId);
-  if (!spreadsheet) return null;
+
 
   const tabs = [
     {

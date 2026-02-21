@@ -55,6 +55,8 @@ import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { rateLimited } from '../utils/rate-limiter.js';
+import { retry, isRetryableHttpError } from '../utils/retry.js';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
@@ -73,7 +75,7 @@ async function sendThinkingIndicator(channel, chatId, message) {
       await sendWhatsAppThinking(chatId, message);
     }
   } catch (e) {
-    log.debug('Failed to send thinking indicator', { error: e.message });
+    log.warn('Failed to send thinking indicator', { error: e.message, channel, chatId });
   }
 }
 
@@ -101,16 +103,21 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
       log.info('Uploading image buffer to WhatsApp Media API', { bufferSize: imageBuffer.length, mimeType: effectiveMime, to: chatId });
       const mediaId = await uploadWhatsAppMedia(imageBuffer, effectiveMime, `image-${Date.now()}${ext}`);
 
-      const sendResult = await axios.post(
-        `https://graph.facebook.com/v21.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: chatId,
-          type: 'image',
-          image: { id: mediaId, ...(caption ? { caption } : {}) },
-        },
-        { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+      const sendResult = await rateLimited('whatsapp', () =>
+        retry(async () => {
+          const res = await axios.post(
+            `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: chatId,
+              type: 'image',
+              image: { id: mediaId, ...(caption ? { caption } : {}) },
+            },
+            { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+          );
+          return res;
+        }, { retries: 2, label: 'WhatsApp image send (native)', shouldRetry: isRetryableHttpError })
       );
       const msgId = sendResult.data?.messages?.[0]?.id;
       log.info('WhatsApp image sent via native upload', { to: chatId, mediaId, messageId: msgId });
@@ -352,12 +359,20 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       log.warn('Presentation PDF delivery failed, URL still in text response', { error: e.message, toolName });
     }
   }
-  // Ad library search results — send snapshot previews (URL-based is fine, these are stable URLs)
+  // Ad library search results — snapshot URLs are HTML pages (not direct images),
+  // so we send them as text links instead of trying to deliver as media.
   if ((toolName === 'search_ad_library' || toolName === 'get_page_ads') && result.ads) {
-    for (const ad of result.ads) {
-      if (!ad.snapshotUrl) continue;
-      const caption = ad.pageName ? `${ad.pageName}${ad.headline ? ' — ' + ad.headline : ''}` : (ad.headline || 'Ad preview');
-      await safeSendMedia(sendImage, ad.snapshotUrl, caption, toolName);
+    const adsWithSnapshots = result.ads.filter(ad => ad.snapshotUrl);
+    if (adsWithSnapshots.length > 0) {
+      const links = adsWithSnapshots.map((ad, i) => {
+        const label = ad.pageName || ad.headline || `Ad ${i + 1}`;
+        return `${i + 1}. *${label}*: ${ad.snapshotUrl}`;
+      }).join('\n');
+      const msg = `📎 *Ad Preview Links*\n${links}`;
+      try {
+        if (channel === 'whatsapp') await sendWhatsApp(msg, chatId);
+        else await sendTelegram(msg, chatId);
+      } catch (_) { /* best effort */ }
     }
   }
   // Google Ads Transparency — send creative previews
@@ -1460,7 +1475,7 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
 
-      if (!result) return { error: 'Google Sheets not configured. Set GOOGLE_APPLICATION_CREDENTIALS in .env' };
+      // Google Sheets now throws on errors instead of returning null
       return { clientName: toolInput.clientName, month, totalPosts: posts.length, platforms, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
     }
     // --- Report Export ---
@@ -1512,7 +1527,7 @@ Return ONLY the JSON array, no other text.`;
         folderId,
       });
 
-      if (!result) return { error: 'Google Sheets not configured. Set GOOGLE_APPLICATION_CREDENTIALS in .env' };
+      // Google Sheets now throws on errors instead of returning null
       return { clientName: toolInput.clientName, reportType: toolInput.reportType, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
     }
     // --- Creative Generation ---
@@ -1529,6 +1544,7 @@ Return ONLY the JSON array, no other text.`;
 
       // Save companion Sheet to Drive
       let sheetUrl = null;
+      let sheetError = null;
       try {
         const client = getClient(toolInput.clientName);
         const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
@@ -1541,9 +1557,10 @@ Return ONLY the JSON array, no other text.`;
         sheetUrl = sheet?.url || null;
       } catch (e) {
         log.error('Failed to create text ads record sheet', { error: e.message });
+        sheetError = e.message;
       }
 
-      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length, sheetUrl };
+      return { clientName: toolInput.clientName, platform: toolInput.platform, ads, totalVariations: ads.length, sheetUrl, ...(sheetError && { sheetError }) };
     }
     case 'generate_ad_images': {
       const providerStatus = imageRouter.getProviderStatus();
@@ -1584,13 +1601,17 @@ Return ONLY the JSON array, no other text.`;
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
       // Run all uploads in PARALLEL to avoid sequential 10-30s per image adding up
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const driveErrors = [];
       const driveResults = await Promise.allSettled(
         images.map(async (img) => {
           if (!img.url || img.error) return null;
           try {
-            return await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+            const result = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+            if (result?.driveError) driveErrors.push(`${img.format}: ${result.driveError}`);
+            return result;
           } catch (e) {
-            log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+            log.error('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+            driveErrors.push(`${img.format}: ${e.message}`);
             return null;
           }
         })
@@ -1642,20 +1663,33 @@ Return ONLY the JSON array, no other text.`;
         _imageBuffers.push(imgBuffer);
       }
 
-      // Save companion Sheet to Drive
+      // Save companion Sheet to Drive — skip if ALL Drive uploads failed (quota/permissions)
+      // to avoid hanging on the same Google API issue that blocked uploads
       let sheetUrl = null;
-      try {
-        const sheet = await campaignRecord.createAdImagesRecord({
-          clientName: toolInput.clientName,
-          platform: toolInput.platform,
-          concept: toolInput.concept,
-          imagePrompt,
-          images: mappedImages,
-          folderId: imgFolderId,
-        });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create ad images record sheet', { error: e.message });
+      let sheetError = null;
+      const allDriveFailed = driveErrors.length > 0 && driveErrors.length >= images.filter(i => !i.error).length;
+      if (allDriveFailed) {
+        log.warn('Skipping sheet creation — all Drive uploads failed, Google API likely unavailable', { driveErrors });
+        sheetError = 'Skipped — Google Drive unavailable';
+      } else {
+        try {
+          const SHEET_TIMEOUT_MS = 30000; // 30s max for sheet creation
+          const sheet = await Promise.race([
+            campaignRecord.createAdImagesRecord({
+              clientName: toolInput.clientName,
+              platform: toolInput.platform,
+              concept: toolInput.concept,
+              imagePrompt,
+              images: mappedImages,
+              folderId: imgFolderId,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Sheet creation timed out after 30s')), SHEET_TIMEOUT_MS)),
+          ]);
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create ad images record sheet', { error: e.message });
+          sheetError = e.message;
+        }
       }
 
       const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
@@ -1668,6 +1702,8 @@ Return ONLY the JSON array, no other text.`;
         totalGenerated: images.filter(i => !i.error).length,
         providers,
         sheetUrl,
+        ...(sheetError && { sheetError }),
+        ...(driveErrors.length > 0 && { driveErrors }),
       };
       // Attach image buffers for deliverMediaInline (not serialized to JSON for Claude)
       result._imageBuffers = _imageBuffers;
@@ -1731,12 +1767,14 @@ Return ONLY the JSON array, no other text.`;
       const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const persistedImageUrls = [];   // original provider URLs for WhatsApp delivery
       const _pkgImageBuffers = [];
+      const pkgDriveErrors = [];
       for (const img of pkg.images) {
         if (img.error || !img.url) continue;
         const originalUrl = img.url;   // keep original for delivery
         try {
           const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${pkg.clientName || 'pkg'}-${img.format || 'image'}-${Date.now()}.png`, pkgFolderId);
           if (driveResult) {
+            if (driveResult.driveError) pkgDriveErrors.push(`${img.format || 'image'}: ${driveResult.driveError}`);
             if (driveResult.webContentLink) {
               // Store Drive URL separately — don't replace original for delivery
               img.driveUrl = driveResult.webContentLink;
@@ -1747,29 +1785,42 @@ Return ONLY the JSON array, no other text.`;
             _pkgImageBuffers.push(null);
           }
         } catch (e) {
-          log.warn('Failed to persist creative package image to Drive', { error: e.message });
+          log.error('Failed to persist creative package image to Drive', { error: e.message });
+          pkgDriveErrors.push(`${img.format || 'image'}: ${e.message}`);
           _pkgImageBuffers.push(null);
         }
         persistedImageUrls.push(originalUrl); // always use original provider URL
       }
 
-      // Save companion Sheet to Drive
+      // Save companion Sheet to Drive — skip if ALL Drive uploads failed (quota/permissions)
       let sheetUrl = null;
-      try {
-        const sheet = await campaignRecord.createCreativeRecord({
-          clientName: pkg.clientName,
-          platform: pkg.platform,
-          campaignName: pkg.campaignName,
-          textAds: pkg.textAds,
-          images: pkg.images,
-          videos: pkg.videos,
-          summary: pkg.summary,
-          presentationUrl: pkg.presentation?.url,
-          folderId: pkgFolderId,
-        });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create creative record sheet', { error: e.message });
+      let sheetError = null;
+      const allPkgDriveFailed = pkgDriveErrors.length > 0 && pkgDriveErrors.length >= pkg.images.filter(i => !i.error && i.url).length;
+      if (allPkgDriveFailed) {
+        log.warn('Skipping creative sheet creation — all Drive uploads failed', { pkgDriveErrors });
+        sheetError = 'Skipped — Google Drive unavailable';
+      } else {
+        try {
+          const SHEET_TIMEOUT_MS = 30000;
+          const sheet = await Promise.race([
+            campaignRecord.createCreativeRecord({
+              clientName: pkg.clientName,
+              platform: pkg.platform,
+              campaignName: pkg.campaignName,
+              textAds: pkg.textAds,
+              images: pkg.images,
+              videos: pkg.videos,
+              summary: pkg.summary,
+              presentationUrl: pkg.presentation?.url,
+              folderId: pkgFolderId,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Sheet creation timed out after 30s')), SHEET_TIMEOUT_MS)),
+          ]);
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create creative record sheet', { error: e.message });
+          sheetError = e.message;
+        }
       }
 
       const pkgResult = {
@@ -1784,6 +1835,8 @@ Return ONLY the JSON array, no other text.`;
         videosCount: pkg.videos.filter(v => !v.error).length,
         presentationUrl: pkg.presentation?.url || null,
         sheetUrl,
+        ...(sheetError && { sheetError }),
+        ...(pkgDriveErrors.length > 0 && { driveErrors: pkgDriveErrors }),
         status: 'awaiting_approval',
         message: pkg.presentation?.url
           ? `Creative deck ready for review: ${pkg.presentation.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '')
@@ -2000,6 +2053,7 @@ Return ONLY the JSON array, no other text.`;
 
       // Always save to Google Doc for client review
       let docUrl = null;
+      let docError = null;
       try {
         const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
         const docContent = `${post.title}\n\n` +
@@ -2018,7 +2072,8 @@ Return ONLY the JSON array, no other text.`;
         );
         if (doc) docUrl = doc.webViewLink;
       } catch (e) {
-        log.warn('Failed to save blog post to Google Doc', { error: e.message });
+        log.error('Failed to save blog post to Google Doc', { error: e.message });
+        docError = e.message;
       }
 
       // Create pending approval so client can approve publishing or self-post
@@ -2052,6 +2107,7 @@ Return ONLY the JSON array, no other text.`;
         suggestedCategory: post.suggestedCategory,
         imagePrompt: post.imagePrompt,
         docUrl,
+        ...(docError && { docError }),
         approvalId,
         wpConnected,
         status: 'pending_client_review',
@@ -2061,7 +2117,7 @@ Return ONLY the JSON array, no other text.`;
             ? `Review and edit the Google Doc here: ${docUrl} — then either post it yourself or reply APPROVE ${approvalId} when ready`
             : 'I can send you the content to post yourself',
         },
-        message: `Blog post "${post.title}" is ready for your review!${docUrl ? ` Google Doc: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I publish it to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and post it yourself (or approve after review)`,
+        message: `Blog post "${post.title}" is ready for your review!${docUrl ? ` Google Doc: ${docUrl}` : ''}${docError ? ` (Google Doc creation failed: ${docError})` : ''}\n\nHow would you like to proceed?\n1. I publish it to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and post it yourself (or approve after review)`,
       };
     }
 
@@ -2087,6 +2143,7 @@ Return ONLY the JSON array, no other text.`;
 
         // Save proposed changes to Google Doc for review
         let docUrl = null;
+        let docError = null;
         try {
           const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
           const docContent = `Meta Tag Changes — ${currentMeta.title || toolInput.url || 'Page'}\n\n` +
@@ -2108,7 +2165,8 @@ Return ONLY the JSON array, no other text.`;
           );
           if (doc) docUrl = doc.webViewLink;
         } catch (e) {
-          log.warn('Failed to save meta tag changes to Google Doc', { error: e.message });
+          log.error('Failed to save meta tag changes to Google Doc', { error: e.message });
+          docError = e.message;
         }
 
         // Create pending approval
@@ -2133,6 +2191,7 @@ Return ONLY the JSON array, no other text.`;
           currentTitle: currentMeta.seoTitle || '(missing)',
           currentDescription: currentMeta.seoDescription || '(missing)',
           docUrl,
+          ...(docError && { docError }),
           approvalId,
           applied: false,
           status: 'pending_client_review',
@@ -2142,7 +2201,7 @@ Return ONLY the JSON array, no other text.`;
               ? `Review the proposed changes here: ${docUrl} — then approve or apply them yourself`
               : 'I can send you the proposed changes to apply yourself',
           },
-          message: `Meta tag improvements generated!${docUrl ? ` Review: ${docUrl}` : ''}\n\nHow would you like to proceed?\n1. I apply the changes to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
+          message: `Meta tag improvements generated!${docUrl ? ` Review: ${docUrl}` : ''}${docError ? ` (Google Doc failed: ${docError})` : ''}\n\nHow would you like to proceed?\n1. I apply the changes to your website — reply APPROVE ${approvalId}\n2. Review the Google Doc and apply them yourself (or approve after review)`,
         };
       }
 
@@ -2247,6 +2306,7 @@ Return ONLY the JSON array, no other text.`;
 
       // Save proposed changes to Google Doc
       let docUrl = null;
+      let docError = null;
       try {
         const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
         const docContent = `Proposed Changes — Post #${toolInput.postId}\n\n` +
@@ -2259,7 +2319,8 @@ Return ONLY the JSON array, no other text.`;
         );
         if (doc) docUrl = doc.webViewLink;
       } catch (e) {
-        log.warn('Failed to save post update to Google Doc', { error: e.message });
+        log.error('Failed to save post update to Google Doc', { error: e.message });
+        docError = e.message;
       }
 
       // Create pending approval — never push changes without client consent
@@ -2286,6 +2347,7 @@ Return ONLY the JSON array, no other text.`;
         postId: toolInput.postId,
         proposedChanges: changesList,
         docUrl,
+        ...(docError && { docError }),
         approvalId,
         status: 'pending_client_review',
         deliveryOptions: {
@@ -2367,9 +2429,6 @@ Return ONLY the JSON array, no other text.`;
     // --- Google Drive Client Folders ---
     case 'setup_client_drive': {
       const folders = await googleDrive.ensureClientFolders(toolInput.clientName);
-      if (!folders) {
-        return { error: 'Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env.' };
-      }
       return {
         clientName: toolInput.clientName,
         rootFolderId: folders.root?.id,
@@ -2477,10 +2536,9 @@ Return ONLY the JSON array, no other text.`;
         charts: toolInput.charts,
         folderId,
       });
-      if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
-
       // Save companion Sheet to Drive
       let sheetUrl = null;
+      let sheetError = null;
       try {
         const sheet = await campaignRecord.createMediaPlanRecord({
           clientName: toolInput.clientName,
@@ -2491,6 +2549,7 @@ Return ONLY the JSON array, no other text.`;
         sheetUrl = sheet?.url || null;
       } catch (e) {
         log.error('Failed to create media plan record sheet', { error: e.message });
+        sheetError = e.message;
       }
 
       const mediaPlanResult = {
@@ -2498,7 +2557,8 @@ Return ONLY the JSON array, no other text.`;
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
-        message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        ...(sheetError && { sheetError }),
+        message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '') + (sheetError ? ` (Sheet save failed: ${sheetError})` : ''),
       };
       // Pre-download presentation as PDF for inline delivery
       try {
@@ -2508,7 +2568,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('Media plan deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download media plan deck PDF', { error: e.message });
+        log.error('Failed to pre-download media plan deck PDF', { error: e.message });
+        mediaPlanResult.pdfError = e.message;
       }
       return mediaPlanResult;
     }
@@ -2527,10 +2588,9 @@ Return ONLY the JSON array, no other text.`;
         charts: toolInput.charts,
         folderId,
       });
-      if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
-
       // Save companion Sheet to Drive
       let sheetUrl = null;
+      let sheetError = null;
       try {
         const sheet = await campaignRecord.createCompetitorRecord({
           clientName: toolInput.clientName,
@@ -2545,6 +2605,7 @@ Return ONLY the JSON array, no other text.`;
         sheetUrl = sheet?.url || null;
       } catch (e) {
         log.error('Failed to create competitor record sheet', { error: e.message });
+        sheetError = e.message;
       }
 
       const competitorDeckResult = {
@@ -2552,7 +2613,8 @@ Return ONLY the JSON array, no other text.`;
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
-        message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        ...(sheetError && { sheetError }),
+        message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '') + (sheetError ? ` (Sheet save failed: ${sheetError})` : ''),
       };
       try {
         const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
@@ -2561,7 +2623,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('Competitor deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download competitor deck PDF', { error: e.message });
+        log.error('Failed to pre-download competitor deck PDF', { error: e.message });
+        competitorDeckResult.pdfError = e.message;
       }
       return competitorDeckResult;
     }
@@ -2583,10 +2646,9 @@ Return ONLY the JSON array, no other text.`;
         charts: toolInput.charts,
         folderId,
       });
-      if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
-
       // Save companion Sheet to Drive
       let sheetUrl = null;
+      let sheetError = null;
       try {
         const sheet = await campaignRecord.createPerformanceRecord({
           clientName: toolInput.clientName,
@@ -2604,6 +2666,7 @@ Return ONLY the JSON array, no other text.`;
         sheetUrl = sheet?.url || null;
       } catch (e) {
         log.error('Failed to create performance record sheet', { error: e.message });
+        sheetError = e.message;
       }
 
       const performanceDeckResult = {
@@ -2611,7 +2674,8 @@ Return ONLY the JSON array, no other text.`;
         presentationUrl: result.url,
         presentationId: result.presentationId,
         sheetUrl,
-        message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        ...(sheetError && { sheetError }),
+        message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : '') + (sheetError ? ` (Sheet save failed: ${sheetError})` : ''),
       };
       try {
         const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
@@ -2620,7 +2684,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('Performance deck PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download performance deck PDF', { error: e.message });
+        log.error('Failed to pre-download performance deck PDF', { error: e.message });
+        performanceDeckResult.pdfError = e.message;
       }
       return performanceDeckResult;
     }
@@ -2643,7 +2708,6 @@ Return ONLY the JSON array, no other text.`;
         folderId,
         clientId: client?.id,
       });
-      if (!result) return { error: 'Failed to generate report. Check Google credentials.' };
       // Pre-download PDF via Google Drive API for native delivery (don't rely on export URL)
       const toolResult = { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
       try {
@@ -2653,7 +2717,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('PDF buffer downloaded for inline delivery', { docId: result.docId, size: pdfBuffer.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download PDF buffer', { error: e.message, docId: result.docId });
+        log.error('Failed to pre-download PDF buffer', { error: e.message, docId: result.docId });
+        toolResult.pdfError = e.message;
       }
       return toolResult;
     }
@@ -2669,7 +2734,6 @@ Return ONLY the JSON array, no other text.`;
         recommendations: toolInput.recommendations,
         folderId,
       });
-      if (!result) return { error: 'Failed to generate competitor report. Check Google credentials.' };
       // Pre-download PDF via Google Drive API for native delivery
       const toolResult = { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
       try {
@@ -2679,7 +2743,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('Competitor PDF buffer downloaded for inline delivery', { docId: result.docId, size: pdfBuffer.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download competitor PDF buffer', { error: e.message, docId: result.docId });
+        log.error('Failed to pre-download competitor PDF buffer', { error: e.message, docId: result.docId });
+        toolResult.pdfError = e.message;
       }
       return toolResult;
     }
@@ -2694,7 +2759,6 @@ Return ONLY the JSON array, no other text.`;
         charts: toolInput.charts,
         folderId,
       });
-      if (!result) return { error: 'Failed to create chart presentation. Check Google credentials.' };
       const chartResult = { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
       try {
         const deckPdf = await googleDrive.exportDocumentAsBuffer(result.presentationId, 'application/pdf');
@@ -2703,7 +2767,8 @@ Return ONLY the JSON array, no other text.`;
           log.info('Chart presentation PDF buffer downloaded', { presentationId: result.presentationId, size: deckPdf.length });
         }
       } catch (e) {
-        log.warn('Failed to pre-download chart presentation PDF', { error: e.message });
+        log.error('Failed to pre-download chart presentation PDF', { error: e.message });
+        chartResult.pdfError = e.message;
       }
       return chartResult;
     }
@@ -4194,7 +4259,7 @@ async function handleMediaUpload(from, mediaType, media, caption) {
 async function getWhatsAppMediaUrl(mediaId) {
   try {
     const res = await axios.get(
-      `https://graph.facebook.com/v21.0/${mediaId}`,
+      `https://graph.facebook.com/v22.0/${mediaId}`,
       { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` } }
     );
     return res.data?.url;

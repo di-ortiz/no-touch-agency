@@ -202,8 +202,6 @@ export async function buildMediaPlanDeck(opts = {}) {
   const title = `${opts.clientName} — Media Plan — ${opts.campaignName || 'Campaign'} — ${date}`;
 
   const presentation = await googleSlides.createPresentation(title, opts.folderId);
-  if (!presentation) return null;
-
   const { presentationId } = presentation;
   const defaultSlideId = await googleSlides.getDefaultSlideId(presentationId);
 
@@ -380,8 +378,6 @@ export async function buildCompetitorDeck(opts = {}) {
   const title = `${opts.clientName} — Competitor Research — ${date}`;
 
   const presentation = await googleSlides.createPresentation(title, opts.folderId);
-  if (!presentation) return null;
-
   const { presentationId } = presentation;
   const defaultSlideId = await googleSlides.getDefaultSlideId(presentationId);
   const requests = [];
@@ -543,8 +539,6 @@ export async function buildPerformanceDeck(opts = {}) {
   const title = `${opts.clientName} — ${period} Performance Report — ${date}`;
 
   const presentation = await googleSlides.createPresentation(title, opts.folderId);
-  if (!presentation) return null;
-
   const { presentationId } = presentation;
   const defaultSlideId = await googleSlides.getDefaultSlideId(presentationId);
   const requests = [];
