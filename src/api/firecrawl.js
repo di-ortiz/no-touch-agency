@@ -61,6 +61,7 @@ export async function scrape(url, opts = {}) {
       url: data.url || url,
       markdown: data.markdown || '',
       html: data.html || '',
+      screenshot: data.screenshot || '',
       metadata: data.metadata || {},
       links: data.links || [],
     };

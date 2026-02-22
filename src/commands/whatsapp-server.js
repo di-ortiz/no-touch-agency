@@ -139,7 +139,7 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
 // JSON replacer: strip binary image buffers from tool results before sending to Claude.
 // _imageBuffers are only needed by deliverMediaInline for native WhatsApp upload, not by the AI.
 function stripBinaryBuffers(key, value) {
-  if (key === '_imageBuffers' || key === '_pdfBuffer') return undefined;
+  if (key === '_imageBuffers' || key === '_pdfBuffer' || key === '_screenshotBuffer') return undefined;
   return value;
 }
 
@@ -152,10 +152,30 @@ function truncateToolResult(resultJson) {
   return resultJson.slice(0, MAX_TOOL_RESULT_CHARS) + '... [truncated — result was ' + resultJson.length + ' chars. Key data shown above. Ask for specific details if needed.]';
 }
 
+// --- Landing Page Preview Store ---
+// In-memory store for landing page previews (served at /lp/:id)
+const landingPageStore = new Map();
+// Clean up landing pages older than 7 days every hour
+setInterval(() => {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  for (const [id, data] of landingPageStore) {
+    if (data.createdAt < cutoff) landingPageStore.delete(id);
+  }
+}, 60 * 60 * 1000);
+
+// Resolve the server's public URL for landing page preview links.
+// Auto-detected from the first incoming webhook request (Host header) if not manually configured.
+let detectedPublicUrl = null;
+function getPublicUrl() {
+  if (config.PUBLIC_URL) return config.PUBLIC_URL.replace(/\/$/, '');
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  return detectedPublicUrl;
+}
+
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
-const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page']);
 
 // Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
 const TOOL_PROGRESS_MESSAGES = {
@@ -179,7 +199,60 @@ const TOOL_PROGRESS_MESSAGES = {
   generate_weekly_report: 'Generating the weekly report...',
   generate_campaign_brief: 'Creating the campaign brief...',
   run_competitor_analysis: 'Analyzing competitors...',
+  preview_landing_page: 'Publishing your landing page and generating a visual preview...',
 };
+
+// --- Message deduplication ---
+// Meta often sends the same webhook 2-3 times. Without dedup, both copies process
+// simultaneously, corrupt conversation history, and can cause Claude API rejections.
+const processedMessageIds = new Map(); // msgId → timestamp
+const MESSAGE_DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 min window
+
+function isMessageAlreadyProcessed(msgId) {
+  if (!msgId) return false;
+  if (processedMessageIds.has(msgId)) return true;
+  processedMessageIds.set(msgId, Date.now());
+  return false;
+}
+
+// Cleanup old dedup entries every 10 minutes
+setInterval(() => {
+  const cutoff = Date.now() - MESSAGE_DEDUP_WINDOW_MS;
+  for (const [id, ts] of processedMessageIds) {
+    if (ts < cutoff) processedMessageIds.delete(id);
+  }
+}, 10 * 60 * 1000);
+
+// --- Owner message concurrency guard ---
+// Prevents multiple owner messages from processing simultaneously, which would
+// cause garbled conversation history and race conditions with Claude API calls.
+let ownerMessageProcessing = false;
+const ownerMessageQueue = [];
+
+async function enqueueOwnerMessage(body) {
+  if (!ownerMessageProcessing) {
+    ownerMessageProcessing = true;
+    try {
+      await handleCommand(body);
+    } finally {
+      ownerMessageProcessing = false;
+      // Process next queued message if any
+      if (ownerMessageQueue.length > 0) {
+        const next = ownerMessageQueue.shift();
+        enqueueOwnerMessage(next);
+      }
+    }
+  } else {
+    // Queue the message — it will be processed after the current one finishes
+    if (ownerMessageQueue.length < 5) {
+      ownerMessageQueue.push(body);
+      log.info('Owner message queued (previous still processing)', { queueLength: ownerMessageQueue.length });
+    } else {
+      log.warn('Owner message queue full, dropping message', { body: body.substring(0, 60) });
+      await sendWhatsApp('I\'m still processing your previous messages. Please wait a moment and try again.');
+    }
+  }
+}
 
 async function executeCSAToolWithTimeout(toolName, toolInput) {
   const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
@@ -386,6 +459,20 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       }
     }
   }
+  // Landing page preview — send screenshot image
+  if (toolName === 'preview_landing_page' && result._screenshotBuffer) {
+    const caption = `Landing Page Preview${result.name ? ` — ${result.name}` : ''}`;
+    try {
+      if (channel === 'whatsapp') {
+        await sendWhatsAppImageNative(result._screenshotBuffer, 'image/png', null, caption, chatId);
+      } else {
+        await sendTelegramPhotoBuffer(result._screenshotBuffer, 'image/png', caption, chatId);
+      }
+      log.info('Landing page screenshot delivered', { channel, chatId });
+    } catch (e) {
+      log.warn('Landing page screenshot delivery failed', { error: e.message });
+    }
+  }
   } catch (mediaErr) {
     log.error('deliverMediaInline crashed — non-fatal', { toolName, error: mediaErr.message, stack: mediaErr.stack });
   }
@@ -396,6 +483,15 @@ app.set('trust proxy', 1); // Trust first proxy (Railway, Render, etc.)
 app.use(helmet());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+
+// Auto-detect public URL from first real incoming request (webhook from Meta/Telegram)
+app.use((req, res, next) => {
+  if (!detectedPublicUrl && req.hostname && req.hostname !== 'localhost' && req.hostname !== '127.0.0.1') {
+    detectedPublicUrl = `${req.protocol}://${req.get('host')}`;
+    log.info('Auto-detected public URL from incoming request', { url: detectedPublicUrl });
+  }
+  next();
+});
 
 // Rate limit webhook endpoint
 // Meta sends status webhooks (sent/delivered/read) for every outgoing message,
@@ -566,6 +662,40 @@ function addToHistory(chatId, role, content, channel = 'whatsapp') {
 
 function clearHistory(chatId) {
   clearMessages(chatId);
+}
+
+/**
+ * Sanitize conversation history before sending to the Anthropic API.
+ * 1. Strip extra fields (channel, created_at) — only keep role + content
+ * 2. Merge consecutive same-role messages (prevents API validation errors)
+ * 3. Ensure the first message is 'user' role
+ */
+function sanitizeMessages(messages) {
+  if (!messages || messages.length === 0) return [];
+
+  const cleaned = [];
+  for (const msg of messages) {
+    const role = msg.role;
+    const content = msg.content;
+    if (!role || !content) continue;
+
+    // Merge consecutive same-role messages instead of creating invalid sequences
+    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === role) {
+      const prev = cleaned[cleaned.length - 1];
+      prev.content = typeof prev.content === 'string' && typeof content === 'string'
+        ? `${prev.content}\n${content}`
+        : content; // if content is not a string (tool results), just overwrite
+    } else {
+      cleaned.push({ role, content });
+    }
+  }
+
+  // Ensure first message is 'user' role (Anthropic API requirement)
+  while (cleaned.length > 0 && cleaned[0].role !== 'user') {
+    cleaned.shift();
+  }
+
+  return cleaned;
 }
 
 /**
@@ -903,7 +1033,7 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects the best available provider with smart fallback). IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
+    description: 'Generate ad creative VISUALS using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects best provider). Images are TEXT-FREE visual compositions — AI image generators cannot render text, so headlines, CTAs, and copy must be added separately via the ad platform. IMPORTANT: For best results, provide brand colors, target audience, creative style, references, mood, and website/competitor insights. Always tell the user that text/headlines/CTAs will need to be added on top of the visual in their ad platform.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['dalle', 'fal', 'gemini'], description: 'Preferred AI image provider (optional — auto-selects if not specified). Use dalle for photorealism, fal for artistic/stylized, gemini for variety.' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
@@ -951,6 +1081,16 @@ const CSA_TOOLS = [
       search: { type: 'string', description: 'Optional: filter URLs by keyword (e.g. "blog" or "pricing")' },
       limit: { type: 'number', description: 'Max URLs to return (default: 100)' },
     }, required: ['url'] },
+  },
+  // --- Landing Page Preview ---
+  {
+    name: 'preview_landing_page',
+    description: 'Publish a landing page and send a visual screenshot preview in chat. Takes the full HTML code you generated, hosts it at a live preview URL, captures a screenshot of the rendered page using Firecrawl, uploads the HTML file to Google Drive, and sends the screenshot image in WhatsApp/Telegram so the user can see exactly how the page looks. ALWAYS use this tool after generating landing page HTML — never paste raw HTML code in chat. First browse the client website with browse_website to extract brand colors, fonts, and style, then generate the HTML incorporating those brand elements, then call this tool to publish and preview it.',
+    input_schema: { type: 'object', properties: {
+      html: { type: 'string', description: 'Complete self-contained HTML code for the landing page. Must include all CSS inline or via CDN links (Google Fonts, Tailwind, etc). Should be a beautiful, responsive, conversion-optimized page.' },
+      name: { type: 'string', description: 'Name for the landing page (e.g. "Acme Corp — Summer Sale Landing Page")' },
+      clientName: { type: 'string', description: 'Client name (for organizing in their Google Drive folder)' },
+    }, required: ['html'] },
   },
   // --- Visual Analysis ---
   {
@@ -1957,6 +2097,85 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    // --- Landing Page Preview ---
+    case 'preview_landing_page': {
+      const html = toolInput.html;
+      if (!html || html.length < 50) {
+        return { error: 'HTML content is too short — provide complete landing page HTML.' };
+      }
+
+      const id = crypto.randomUUID();
+      landingPageStore.set(id, { html, createdAt: Date.now() });
+
+      const baseUrl = getPublicUrl();
+      const previewUrl = baseUrl ? `${baseUrl}/lp/${id}` : null;
+      const lpName = toolInput.name || 'Landing Page';
+
+      let screenshotBuffer = null;
+
+      // Take screenshot via Firecrawl if available
+      if (previewUrl && firecrawlApi.isConfigured()) {
+        try {
+          const screenshotResult = await firecrawlApi.scrape(previewUrl, {
+            formats: ['screenshot'],
+            onlyMainContent: false,
+            waitFor: 2000,
+            timeout: 30000,
+          });
+          if (screenshotResult.screenshot) {
+            // Firecrawl returns screenshot as base64 data URL or http URL
+            const ssData = screenshotResult.screenshot;
+            if (ssData.startsWith('data:')) {
+              screenshotBuffer = Buffer.from(ssData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+            } else if (ssData.startsWith('http')) {
+              const imgResp = await axios.get(ssData, { responseType: 'arraybuffer', timeout: 15000 });
+              screenshotBuffer = Buffer.from(imgResp.data);
+            }
+          }
+        } catch (e) {
+          log.warn('Landing page screenshot failed', { error: e.message, previewUrl });
+        }
+      }
+
+      // Upload HTML to Google Drive
+      let driveLink = null;
+      try {
+        const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
+        const folderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        if (folderId) {
+          const { Readable } = await import('stream');
+          const stream = new Readable();
+          stream.push(Buffer.from(html, 'utf-8'));
+          stream.push(null);
+          const driveFile = await googleDrive.uploadFile(`${lpName}.html`, stream, 'text/html', folderId);
+          if (driveFile?.id) {
+            await googleDrive.shareFolderWithAnyone(driveFile.id, 'reader');
+            driveLink = driveFile.webViewLink;
+          }
+        }
+      } catch (e) {
+        log.warn('Landing page Drive upload failed', { error: e.message });
+      }
+
+      const result = {
+        name: lpName,
+        previewUrl,
+        driveLink,
+        hasScreenshot: !!screenshotBuffer,
+        message: screenshotBuffer
+          ? 'Landing page published! Screenshot preview sent as image.'
+          : previewUrl
+            ? 'Landing page published! Click the preview link to view it.'
+            : 'Landing page HTML uploaded to Google Drive.',
+      };
+
+      if (screenshotBuffer) {
+        result._screenshotBuffer = screenshotBuffer;
+      }
+
+      return result;
+    }
+
     // --- Visual Analysis ---
     case 'analyze_visual_reference': {
       if (!geminiApi.isConfigured()) {
@@ -2798,15 +3017,25 @@ Return ONLY the JSON array, no other text.`;
     // --- Diagnostics ---
     case 'check_credentials': {
       const fs = (await import('fs')).default;
-      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set in .env)';
-      const credFileExists = config.GOOGLE_APPLICATION_CREDENTIALS ? fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS) : false;
+      // Use the same fallback path as getAuth() in google-slides/sheets/drive — config/google-service-account.json
+      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+      const credFileExists = fs.existsSync(credPath);
+      let credValid = false;
+      if (credFileExists) {
+        try {
+          const raw = fs.readFileSync(credPath, 'utf-8');
+          const json = JSON.parse(raw);
+          credValid = !!(json.client_email && json.private_key);
+        } catch (_) { /* invalid JSON */ }
+      }
 
       const checks = {
         google_service_account: {
           envVar: 'GOOGLE_APPLICATION_CREDENTIALS',
           value: credPath,
           fileExists: credFileExists,
-          status: credFileExists ? 'OK' : 'MISSING',
+          validServiceAccount: credValid,
+          status: credValid ? 'OK' : credFileExists ? 'INVALID — file exists but is not a valid service account JSON' : 'MISSING',
           fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
           affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
         },
@@ -2836,7 +3065,9 @@ Return ONLY the JSON array, no other text.`;
       };
 
       const issues = [];
-      if (!credFileExists) issues.push('CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
+      if (!credValid) issues.push(credFileExists
+        ? 'CRITICAL: Google service account JSON file exists but is invalid — check the GOOGLE_SERVICE_ACCOUNT_JSON env var'
+        : 'CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
@@ -2921,6 +3152,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     if (!message) return;
 
+    // Deduplicate — Meta often resends the same webhook 2-3 times
+    if (isMessageAlreadyProcessed(message.id)) {
+      log.debug('WhatsApp webhook: skipping duplicate message', { msgId: message.id });
+      return;
+    }
+
     const from = message.from; // e.g. "1234567890"
 
     // Handle file uploads (images, documents, video, audio)
@@ -2933,6 +3170,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
       if (isOwner) {
         await handleMediaUpload(from, message.type, media, caption);
+      } else {
+        // Let non-owner clients know we received their file; process caption as text if present
+        if (caption) {
+          await handleClientMessage(from, caption);
+        } else {
+          await sendWhatsApp('Thanks for sharing that! If you have any questions or need help, just send me a text message.', from);
+        }
       }
       return;
     }
@@ -2952,8 +3196,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     log.info('WhatsApp routing', { from, isOwner, ownerPhone: config.WHATSAPP_OWNER_PHONE?.slice(-4) });
 
     if (isOwner) {
-      // Owner gets full command access
-      await handleCommand(body);
+      // Owner gets concurrency-guarded command access (prevents parallel mutations)
+      await enqueueOwnerMessage(body);
     } else {
       // Client messages get AI-powered responses
       await handleClientMessage(from, body);
@@ -2963,12 +3207,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
     try {
       await sendWhatsApp(`❌ Error: ${error.message}`);
     } catch (sendErr) {
-      log.error('CRITICAL: Failed to send error message back to WhatsApp', {
+      log.error('CRITICAL: Failed to send ANY WhatsApp message', {
         originalError: error.message,
         sendError: sendErr.message,
         sendStatus: sendErr.response?.status,
         sendDetail: sendErr.response?.data?.error?.message,
       });
+      // Last resort: try Telegram if configured
+      if (config.TELEGRAM_OWNER_CHAT_ID) {
+        try {
+          await sendTelegramAlert('error', 'WhatsApp DEAD',
+            `Cannot send ANY WhatsApp messages.\nOriginal error: ${error.message}\nSend error: ${sendErr.message}\n\nCheck WHATSAPP_ACCESS_TOKEN in Railway.`);
+        } catch (_) { /* truly nothing we can do */ }
+      }
     }
   }
 });
@@ -3126,7 +3377,7 @@ async function handleTelegramCommand(message, chatId) {
   // Load conversation history and append the new message
   const history = getHistory(chatId);
   addToHistory(chatId, 'user', message);
-  const messages = [...history, { role: 'user', content: message }];
+  const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
   try {
     // Conversational loop with tool use (using shared CSA_TOOLS)
@@ -3539,7 +3790,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'analyze_visual_reference',
+      'generate_text_ads', 'analyze_visual_reference', 'preview_landing_page',
       'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
@@ -3565,7 +3816,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
     addToHistory(chatId, 'user', message, 'telegram');
 
-    const messages = [...history, { role: 'user', content: message }];
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
     // Send thinking indicator so client knows Sofia is working
     await sendThinkingIndicator('telegram', chatId, 'Give me a moment...');
@@ -3660,13 +3911,16 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack });
+    const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
+    const hint = isApiError
+      ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
+      : ` (${error.message?.substring(0, 80)})`;
+    const fallbackMsg = `Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`;
+    // CRITICAL: Save an assistant message to prevent consecutive user messages in history,
+    // which would cause cascading API failures on all subsequent messages.
+    addToHistory(chatId, 'assistant', fallbackMsg, 'telegram');
     try {
-      // Include error hint so we can diagnose from Telegram logs
-      const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
-      const hint = isApiError
-        ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
-        : ` (${error.message?.substring(0, 80)})`;
-      await sendTelegram(`Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`, chatId);
+      await sendTelegram(fallbackMsg, chatId);
     } catch (e) { /* best effort */ }
   }
 }
@@ -3777,6 +4031,14 @@ app.post('/webhook/leadsie', async (req, res) => {
   }
 });
 
+// --- Landing Page Preview ---
+app.get('/lp/:id', (req, res) => {
+  const page = landingPageStore.get(req.params.id);
+  if (!page) return res.status(404).send('Landing page not found or expired.');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(page.html);
+});
+
 // --- Health Check ---
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
@@ -3835,18 +4097,18 @@ async function handleCommand(message) {
     return sendWhatsApp('Memory cleared! Starting fresh.');
   }
 
-  // Build context
-  const clients = getAllClients();
-  const clientContext = clients.length > 0
-    ? `\n\nCurrent managed clients: ${clients.map(c => c.name).join(', ')}`
-    : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
-
-  // Load conversation history and append the new message
-  const history = getHistory(ownerChatId);
-  addToHistory(ownerChatId, 'user', message);
-  const messages = [...history, { role: 'user', content: message }];
-
   try {
+    // Build context — inside try/catch so DB errors don't cause silent failures
+    const clients = getAllClients();
+    const clientContext = clients.length > 0
+      ? `\n\nCurrent managed clients: ${clients.map(c => c.name).join(', ')}`
+      : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
+
+    // Load conversation history and append the new message
+    const history = getHistory(ownerChatId);
+    addToHistory(ownerChatId, 'user', message);
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
+
     // Conversational tool-use loop (same architecture as Telegram)
     let response = await askClaude({
       systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
@@ -4165,7 +4427,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'analyze_visual_reference',
+      'generate_text_ads', 'analyze_visual_reference', 'preview_landing_page',
       'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
@@ -4191,7 +4453,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
     addToHistory(from, 'user', message, 'whatsapp');
 
-    const messages = [...history, { role: 'user', content: message }];
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
     // Send thinking indicator so client knows Sofia is working
     await sendThinkingIndicator('whatsapp', from, 'Give me a moment...');
@@ -4289,8 +4551,12 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
   } catch (error) {
     log.error('Client message handling failed', { from, error: error.message, stack: error.stack });
+    const fallbackMsg = 'Thank you for your message. Our team will get back to you shortly.';
+    // CRITICAL: Save an assistant message to prevent consecutive user messages in history,
+    // which would cause cascading API failures on all subsequent messages.
+    addToHistory(from, 'assistant', fallbackMsg, 'whatsapp');
     try {
-      await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+      await sendWhatsApp(fallbackMsg, from);
     } catch (sendErr) {
       log.error('CRITICAL: Cannot send ANY WhatsApp message (client handler)', {
         from,

@@ -38,7 +38,7 @@ export async function fetchWebpage(url, opts = {}) {
  * to the structured format the rest of the codebase expects.
  */
 async function fetchWithFirecrawl(url, opts = {}) {
-  const formats = ['markdown'];
+  const formats = ['markdown', 'html'];
   if (opts.includeLinks) formats.push('links');
 
   const result = await firecrawl.scrape(url, { formats });
@@ -98,7 +98,7 @@ async function fetchWithFirecrawl(url, opts = {}) {
     markdown: md,
     images,
     links,
-    brandColors: [],  // Firecrawl doesn't extract CSS colors
+    brandColors: result.html ? extractColors(result.html) : [],
     wordCount: bodyText.split(/\s+/).length,
     source: 'firecrawl',
   };
