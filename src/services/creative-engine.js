@@ -354,7 +354,7 @@ Videos: ${result.videos.filter(v => !v.error).length}`,
   if (opts.buildDeck !== false) {
     log.info('Step 5: Building creative deck...');
     try {
-      const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
       const presentation = await googleSlides.buildCreativeDeck({
         clientName: opts.clientName,
