@@ -63,6 +63,8 @@ const COLORS = {
 
 /**
  * Create a new presentation.
+ * If folderId is provided, moves the file to that folder.
+ * If no folder or folder move fails, shares with "anyone with link" so the user can access it.
  */
 export async function createPresentation(title, folderId) {
   const slides = getSlides();
@@ -75,21 +77,41 @@ export async function createPresentation(title, folderId) {
       });
 
       const presentationId = res.data.presentationId;
+      let movedToFolder = false;
 
       // Move to folder if specified
       if (folderId) {
-        const file = await drive.files.get({ fileId: presentationId, fields: 'parents' });
-        const previousParents = file.data.parents?.join(',') || '';
-        await drive.files.update({
-          fileId: presentationId,
-          addParents: folderId,
-          removeParents: previousParents,
-          fields: 'id, parents',
-        });
+        try {
+          const file = await drive.files.get({ fileId: presentationId, fields: 'parents' });
+          const previousParents = file.data.parents?.join(',') || '';
+          await drive.files.update({
+            fileId: presentationId,
+            addParents: folderId,
+            removeParents: previousParents,
+            fields: 'id, parents',
+          });
+          movedToFolder = true;
+        } catch (moveErr) {
+          log.warn('Failed to move presentation to folder, sharing with link instead', {
+            presentationId, folderId, error: moveErr.message,
+          });
+        }
+      }
+
+      // If not in a shared folder, make it accessible via link
+      if (!movedToFolder) {
+        try {
+          await drive.permissions.create({
+            fileId: presentationId,
+            requestBody: { type: 'anyone', role: 'reader' },
+          });
+        } catch (shareErr) {
+          log.warn('Failed to share presentation with link', { presentationId, error: shareErr.message });
+        }
       }
 
       const url = `https://docs.google.com/presentation/d/${presentationId}/edit`;
-      log.info(`Created presentation: ${title}`, { presentationId });
+      log.info(`Created presentation: ${title}`, { presentationId, movedToFolder });
       return { presentationId, url };
     }, { retries: 3, label: 'Google Slides create', shouldRetry: (err) => !(err.message || '').includes('does not have permission') })
   );

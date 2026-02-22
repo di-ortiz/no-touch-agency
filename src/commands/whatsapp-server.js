@@ -3005,11 +3005,14 @@ Return ONLY the JSON array, no other text.`;
       return chartResult;
     }
     case 'create_single_chart': {
+      const chartClient = toolInput.clientName ? getClient(toolInput.clientName) : null;
+      const chartFolderId = chartClient?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await chartBuilderService.createChart({
         title: toolInput.title,
         chartType: toolInput.chartType,
         labels: toolInput.labels,
         series: toolInput.series,
+        folderId: chartFolderId || undefined,
       });
       return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
     }
@@ -3038,6 +3041,12 @@ Return ONLY the JSON array, no other text.`;
           status: credValid ? 'OK' : credFileExists ? 'INVALID — file exists but is not a valid service account JSON' : 'MISSING',
           fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
           affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
+        },
+        google_drive_folder: {
+          status: config.GOOGLE_DRIVE_ROOT_FOLDER_ID ? 'CONFIGURED' : 'NOT SET',
+          folderId: config.GOOGLE_DRIVE_ROOT_FOLDER_ID || '(not set — files will use public link sharing)',
+          affects: ['Presentation file organization', 'Spreadsheet file organization', 'Report storage'],
+          fix: config.GOOGLE_DRIVE_ROOT_FOLDER_ID ? null : 'Create a folder in Google Drive, share it with the service account email (from the service account JSON), then set GOOGLE_DRIVE_ROOT_FOLDER_ID in Railway.',
         },
         google_ads: {
           status: config.GOOGLE_ADS_DEVELOPER_TOKEN ? 'CONFIGURED' : 'NOT SET',
@@ -3068,6 +3077,7 @@ Return ONLY the JSON array, no other text.`;
       if (!credValid) issues.push(credFileExists
         ? 'CRITICAL: Google service account JSON file exists but is invalid — check the GOOGLE_SERVICE_ACCOUNT_JSON env var'
         : 'CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
+      if (!config.GOOGLE_DRIVE_ROOT_FOLDER_ID) issues.push('GOOGLE_DRIVE_ROOT_FOLDER_ID not set — files will be created with public link sharing (set a folder ID for organized file management). To fix: create a folder in Google Drive, share it with the service account email, and set GOOGLE_DRIVE_ROOT_FOLDER_ID in Railway.');
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');

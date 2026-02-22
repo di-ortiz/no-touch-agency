@@ -52,6 +52,11 @@ function getDrive() {
 
 // --- Create Spreadsheet ---
 
+/**
+ * Create a new spreadsheet.
+ * If folderId is provided, moves the file to that folder.
+ * If no folder or folder move fails, shares with "anyone with link" so the user can access it.
+ */
 export async function createSpreadsheet(title, folderId) {
   const sheets = getSheets();
   const drive = getDrive();
@@ -66,23 +71,43 @@ export async function createSpreadsheet(title, folderId) {
 
       const spreadsheetId = res.data.spreadsheetId;
       const url = res.data.spreadsheetUrl;
+      let movedToFolder = false;
 
       // Move to folder if specified
       if (folderId) {
-        const file = await drive.files.get({
-          fileId: spreadsheetId,
-          fields: 'parents',
-        });
-        const previousParents = file.data.parents?.join(',') || '';
-        await drive.files.update({
-          fileId: spreadsheetId,
-          addParents: folderId,
-          removeParents: previousParents,
-          fields: 'id, parents',
-        });
+        try {
+          const file = await drive.files.get({
+            fileId: spreadsheetId,
+            fields: 'parents',
+          });
+          const previousParents = file.data.parents?.join(',') || '';
+          await drive.files.update({
+            fileId: spreadsheetId,
+            addParents: folderId,
+            removeParents: previousParents,
+            fields: 'id, parents',
+          });
+          movedToFolder = true;
+        } catch (moveErr) {
+          log.warn('Failed to move spreadsheet to folder, sharing with link instead', {
+            spreadsheetId, folderId, error: moveErr.message,
+          });
+        }
       }
 
-      log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
+      // If not in a shared folder, make it accessible via link
+      if (!movedToFolder) {
+        try {
+          await drive.permissions.create({
+            fileId: spreadsheetId,
+            requestBody: { type: 'anyone', role: 'reader' },
+          });
+        } catch (shareErr) {
+          log.warn('Failed to share spreadsheet with link', { spreadsheetId, error: shareErr.message });
+        }
+      }
+
+      log.info(`Created spreadsheet: ${title}`, { spreadsheetId, movedToFolder });
       return { spreadsheetId, url };
     }, { retries: 3, label: 'Google Sheets create', shouldRetry: (err) => !(err.message || '').includes('does not have permission') })
   );
