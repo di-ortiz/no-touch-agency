@@ -2965,15 +2965,25 @@ Return ONLY the JSON array, no other text.`;
     // --- Diagnostics ---
     case 'check_credentials': {
       const fs = (await import('fs')).default;
-      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || '(not set in .env)';
-      const credFileExists = config.GOOGLE_APPLICATION_CREDENTIALS ? fs.existsSync(config.GOOGLE_APPLICATION_CREDENTIALS) : false;
+      // Use the same fallback path as getAuth() in google-slides/sheets/drive — config/google-service-account.json
+      const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
+      const credFileExists = fs.existsSync(credPath);
+      let credValid = false;
+      if (credFileExists) {
+        try {
+          const raw = fs.readFileSync(credPath, 'utf-8');
+          const json = JSON.parse(raw);
+          credValid = !!(json.client_email && json.private_key);
+        } catch (_) { /* invalid JSON */ }
+      }
 
       const checks = {
         google_service_account: {
           envVar: 'GOOGLE_APPLICATION_CREDENTIALS',
           value: credPath,
           fileExists: credFileExists,
-          status: credFileExists ? 'OK' : 'MISSING',
+          validServiceAccount: credValid,
+          status: credValid ? 'OK' : credFileExists ? 'INVALID — file exists but is not a valid service account JSON' : 'MISSING',
           fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
           affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
         },
@@ -3003,7 +3013,9 @@ Return ONLY the JSON array, no other text.`;
       };
 
       const issues = [];
-      if (!credFileExists) issues.push('CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
+      if (!credValid) issues.push(credFileExists
+        ? 'CRITICAL: Google service account JSON file exists but is invalid — check the GOOGLE_SERVICE_ACCOUNT_JSON env var'
+        : 'CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
