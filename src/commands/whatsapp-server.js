@@ -163,11 +163,13 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// Resolve the server's public URL for landing page preview links
+// Resolve the server's public URL for landing page preview links.
+// Auto-detected from the first incoming webhook request (Host header) if not manually configured.
+let detectedPublicUrl = null;
 function getPublicUrl() {
   if (config.PUBLIC_URL) return config.PUBLIC_URL.replace(/\/$/, '');
   if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
-  return null;
+  return detectedPublicUrl;
 }
 
 // Tool execution timeout: prevent any single tool from hanging forever
@@ -429,6 +431,15 @@ app.set('trust proxy', 1); // Trust first proxy (Railway, Render, etc.)
 app.use(helmet());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+
+// Auto-detect public URL from first real incoming request (webhook from Meta/Telegram)
+app.use((req, res, next) => {
+  if (!detectedPublicUrl && req.hostname && req.hostname !== 'localhost' && req.hostname !== '127.0.0.1') {
+    detectedPublicUrl = `${req.protocol}://${req.get('host')}`;
+    log.info('Auto-detected public URL from incoming request', { url: detectedPublicUrl });
+  }
+  next();
+});
 
 // Rate limit webhook endpoint
 // Meta sends status webhooks (sent/delivered/read) for every outgoing message,
@@ -970,7 +981,7 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects the best available provider with smart fallback). IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
+    description: 'Generate ad creative VISUALS using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects best provider). Images are TEXT-FREE visual compositions — AI image generators cannot render text, so headlines, CTAs, and copy must be added separately via the ad platform. IMPORTANT: For best results, provide brand colors, target audience, creative style, references, mood, and website/competitor insights. Always tell the user that text/headlines/CTAs will need to be added on top of the visual in their ad platform.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['dalle', 'fal', 'gemini'], description: 'Preferred AI image provider (optional — auto-selects if not specified). Use dalle for photorealism, fal for artistic/stylized, gemini for variety.' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
