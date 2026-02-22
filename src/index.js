@@ -17,8 +17,10 @@ import { runClientMorningBriefing } from './workflows/client-morning-briefing.js
 import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost-alert.js';
 import { runWeeklySEOCheck, runMonthlyContentAnalysis } from './workflows/seo-monitor.js';
 import { sendAlert } from './api/whatsapp.js';
+import { sendAlert as sendTelegramAlert } from './api/telegram.js';
 import config from './config.js';
 import fs from 'fs';
+import axios from 'axios';
 
 const log = logger.child({ workflow: 'main' });
 
@@ -73,14 +75,64 @@ async function main() {
     log.warn('Initial task monitor run failed (expected if ClickUp not configured)', { error: e.message });
   }
 
-  // 4. Notify that system is online
+  // 4. Validate API tokens on startup — catch bad tokens before user sends a message
+  const startupIssues = [];
+
+  // 4a. Validate WhatsApp token by hitting Meta API
   try {
-    await sendAlert('success', 'System Online', 'PPC Agency Automation is running.\nType *help* for available commands.');
+    const metaRes = await axios.get(
+      `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}`,
+      { headers: { Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}` }, timeout: 10000 }
+    );
+    log.info('WhatsApp token VALID', {
+      phoneNumber: metaRes.data?.display_phone_number || 'OK',
+      qualityRating: metaRes.data?.quality_rating,
+    });
   } catch (e) {
-    log.warn('Failed to send startup notification (expected if WhatsApp not configured)', { error: e.message });
+    const detail = e.response?.data?.error?.message || e.message;
+    log.error('WhatsApp token INVALID — Sofia will NOT be able to respond!', {
+      status: e.response?.status,
+      error: detail,
+      phoneNumberId: config.WHATSAPP_PHONE_NUMBER_ID,
+    });
+    startupIssues.push(`WhatsApp token invalid: ${detail}`);
   }
 
-  log.info('PPC Agency Automation fully initialized');
+  // 4b. Validate Anthropic API key with a minimal call
+  try {
+    const { askClaude } = await import('./api/anthropic.js');
+    await askClaude({ systemPrompt: 'Reply OK', userMessage: 'ping', maxTokens: 5, workflow: 'startup-check' });
+    log.info('Anthropic API key VALID');
+  } catch (e) {
+    log.error('Anthropic API key INVALID — Sofia cannot think!', { error: e.message });
+    startupIssues.push(`Anthropic API error: ${e.message?.substring(0, 100)}`);
+  }
+
+  // 4c. Send startup notification (WhatsApp, fallback Telegram)
+  const statusMsg = startupIssues.length > 0
+    ? `System Online — BUT ${startupIssues.length} issue(s):\n${startupIssues.map(i => `• ${i}`).join('\n')}`
+    : 'PPC Agency Automation is running.\nType *help* for available commands.';
+
+  try {
+    await sendAlert(startupIssues.length > 0 ? 'warning' : 'success', 'System Online', statusMsg);
+  } catch (e) {
+    log.error('CANNOT send startup notification via WhatsApp', { error: e.message });
+    // Fallback: try Telegram
+    if (config.TELEGRAM_OWNER_CHAT_ID) {
+      try {
+        await sendTelegramAlert(startupIssues.length > 0 ? 'error' : 'success', 'System Online', statusMsg);
+        log.info('Sent startup notification via Telegram (WhatsApp failed)');
+      } catch (tgErr) {
+        log.error('CANNOT send startup notification via Telegram either', { error: tgErr.message });
+      }
+    }
+  }
+
+  log.info('PPC Agency Automation fully initialized', {
+    issues: startupIssues.length,
+    whatsappOk: !startupIssues.some(i => i.includes('WhatsApp')),
+    anthropicOk: !startupIssues.some(i => i.includes('Anthropic')),
+  });
 }
 
 // Graceful shutdown

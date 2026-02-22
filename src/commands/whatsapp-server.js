@@ -202,6 +202,58 @@ const TOOL_PROGRESS_MESSAGES = {
   preview_landing_page: 'Publishing your landing page and generating a visual preview...',
 };
 
+// --- Message deduplication ---
+// Meta often sends the same webhook 2-3 times. Without dedup, both copies process
+// simultaneously, corrupt conversation history, and can cause Claude API rejections.
+const processedMessageIds = new Map(); // msgId → timestamp
+const MESSAGE_DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 min window
+
+function isMessageAlreadyProcessed(msgId) {
+  if (!msgId) return false;
+  if (processedMessageIds.has(msgId)) return true;
+  processedMessageIds.set(msgId, Date.now());
+  return false;
+}
+
+// Cleanup old dedup entries every 10 minutes
+setInterval(() => {
+  const cutoff = Date.now() - MESSAGE_DEDUP_WINDOW_MS;
+  for (const [id, ts] of processedMessageIds) {
+    if (ts < cutoff) processedMessageIds.delete(id);
+  }
+}, 10 * 60 * 1000);
+
+// --- Owner message concurrency guard ---
+// Prevents multiple owner messages from processing simultaneously, which would
+// cause garbled conversation history and race conditions with Claude API calls.
+let ownerMessageProcessing = false;
+const ownerMessageQueue = [];
+
+async function enqueueOwnerMessage(body) {
+  if (!ownerMessageProcessing) {
+    ownerMessageProcessing = true;
+    try {
+      await handleCommand(body);
+    } finally {
+      ownerMessageProcessing = false;
+      // Process next queued message if any
+      if (ownerMessageQueue.length > 0) {
+        const next = ownerMessageQueue.shift();
+        enqueueOwnerMessage(next);
+      }
+    }
+  } else {
+    // Queue the message — it will be processed after the current one finishes
+    if (ownerMessageQueue.length < 5) {
+      ownerMessageQueue.push(body);
+      log.info('Owner message queued (previous still processing)', { queueLength: ownerMessageQueue.length });
+    } else {
+      log.warn('Owner message queue full, dropping message', { body: body.substring(0, 60) });
+      await sendWhatsApp('I\'m still processing your previous messages. Please wait a moment and try again.');
+    }
+  }
+}
+
 async function executeCSAToolWithTimeout(toolName, toolInput) {
   const timeoutMs = SLOW_TOOLS.has(toolName) ? SLOW_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS;
   return Promise.race([
@@ -3100,6 +3152,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     if (!message) return;
 
+    // Deduplicate — Meta often resends the same webhook 2-3 times
+    if (isMessageAlreadyProcessed(message.id)) {
+      log.debug('WhatsApp webhook: skipping duplicate message', { msgId: message.id });
+      return;
+    }
+
     const from = message.from; // e.g. "1234567890"
 
     // Handle file uploads (images, documents, video, audio)
@@ -3138,8 +3196,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     log.info('WhatsApp routing', { from, isOwner, ownerPhone: config.WHATSAPP_OWNER_PHONE?.slice(-4) });
 
     if (isOwner) {
-      // Owner gets full command access
-      await handleCommand(body);
+      // Owner gets concurrency-guarded command access (prevents parallel mutations)
+      await enqueueOwnerMessage(body);
     } else {
       // Client messages get AI-powered responses
       await handleClientMessage(from, body);
@@ -3149,12 +3207,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
     try {
       await sendWhatsApp(`❌ Error: ${error.message}`);
     } catch (sendErr) {
-      log.error('CRITICAL: Failed to send error message back to WhatsApp', {
+      log.error('CRITICAL: Failed to send ANY WhatsApp message', {
         originalError: error.message,
         sendError: sendErr.message,
         sendStatus: sendErr.response?.status,
         sendDetail: sendErr.response?.data?.error?.message,
       });
+      // Last resort: try Telegram if configured
+      if (config.TELEGRAM_OWNER_CHAT_ID) {
+        try {
+          await sendTelegramAlert('error', 'WhatsApp DEAD',
+            `Cannot send ANY WhatsApp messages.\nOriginal error: ${error.message}\nSend error: ${sendErr.message}\n\nCheck WHATSAPP_ACCESS_TOKEN in Railway.`);
+        } catch (_) { /* truly nothing we can do */ }
+      }
     }
   }
 });
@@ -4032,18 +4097,18 @@ async function handleCommand(message) {
     return sendWhatsApp('Memory cleared! Starting fresh.');
   }
 
-  // Build context
-  const clients = getAllClients();
-  const clientContext = clients.length > 0
-    ? `\n\nCurrent managed clients: ${clients.map(c => c.name).join(', ')}`
-    : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
-
-  // Load conversation history and append the new message
-  const history = getHistory(ownerChatId);
-  addToHistory(ownerChatId, 'user', message);
-  const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
-
   try {
+    // Build context — inside try/catch so DB errors don't cause silent failures
+    const clients = getAllClients();
+    const clientContext = clients.length > 0
+      ? `\n\nCurrent managed clients: ${clients.map(c => c.name).join(', ')}`
+      : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
+
+    // Load conversation history and append the new message
+    const history = getHistory(ownerChatId);
+    addToHistory(ownerChatId, 'user', message);
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
+
     // Conversational tool-use loop (same architecture as Telegram)
     let response = await askClaude({
       systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
