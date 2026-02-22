@@ -1,6 +1,6 @@
 import logger from './utils/logger.js';
 import { startServer } from './commands/whatsapp-server.js';
-import { initializeSchedule } from './services/scheduler.js';
+import { initializeSchedule, registerJob } from './services/scheduler.js';
 import { runMorningBriefing } from './workflows/morning-briefing.js';
 import { runDailyMonitor } from './workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from './workflows/clickup-monitor.js';
@@ -18,6 +18,7 @@ import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost
 import { runWeeklySEOCheck, runMonthlyContentAnalysis } from './workflows/seo-monitor.js';
 import { sendAlert } from './api/whatsapp.js';
 import { sendAlert as sendTelegramAlert } from './api/telegram.js';
+import { exchangeForLongLived, debugToken } from './utils/meta-token.js';
 import config from './config.js';
 import fs from 'fs';
 import axios from 'axios';
@@ -78,7 +79,44 @@ async function main() {
   // 4. Validate API tokens on startup — catch bad tokens before user sends a message
   const startupIssues = [];
 
-  // 4a. Validate WhatsApp token by hitting Meta API
+  // 4a. Auto-extend WhatsApp token (short-lived → long-lived) then validate
+  if (config.META_APP_ID && config.META_APP_SECRET) {
+    try {
+      const tokenInfo = await debugToken(config.WHATSAPP_ACCESS_TOKEN);
+      if (tokenInfo && tokenInfo.is_valid) {
+        const expiresAt = tokenInfo.expires_at ? tokenInfo.expires_at * 1000 : 0;
+        const now = Date.now();
+
+        if (expiresAt > 0) {
+          const hoursLeft = Math.round((expiresAt - now) / 3600000);
+          log.info('WhatsApp token has expiry — attempting exchange for long-lived token', {
+            expiresIn: hoursLeft + 'h',
+          });
+
+          try {
+            const refreshed = await exchangeForLongLived(config.WHATSAPP_ACCESS_TOKEN);
+            config.WHATSAPP_ACCESS_TOKEN = refreshed.access_token;
+            const newExpiry = refreshed.expires_in
+              ? Math.round(refreshed.expires_in / 86400) + 'd'
+              : 'unknown';
+            log.info('WhatsApp token exchanged for long-lived token', { expiresIn: newExpiry });
+          } catch (exchangeErr) {
+            log.warn('WhatsApp token exchange failed (may already be long-lived or System User token)', {
+              error: exchangeErr.response?.data?.error?.message || exchangeErr.message,
+            });
+          }
+        } else {
+          log.info('WhatsApp token has no expiry (System User token — ideal)');
+        }
+      }
+    } catch (e) {
+      log.debug('Token debug check skipped, proceeding with validation', { error: e.message });
+    }
+  } else {
+    log.info('META_APP_ID/META_APP_SECRET not configured — cannot auto-extend WhatsApp token. Consider adding them to prevent token expiry.');
+  }
+
+  // Validate WhatsApp token by hitting Meta API
   try {
     const metaRes = await axios.get(
       `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}`,
@@ -126,6 +164,47 @@ async function main() {
         log.error('CANNOT send startup notification via Telegram either', { error: tgErr.message });
       }
     }
+  }
+
+  // 5. Schedule WhatsApp token health check every 6 hours
+  if (config.META_APP_ID && config.META_APP_SECRET) {
+    registerJob('whatsapp-token-check', '0 */6 * * *', async () => {
+      try {
+        const tokenInfo = await debugToken(config.WHATSAPP_ACCESS_TOKEN);
+        if (!tokenInfo || !tokenInfo.is_valid) {
+          log.error('WhatsApp token has become INVALID — Sofia cannot respond!');
+          if (config.TELEGRAM_OWNER_CHAT_ID) {
+            await sendTelegramAlert('critical', 'WhatsApp Token Expired',
+              'The WhatsApp access token is invalid. Sofia cannot send messages.\n\nGenerate a new token or create a System User token in Meta Business Suite.');
+          }
+          return;
+        }
+
+        const expiresAt = tokenInfo.expires_at ? tokenInfo.expires_at * 1000 : 0;
+        if (expiresAt > 0) {
+          const hoursLeft = Math.round((expiresAt - Date.now()) / 3600000);
+
+          // Try to refresh if expiring within 7 days
+          if (hoursLeft < 168) {
+            try {
+              const refreshed = await exchangeForLongLived(config.WHATSAPP_ACCESS_TOKEN);
+              config.WHATSAPP_ACCESS_TOKEN = refreshed.access_token;
+              log.info('WhatsApp token auto-refreshed', {
+                expiresIn: refreshed.expires_in ? Math.round(refreshed.expires_in / 86400) + 'd' : 'unknown',
+              });
+            } catch {
+              // Alert if expiring within 24h and refresh failed
+              if (hoursLeft < 24 && config.TELEGRAM_OWNER_CHAT_ID) {
+                await sendTelegramAlert('warning', 'WhatsApp Token Expiring Soon',
+                  `Token expires in ~${hoursLeft}h. Auto-refresh failed.\n\nReplace the token in Railway or create a System User token for a permanent solution.`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        log.warn('WhatsApp token health check failed', { error: e.message });
+      }
+    });
   }
 
   log.info('PPC Agency Automation fully initialized', {
