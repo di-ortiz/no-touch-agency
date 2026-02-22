@@ -139,7 +139,7 @@ async function sendWhatsAppImageNative(imageBuffer, mimeType, url, caption, chat
 // JSON replacer: strip binary image buffers from tool results before sending to Claude.
 // _imageBuffers are only needed by deliverMediaInline for native WhatsApp upload, not by the AI.
 function stripBinaryBuffers(key, value) {
-  if (key === '_imageBuffers' || key === '_pdfBuffer') return undefined;
+  if (key === '_imageBuffers' || key === '_pdfBuffer' || key === '_screenshotBuffer') return undefined;
   return value;
 }
 
@@ -152,10 +152,28 @@ function truncateToolResult(resultJson) {
   return resultJson.slice(0, MAX_TOOL_RESULT_CHARS) + '... [truncated — result was ' + resultJson.length + ' chars. Key data shown above. Ask for specific details if needed.]';
 }
 
+// --- Landing Page Preview Store ---
+// In-memory store for landing page previews (served at /lp/:id)
+const landingPageStore = new Map();
+// Clean up landing pages older than 7 days every hour
+setInterval(() => {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  for (const [id, data] of landingPageStore) {
+    if (data.createdAt < cutoff) landingPageStore.delete(id);
+  }
+}, 60 * 60 * 1000);
+
+// Resolve the server's public URL for landing page preview links
+function getPublicUrl() {
+  if (config.PUBLIC_URL) return config.PUBLIC_URL.replace(/\/$/, '');
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  return null;
+}
+
 // Tool execution timeout: prevent any single tool from hanging forever
 const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000; // 8 min for image/video generation (includes multi-format + provider fallback)
 const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000; // 2 min for regular tools
-const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report']);
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page']);
 
 // Human-friendly progress messages per tool — ensures user ALWAYS sees what Sofia is doing
 const TOOL_PROGRESS_MESSAGES = {
@@ -179,6 +197,7 @@ const TOOL_PROGRESS_MESSAGES = {
   generate_weekly_report: 'Generating the weekly report...',
   generate_campaign_brief: 'Creating the campaign brief...',
   run_competitor_analysis: 'Analyzing competitors...',
+  preview_landing_page: 'Publishing your landing page and generating a visual preview...',
 };
 
 async function executeCSAToolWithTimeout(toolName, toolInput) {
@@ -384,6 +403,20 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
       } else {
         await safeSendMedia(sendImage, creative.previewUrl, `Google Ad — ${creative.format || 'preview'}`, toolName);
       }
+    }
+  }
+  // Landing page preview — send screenshot image
+  if (toolName === 'preview_landing_page' && result._screenshotBuffer) {
+    const caption = `Landing Page Preview${result.name ? ` — ${result.name}` : ''}`;
+    try {
+      if (channel === 'whatsapp') {
+        await sendWhatsAppImageNative(result._screenshotBuffer, 'image/png', null, caption, chatId);
+      } else {
+        await sendTelegramPhotoBuffer(result._screenshotBuffer, 'image/png', caption, chatId);
+      }
+      log.info('Landing page screenshot delivered', { channel, chatId });
+    } catch (e) {
+      log.warn('Landing page screenshot delivery failed', { error: e.message });
     }
   }
   } catch (mediaErr) {
@@ -985,6 +1018,16 @@ const CSA_TOOLS = [
       search: { type: 'string', description: 'Optional: filter URLs by keyword (e.g. "blog" or "pricing")' },
       limit: { type: 'number', description: 'Max URLs to return (default: 100)' },
     }, required: ['url'] },
+  },
+  // --- Landing Page Preview ---
+  {
+    name: 'preview_landing_page',
+    description: 'Publish a landing page and send a visual screenshot preview in chat. Takes the full HTML code you generated, hosts it at a live preview URL, captures a screenshot of the rendered page using Firecrawl, uploads the HTML file to Google Drive, and sends the screenshot image in WhatsApp/Telegram so the user can see exactly how the page looks. ALWAYS use this tool after generating landing page HTML — never paste raw HTML code in chat. First browse the client website with browse_website to extract brand colors, fonts, and style, then generate the HTML incorporating those brand elements, then call this tool to publish and preview it.',
+    input_schema: { type: 'object', properties: {
+      html: { type: 'string', description: 'Complete self-contained HTML code for the landing page. Must include all CSS inline or via CDN links (Google Fonts, Tailwind, etc). Should be a beautiful, responsive, conversion-optimized page.' },
+      name: { type: 'string', description: 'Name for the landing page (e.g. "Acme Corp — Summer Sale Landing Page")' },
+      clientName: { type: 'string', description: 'Client name (for organizing in their Google Drive folder)' },
+    }, required: ['html'] },
   },
   // --- Visual Analysis ---
   {
@@ -1989,6 +2032,85 @@ Return ONLY the JSON array, no other text.`;
         totalUrls: mapResult.totalUrls,
         urls: mapResult.urls,
       };
+    }
+
+    // --- Landing Page Preview ---
+    case 'preview_landing_page': {
+      const html = toolInput.html;
+      if (!html || html.length < 50) {
+        return { error: 'HTML content is too short — provide complete landing page HTML.' };
+      }
+
+      const id = crypto.randomUUID();
+      landingPageStore.set(id, { html, createdAt: Date.now() });
+
+      const baseUrl = getPublicUrl();
+      const previewUrl = baseUrl ? `${baseUrl}/lp/${id}` : null;
+      const lpName = toolInput.name || 'Landing Page';
+
+      let screenshotBuffer = null;
+
+      // Take screenshot via Firecrawl if available
+      if (previewUrl && firecrawlApi.isConfigured()) {
+        try {
+          const screenshotResult = await firecrawlApi.scrape(previewUrl, {
+            formats: ['screenshot'],
+            onlyMainContent: false,
+            waitFor: 2000,
+            timeout: 30000,
+          });
+          if (screenshotResult.screenshot) {
+            // Firecrawl returns screenshot as base64 data URL or http URL
+            const ssData = screenshotResult.screenshot;
+            if (ssData.startsWith('data:')) {
+              screenshotBuffer = Buffer.from(ssData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+            } else if (ssData.startsWith('http')) {
+              const imgResp = await axios.get(ssData, { responseType: 'arraybuffer', timeout: 15000 });
+              screenshotBuffer = Buffer.from(imgResp.data);
+            }
+          }
+        } catch (e) {
+          log.warn('Landing page screenshot failed', { error: e.message, previewUrl });
+        }
+      }
+
+      // Upload HTML to Google Drive
+      let driveLink = null;
+      try {
+        const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
+        const folderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        if (folderId) {
+          const { Readable } = await import('stream');
+          const stream = new Readable();
+          stream.push(Buffer.from(html, 'utf-8'));
+          stream.push(null);
+          const driveFile = await googleDrive.uploadFile(`${lpName}.html`, stream, 'text/html', folderId);
+          if (driveFile?.id) {
+            await googleDrive.shareFolderWithAnyone(driveFile.id, 'reader');
+            driveLink = driveFile.webViewLink;
+          }
+        }
+      } catch (e) {
+        log.warn('Landing page Drive upload failed', { error: e.message });
+      }
+
+      const result = {
+        name: lpName,
+        previewUrl,
+        driveLink,
+        hasScreenshot: !!screenshotBuffer,
+        message: screenshotBuffer
+          ? 'Landing page published! Screenshot preview sent as image.'
+          : previewUrl
+            ? 'Landing page published! Click the preview link to view it.'
+            : 'Landing page HTML uploaded to Google Drive.',
+      };
+
+      if (screenshotBuffer) {
+        result._screenshotBuffer = screenshotBuffer;
+      }
+
+      return result;
     }
 
     // --- Visual Analysis ---
@@ -3580,7 +3702,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'analyze_visual_reference',
+      'generate_text_ads', 'analyze_visual_reference', 'preview_landing_page',
       'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',
@@ -3819,6 +3941,14 @@ app.post('/webhook/leadsie', async (req, res) => {
   } catch (error) {
     log.error('Leadsie webhook handling failed', { error: error.message });
   }
+});
+
+// --- Landing Page Preview ---
+app.get('/lp/:id', (req, res) => {
+  const page = landingPageStore.get(req.params.id);
+  if (!page) return res.status(404).send('Landing page not found or expired.');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(page.html);
 });
 
 // --- Health Check ---
@@ -4209,7 +4339,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
-      'generate_text_ads', 'analyze_visual_reference',
+      'generate_text_ads', 'analyze_visual_reference', 'preview_landing_page',
       'browse_website', 'crawl_website', 'search_web', 'map_website',
       'search_ad_library', 'search_facebook_pages', 'get_page_ads',
       'get_search_volume', 'get_keyword_ideas',

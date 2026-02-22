@@ -98,7 +98,7 @@ async function fetchWithFirecrawl(url, opts = {}) {
     markdown: md,
     images,
     links,
-    brandColors: result.html ? extractColors(result.html) : []
+    brandColors: result.html ? extractColors(result.html) : [],
     wordCount: bodyText.split(/\s+/).length,
     source: 'firecrawl',
   };

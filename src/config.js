@@ -84,6 +84,9 @@ const envSchema = z.object({
   // Firecrawl (web scraping / crawling)
   FIRECRAWL_API_KEY: z.string().optional().default(''),
 
+  // Public URL (for landing page previews — auto-detected on Railway if not set)
+  PUBLIC_URL: z.string().optional().default(''),
+
   // Gemini (Google AI — Imagen 3 image generation + multi-modal vision)
   GEMINI_API_KEY: z.string().optional().default(''),
 
