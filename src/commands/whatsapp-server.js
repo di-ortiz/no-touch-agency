@@ -569,6 +569,40 @@ function clearHistory(chatId) {
 }
 
 /**
+ * Sanitize conversation history before sending to the Anthropic API.
+ * 1. Strip extra fields (channel, created_at) — only keep role + content
+ * 2. Merge consecutive same-role messages (prevents API validation errors)
+ * 3. Ensure the first message is 'user' role
+ */
+function sanitizeMessages(messages) {
+  if (!messages || messages.length === 0) return [];
+
+  const cleaned = [];
+  for (const msg of messages) {
+    const role = msg.role;
+    const content = msg.content;
+    if (!role || !content) continue;
+
+    // Merge consecutive same-role messages instead of creating invalid sequences
+    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === role) {
+      const prev = cleaned[cleaned.length - 1];
+      prev.content = typeof prev.content === 'string' && typeof content === 'string'
+        ? `${prev.content}\n${content}`
+        : content; // if content is not a string (tool results), just overwrite
+    } else {
+      cleaned.push({ role, content });
+    }
+  }
+
+  // Ensure first message is 'user' role (Anthropic API requirement)
+  while (cleaned.length > 0 && cleaned[0].role !== 'user') {
+    cleaned.shift();
+  }
+
+  return cleaned;
+}
+
+/**
  * Summarize tool results for persistent conversation history.
  * Extracts key deliverables (URLs, counts, ad copy previews) so Sofia
  * retains awareness of what she generated/shared across messages.
@@ -2933,6 +2967,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
       if (isOwner) {
         await handleMediaUpload(from, message.type, media, caption);
+      } else {
+        // Let non-owner clients know we received their file; process caption as text if present
+        if (caption) {
+          await handleClientMessage(from, caption);
+        } else {
+          await sendWhatsApp('Thanks for sharing that! If you have any questions or need help, just send me a text message.', from);
+        }
       }
       return;
     }
@@ -3126,7 +3167,7 @@ async function handleTelegramCommand(message, chatId) {
   // Load conversation history and append the new message
   const history = getHistory(chatId);
   addToHistory(chatId, 'user', message);
-  const messages = [...history, { role: 'user', content: message }];
+  const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
   try {
     // Conversational loop with tool use (using shared CSA_TOOLS)
@@ -3565,7 +3606,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
     addToHistory(chatId, 'user', message, 'telegram');
 
-    const messages = [...history, { role: 'user', content: message }];
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
     // Send thinking indicator so client knows Sofia is working
     await sendThinkingIndicator('telegram', chatId, 'Give me a moment...');
@@ -3660,13 +3701,16 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack });
+    const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
+    const hint = isApiError
+      ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
+      : ` (${error.message?.substring(0, 80)})`;
+    const fallbackMsg = `Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`;
+    // CRITICAL: Save an assistant message to prevent consecutive user messages in history,
+    // which would cause cascading API failures on all subsequent messages.
+    addToHistory(chatId, 'assistant', fallbackMsg, 'telegram');
     try {
-      // Include error hint so we can diagnose from Telegram logs
-      const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
-      const hint = isApiError
-        ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
-        : ` (${error.message?.substring(0, 80)})`;
-      await sendTelegram(`Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`, chatId);
+      await sendTelegram(fallbackMsg, chatId);
     } catch (e) { /* best effort */ }
   }
 }
@@ -3844,7 +3888,7 @@ async function handleCommand(message) {
   // Load conversation history and append the new message
   const history = getHistory(ownerChatId);
   addToHistory(ownerChatId, 'user', message);
-  const messages = [...history, { role: 'user', content: message }];
+  const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
   try {
     // Conversational tool-use loop (same architecture as Telegram)
@@ -4191,7 +4235,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
     addToHistory(from, 'user', message, 'whatsapp');
 
-    const messages = [...history, { role: 'user', content: message }];
+    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
     // Send thinking indicator so client knows Sofia is working
     await sendThinkingIndicator('whatsapp', from, 'Give me a moment...');
@@ -4289,8 +4333,12 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
     }
   } catch (error) {
     log.error('Client message handling failed', { from, error: error.message, stack: error.stack });
+    const fallbackMsg = 'Thank you for your message. Our team will get back to you shortly.';
+    // CRITICAL: Save an assistant message to prevent consecutive user messages in history,
+    // which would cause cascading API failures on all subsequent messages.
+    addToHistory(from, 'assistant', fallbackMsg, 'whatsapp');
     try {
-      await sendWhatsApp('Thank you for your message. Our team will get back to you shortly.', from);
+      await sendWhatsApp(fallbackMsg, from);
     } catch (sendErr) {
       log.error('CRITICAL: Cannot send ANY WhatsApp message (client handler)', {
         from,
