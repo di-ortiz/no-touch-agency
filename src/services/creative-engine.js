@@ -190,21 +190,21 @@ export async function generateImagePrompt(opts = {}) {
 
   // Add platform-specific guidance
   const platformGuide = {
-    meta: 'Design for Meta Feed — landscape/square, needs to stop the scroll in a busy feed. Leave clean space on the right or bottom third for headline overlay.',
-    instagram: 'Design for Instagram — visually stunning, aspirational. Square or vertical format. Must feel native to the platform, not overly "ad-like".',
-    google: 'Design for Google Display Network — needs to work at small sizes. Bold, simple composition with one clear focal point. High contrast.',
-    tiktok: 'Design for TikTok — vertical format, energetic and authentic feel. Should look native to the platform, not overly polished/corporate.',
+    meta: 'Design a complete Meta Feed ad — landscape/square with bold headline text, eye-catching CTA button, and scroll-stopping visual. Must look like a professional paid social ad, not a stock photo.',
+    instagram: 'Design a complete Instagram ad — visually stunning with integrated headline text and CTA. Square or vertical format. Should look like a polished brand ad from a major company.',
+    google: 'Design a complete Google Display ad — bold, simple composition with prominent headline text and CTA button. High contrast, needs to work at small sizes. Clear and readable.',
+    tiktok: 'Design a complete TikTok ad — vertical format with bold text overlay and CTA. Energetic, authentic feel but clearly an ad with offer/headline visible.',
   };
   if (platformGuide[opts.platform]) briefSections.push(`PLATFORM GUIDANCE: ${platformGuide[opts.platform]}`);
 
   // Fallback defaults if minimal info provided
   if (!opts.concept && !opts.style && !opts.mood) {
-    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, premium advertising visual. Choose an appropriate style based on the industry and brand. Avoid stock photo cliches.`);
+    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, professional ad creative with bold headline text and a clear CTA button/element. This must look like a real paid social media ad — not a stock photo. Choose an appropriate style based on the industry and brand.`);
   }
 
   const response = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.imagePromptEngineer,
-    userMessage: `Write a DALL-E 3 prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). Remember to end with "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind".`,
+    userMessage: `Write an image generation prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). This must be a COMPLETE AD CREATIVE with headline text and CTA — not just a background photo. Include the exact text words for the headline and CTA based on the brief.`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1500,
     workflow: 'image-prompt-engineering',
@@ -354,7 +354,7 @@ Videos: ${result.videos.filter(v => !v.error).length}`,
   if (opts.buildDeck !== false) {
     log.info('Step 5: Building creative deck...');
     try {
-      const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
       const presentation = await googleSlides.buildCreativeDeck({
         clientName: opts.clientName,

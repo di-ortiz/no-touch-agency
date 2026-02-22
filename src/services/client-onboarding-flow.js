@@ -443,6 +443,8 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
         drive_creatives_folder_id: folders.creatives?.id,
         drive_plans_folder_id: folders.strategic_plans?.id,
         drive_brand_assets_folder_id: folders.brand_assets?.id,
+        drive_audits_folder_id: folders.audits?.id,
+        drive_competitor_research_folder_id: folders.competitor_research?.id,
       });
 
       // Make the Brand Assets folder publicly linkable so client can upload

@@ -1428,7 +1428,7 @@ async function executeCSATool(toolName, toolInput) {
     // --- Content Calendars ---
     case 'create_content_calendar': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
       // Generate calendar content using AI
       const platforms = (toolInput.platforms || 'Instagram, Facebook').split(',').map(p => p.trim());
@@ -1484,7 +1484,7 @@ Return ONLY the JSON array, no other text.`;
     case 'export_report_to_sheet': {
       const client = getClient(toolInput.clientName);
       if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
-      const folderId = client.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
       // Gather performance data
       const reportData = [];
@@ -1549,7 +1549,7 @@ Return ONLY the JSON array, no other text.`;
       let sheetError = null;
       try {
         const client = getClient(toolInput.clientName);
-        const folderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+        const folderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
         const sheet = await campaignRecord.createTextAdsRecord({
           clientName: toolInput.clientName,
           platform: toolInput.platform,
@@ -1602,7 +1602,7 @@ Return ONLY the JSON array, no other text.`;
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
       // Run all uploads in PARALLEL to avoid sequential 10-30s per image adding up
-      const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const imgFolderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const driveErrors = [];
       const driveResults = await Promise.allSettled(
         images.map(async (img) => {
@@ -1715,7 +1715,7 @@ Return ONLY the JSON array, no other text.`;
       if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable video generation.' };
       const client = getClient(toolInput.clientName);
 
-      const videoPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting. No text overlays.`;
+      const videoPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting.`;
 
       try {
         const video = await openaiMedia.generateAdVideo({
@@ -1736,9 +1736,20 @@ Return ONLY the JSON array, no other text.`;
           status: video.status,
         };
       } catch (videoError) {
-        log.error('Video generation failed', { error: videoError.message, client: toolInput.clientName });
+        log.error('Video generation failed', { error: videoError.message, stack: videoError.stack, client: toolInput.clientName });
+        const errMsg = videoError.message || 'Unknown error';
+        const isRateLimit = errMsg.includes('429') || errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota');
+        const isContentPolicy = errMsg.includes('policy') || errMsg.includes('safety') || errMsg.includes('content');
+        let userMessage;
+        if (isRateLimit) {
+          userMessage = `Video generation hit OpenAI's rate limit. Sora 2 has strict usage limits. Please wait a few minutes and try again, or check your OpenAI plan tier. Error: ${errMsg}`;
+        } else if (isContentPolicy) {
+          userMessage = `Video generation was blocked by content policy. Try a different concept. Error: ${errMsg}`;
+        } else {
+          userMessage = `Video generation failed: ${errMsg}. Try again with a simpler concept, or I can generate static images instead.`;
+        }
         return {
-          error: `Video generation encountered an issue: ${videoError.message}. This can happen due to high demand or content restrictions. Try again with a simpler concept, or I can generate static images instead.`,
+          error: userMessage,
           suggestion: 'Try generate_ad_images as an alternative',
         };
       }
@@ -1766,7 +1777,7 @@ Return ONLY the JSON array, no other text.`;
 
       // Persist generated images to Google Drive + keep buffers for WhatsApp direct upload
       const client = getClient(toolInput.clientName);
-      const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const pkgFolderId = client?.drive_creatives_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const persistedImageUrls = [];   // original provider URLs for WhatsApp delivery
       const _pkgImageBuffers = [];
       const pkgDriveErrors = [];
@@ -2445,7 +2456,7 @@ Return ONLY the JSON array, no other text.`;
     case 'list_client_files': {
       const client = getClient(toolInput.clientName);
       const folderKey = toolInput.folder || 'all';
-      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
       if (!folderId) {
         return { error: 'No Google Drive folder found for this client. Use setup_client_drive first.' };
@@ -2529,7 +2540,7 @@ Return ONLY the JSON array, no other text.`;
     // --- Presentation Builders ---
     case 'build_media_plan_deck': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_strategic_plans_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_plans_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await presentationBuilder.buildMediaPlanDeck({
         clientName: toolInput.clientName,
         campaignName: toolInput.campaignName,
@@ -2577,7 +2588,7 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'build_competitor_deck': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_competitor_research_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await presentationBuilder.buildCompetitorDeck({
         clientName: toolInput.clientName,
         competitors: toolInput.competitors,
@@ -2632,7 +2643,7 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'build_performance_deck': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_reports_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await presentationBuilder.buildPerformanceDeck({
         clientName: toolInput.clientName,
         reportType: toolInput.reportType,
@@ -2695,7 +2706,7 @@ Return ONLY the JSON array, no other text.`;
     // --- PDF Reports ---
     case 'generate_performance_pdf': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_reports_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await reportBuilder.generatePerformanceReport({
         clientName: toolInput.clientName,
         reportType: toolInput.reportType,
@@ -2726,7 +2737,7 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'generate_competitor_pdf': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_competitor_research_folder_id || client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await reportBuilder.generateCompetitorReport({
         clientName: toolInput.clientName,
         competitors: toolInput.competitors,
@@ -2754,7 +2765,7 @@ Return ONLY the JSON array, no other text.`;
     // --- Charts ---
     case 'create_chart_presentation': {
       const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await chartBuilderService.buildChartPresentation({
         clientName: toolInput.clientName,
         title: toolInput.title,
@@ -4321,7 +4332,7 @@ async function handleMediaUpload(from, mediaType, media, caption) {
     }
 
     const client = clientName ? getClient(clientName) : null;
-    const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+    const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
     if (!folderId) {
       return sendWhatsApp('Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env to enable file storage.');
@@ -4438,7 +4449,7 @@ async function handleTelegramMediaUpload(chatId, mediaType, fileObj, caption) {
     }
 
     const client = clientName ? getClient(clientName) : null;
-    const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+    const folderId = client?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
     if (!folderId) {
       return sendTelegram('Google Drive not configured. Set GOOGLE_DRIVE_ROOT_FOLDER_ID in .env.', chatId);

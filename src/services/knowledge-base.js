@@ -219,6 +219,8 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN channels_need TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN product_service TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN drive_brand_assets_folder_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_audits_folder_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN drive_competitor_research_folder_id TEXT"); } catch (e) { /* already exists */ }
 
     // Safe migrations: add language + extra form fields to pending_clients
     try { db.exec("ALTER TABLE pending_clients ADD COLUMN language TEXT DEFAULT 'en'"); } catch (e) { /* already exists */ }
