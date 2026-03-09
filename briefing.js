@@ -449,9 +449,9 @@ async function sendEmail(to, subject, textBody) {
 export async function runBriefing() {
   log.info('Starting team briefing', { testMode: TEST_MODE });
 
-  // Skip weekends
+  // Skip weekends (unless test mode)
   const day = new Date().getDay();
-  if (day === 0 || day === 6) {
+  if ((day === 0 || day === 6) && !TEST_MODE) {
     log.info('Skipping briefing — weekend');
     return;
   }
