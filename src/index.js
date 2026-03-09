@@ -16,6 +16,7 @@ import { runClientCheckIn } from './workflows/client-check-in.js';
 import { runClientMorningBriefing } from './workflows/client-morning-briefing.js';
 import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost-alert.js';
 import { runWeeklySEOCheck, runMonthlyContentAnalysis } from './workflows/seo-monitor.js';
+import { startBriefingSchedule } from '../briefing.js';
 import { sendAlert } from './api/whatsapp.js';
 import { sendAlert as sendTelegramAlert } from './api/telegram.js';
 import { exchangeForLongLived, debugToken } from './utils/meta-token.js';
@@ -206,6 +207,9 @@ async function main() {
       }
     });
   }
+
+  // 6. Start Chili Digital team briefing cron (separate from Sofia)
+  startBriefingSchedule();
 
   log.info('PPC Agency Automation fully initialized', {
     issues: startupIssues.length,
