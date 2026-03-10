@@ -717,6 +717,23 @@ export function clearMessages(chatId) {
   d.prepare('DELETE FROM conversation_history WHERE chat_id = ?').run(chatId);
 }
 
+/**
+ * Remove assistant messages matching any of the given LIKE patterns.
+ * Used at startup to clean stale/incorrect responses from history
+ * so they don't poison future Claude calls.
+ */
+export function cleanPoisonedHistory(chatId, patterns) {
+  const d = getDb();
+  let total = 0;
+  for (const pattern of patterns) {
+    const result = d.prepare(
+      'DELETE FROM conversation_history WHERE chat_id = ? AND role = ? AND content LIKE ?'
+    ).run(chatId, 'assistant', `%${pattern}%`);
+    total += result.changes;
+  }
+  return total;
+}
+
 // --- Plan-based daily message limits ---
 
 const PLAN_DAILY_LIMITS = {

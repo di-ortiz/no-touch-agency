@@ -6,7 +6,7 @@ import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
   createPendingClient, getPendingClientByToken, getPendingClientByTokenAny, getLatestPendingClient, activatePendingClient,
   updatePendingClient, getPendingClientByLeadsieInvite,
-  saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
+  saveMessage, getMessages, clearMessages, cleanPoisonedHistory, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
   getClientDeliverables, getOverdueDeliverables, getUpcomingDeliverables,
@@ -3699,9 +3699,15 @@ async function handleTelegramCommand(message, chatId) {
   const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
   try {
+    // Build system prompt — inject forced tool-use hint when ClickUp is mentioned
+    let tgSystemPrompt = TELEGRAM_CSA_PROMPT + clientContext;
+    if (/clickup|click.?up|tarefas.*(equipe|time|team|vencid)|status.*(equipe|time|team)|relat[oó]rio.*tarefas/i.test(message)) {
+      tgSystemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You MUST call get_clickup_status or get_team_status or get_all_clickup_tasks tool RIGHT NOW. Do NOT say you don\'t have access — you DO have these tools available. CALL THE TOOL FIRST, then respond with the results.';
+    }
+
     // Conversational loop with tool use (using shared CSA_TOOLS)
     let response = await askClaude({
-      systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
+      systemPrompt: tgSystemPrompt,
       messages,
       tools: CSA_TOOLS,
       model: 'claude-haiku-4-5-20251001',
@@ -3753,7 +3759,7 @@ async function handleTelegramCommand(message, chatId) {
       messages.push({ role: 'user', content: toolResults });
 
       response = await askClaude({
-        systemPrompt: TELEGRAM_CSA_PROMPT + clientContext,
+        systemPrompt: tgSystemPrompt,
         messages,
         tools: CSA_TOOLS,
         model: 'claude-haiku-4-5-20251001',
@@ -4435,9 +4441,15 @@ async function handleCommand(message) {
     addToHistory(ownerChatId, 'user', message);
     const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
 
+    // Build system prompt — inject forced tool-use hint when ClickUp is mentioned
+    let systemPrompt = WHATSAPP_CSA_PROMPT + clientContext;
+    if (/clickup|click.?up|tarefas.*(equipe|time|team|vencid)|status.*(equipe|time|team)|relat[oó]rio.*tarefas/i.test(message)) {
+      systemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You MUST call get_clickup_status or get_team_status or get_all_clickup_tasks tool RIGHT NOW. Do NOT say you don\'t have access — you DO have these tools available. CALL THE TOOL FIRST, then respond with the results.';
+    }
+
     // Conversational tool-use loop (same architecture as Telegram)
     let response = await askClaude({
-      systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
+      systemPrompt,
       messages,
       tools: CSA_TOOLS,
       model: 'claude-haiku-4-5-20251001',
@@ -4489,7 +4501,7 @@ async function handleCommand(message) {
       messages.push({ role: 'user', content: toolResults });
 
       response = await askClaude({
-        systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
+        systemPrompt,
         messages,
         tools: CSA_TOOLS,
         model: 'claude-haiku-4-5-20251001',
@@ -5188,6 +5200,30 @@ export function startServer(port) {
     console.log(`Client init API: http://your-server:${p}/api/client-init`);
     console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
     console.log(`Health check: http://your-server:${p}/health`);
+
+    // Clean poisoned ClickUp denial from conversation history.
+    // Old responses saying "I don't have ClickUp" get cached in SQLite and
+    // cause Haiku to parrot the same denial even after tools are available.
+    try {
+      const clickupDenialPatterns = [
+        'não tenho integração%ClickUp',
+        'don\'t have ClickUp',
+        'no tengo integración%ClickUp',
+        'não consigo puxar%ClickUp',
+        'não tenho acesso%ClickUp',
+        'não tenho integração direta com o ClickUp',
+        'no direct integration with ClickUp',
+      ];
+      let deleted = cleanPoisonedHistory('whatsapp-owner', clickupDenialPatterns);
+      if (config.TELEGRAM_OWNER_CHAT_ID) {
+        deleted += cleanPoisonedHistory(config.TELEGRAM_OWNER_CHAT_ID, clickupDenialPatterns);
+      }
+      if (deleted > 0) {
+        log.info('Cleaned poisoned ClickUp denial from history', { deleted });
+      }
+    } catch (e) {
+      log.warn('History cleanup failed', { error: e.message });
+    }
 
     // Fetch Telegram bot username if not configured
     if (!telegramBotUsername && config.TELEGRAM_BOT_TOKEN) {
