@@ -845,10 +845,12 @@ Communication style:
 - Use emojis naturally but sparingly
 
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
-You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
+You have DIRECT, WORKING integration with ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster.
+
+⚠️ CRITICAL: You DO have ClickUp integration. NEVER say "I don't have ClickUp integration" or "I can't access ClickUp". You MUST call the ClickUp tools when asked about tasks, projects, or status. If the user mentions ClickUp, tasks, tarefas, status, or anything related — CALL THE TOOL IMMEDIATELY, do not respond with text saying you can't.
 
 1. *Team Status (PRIMARY)* — Use get_team_status FIRST for any status update. It returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red). This is your MOST IMPORTANT tool.
-2. *ClickUp Tasks* — Use get_clickup_status for task-level detail (overdue, due today, upcoming by task name).
+2. *ClickUp Tasks* — Use get_clickup_status for task-level detail (overdue, due today, upcoming by task name). Use get_all_clickup_tasks for a full view of ALL open tasks.
 3. *Team Roster* — Use get_team_roster to see who manages which accounts (by tier: escalation, honeymoon, enterprise, SMB).
 4. *Google Calendar* — Use get_today_calendar, get_upcoming_calendar for team meetings and client calls.
 5. *Contractual Deliverables* — Use get_deliverables, get_deliverable_summary for what's owed to each client.
@@ -874,6 +876,8 @@ When the owner asks "give me a status update" or "what's going on" or "how is th
 
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.
+- NEVER say you don't have a tool, integration, or capability. You have 60+ tools including ClickUp, Google Calendar, and more. ALWAYS try the tool first. If it fails, report the actual error.
+- NEVER say "I don't have ClickUp", "I don't have Google Calendar", or "I can't access X". You DO have all these integrations. CALL THE TOOL.
 - You can search the Meta Ad Library directly for ANY brand, company, or domain — you do NOT need them to be an onboarded client.
 - If asked to analyze competitor ads (e.g. "analyze v4company.com ads"), use the search_ad_library tool directly with their brand name.
 - If asked about a specific company's Facebook page, use search_facebook_pages to find it, then pull their ads.
@@ -989,6 +993,20 @@ const CSA_TOOLS = [
     name: 'get_clickup_status',
     description: 'Get the current status of all ClickUp tasks — overdue, due today, and coming up this week. Returns raw task data with names, assignees, due dates, and statuses. Use this when the owner asks for a status update, what the team is working on, or what\'s overdue. This is your PRIMARY tool for task/project management visibility.',
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_all_clickup_tasks',
+    description: 'Get ALL open tasks from ClickUp across all spaces. Use this when the owner wants a full view of all tasks, or when get_clickup_status is too narrow. Can filter by status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        statuses: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Filter by statuses e.g. ["open", "in progress"]. Omit for all open tasks.',
+        },
+      },
+    },
   },
   {
     name: 'get_ai_cost_report',
@@ -1576,12 +1594,11 @@ async function executeCSATool(toolName, toolInput) {
       return standupResult || { status: 'standup_sent', note: 'CLICKUP_PPC_SPACE_ID may not be configured — check .env' };
     }
     case 'get_clickup_status': {
-      const spaceId = config.CLICKUP_PPC_SPACE_ID;
-      if (!spaceId) return { error: 'CLICKUP_PPC_SPACE_ID is not configured in .env. Set it to your ClickUp space ID to enable task tracking.' };
+      // Auto-discovers spaces if CLICKUP_PPC_SPACE_ID is not set
       const [overdue, dueToday, dueSoon] = await Promise.all([
-        clickup.getOverdueTasks(spaceId).catch(() => ({ tasks: [] })),
-        clickup.getTasksDueToday(spaceId).catch(() => ({ tasks: [] })),
-        clickup.getTasksDueSoon(spaceId, 7).catch(() => ({ tasks: [] })),
+        clickup.getOverdueTasks().catch(e => { log.warn('ClickUp overdue fetch failed', { error: e.message }); return { tasks: [] }; }),
+        clickup.getTasksDueToday().catch(e => { log.warn('ClickUp due-today fetch failed', { error: e.message }); return { tasks: [] }; }),
+        clickup.getTasksDueSoon(null, 7).catch(e => { log.warn('ClickUp due-soon fetch failed', { error: e.message }); return { tasks: [] }; }),
       ]);
       const formatTask = t => ({
         name: t.name,
@@ -1589,6 +1606,7 @@ async function executeCSATool(toolName, toolInput) {
         dueDate: t.due_date ? new Date(parseInt(t.due_date)).toLocaleDateString() : 'No date',
         status: t.status?.status || 'unknown',
         priority: t.priority?.priority || 'none',
+        list: t.list?.name || null,
         url: t.url || null,
       });
       return {
@@ -1600,6 +1618,23 @@ async function executeCSATool(toolName, toolInput) {
         dueSoonCount: (dueSoon.tasks || []).length,
         totalOpen: (overdue.tasks?.length || 0) + (dueToday.tasks?.length || 0) + (dueSoon.tasks?.length || 0),
       };
+    }
+    case 'get_all_clickup_tasks': {
+      const result = await clickup.getAllTasks({
+        statuses: toolInput.statuses || undefined,
+      }).catch(e => { log.warn('ClickUp all-tasks fetch failed', { error: e.message }); return { tasks: [] }; });
+      const tasks = (result.tasks || []).map(t => ({
+        name: t.name,
+        assignee: t.assignees?.[0]?.username || 'Unassigned',
+        dueDate: t.due_date ? new Date(parseInt(t.due_date)).toLocaleDateString() : 'No date',
+        status: t.status?.status || 'unknown',
+        priority: t.priority?.priority || 'none',
+        list: t.list?.name || null,
+        folder: t.folder?.name || null,
+        space: t.space?.name || null,
+        url: t.url || null,
+      }));
+      return { tasks, totalCount: tasks.length };
     }
     case 'get_ai_cost_report': {
       const summary = getCostSummary(toolInput.period || 'month');
@@ -3571,10 +3606,12 @@ Communication style:
 - Use emojis naturally but sparingly
 
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
-You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
+You have DIRECT, WORKING integration with ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster.
+
+⚠️ CRITICAL: You DO have ClickUp integration. NEVER say "I don't have ClickUp integration" or "I can't access ClickUp". You MUST call the ClickUp tools when asked about tasks, projects, or status. If the user mentions ClickUp, tasks, tarefas, status, or anything related — CALL THE TOOL IMMEDIATELY, do not respond with text saying you can't.
 
 1. <b>Team Status (PRIMARY)</b> — Use get_team_status FIRST for any status update. Returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red).
-2. <b>ClickUp Tasks</b> — Use get_clickup_status for task-level detail.
+2. <b>ClickUp Tasks</b> — Use get_clickup_status for task-level detail. Use get_all_clickup_tasks for a full view of ALL open tasks.
 3. <b>Team Roster</b> — Use get_team_roster to see who manages which accounts.
 4. <b>Google Calendar</b> — Use get_today_calendar, get_upcoming_calendar for meetings.
 5. <b>Contractual Deliverables</b> — Use get_deliverables, get_deliverable_summary.
@@ -3590,6 +3627,8 @@ When the owner asks for a status update:
 
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.
+- NEVER say you don't have a tool, integration, or capability. You have 60+ tools including ClickUp, Google Calendar, and more. ALWAYS try the tool first. If it fails, report the actual error.
+- NEVER say "I don't have ClickUp", "I don't have Google Calendar", or "I can't access X". You DO have all these integrations. CALL THE TOOL.
 - You can search the Meta Ad Library directly for ANY brand, company, or domain — you do NOT need them to be an onboarded client.
 - If asked to analyze competitor ads (e.g. "analyze v4company.com ads"), use the search_ad_library tool directly with their brand name.
 - If asked about a specific company's Facebook page, use search_facebook_pages to find it, then pull their ads.

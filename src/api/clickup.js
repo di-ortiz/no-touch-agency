@@ -61,17 +61,40 @@ export async function getLists(folderId) {
   return request('get', `/folder/${folderId}/list`, null, { archived: false });
 }
 
+// --- Space Auto-Discovery ---
+
+let _cachedSpaceIds = null;
+
+/**
+ * Get space IDs — uses CLICKUP_PPC_SPACE_ID if set, otherwise auto-discovers all spaces.
+ */
+async function resolveSpaceIds() {
+  if (config.CLICKUP_PPC_SPACE_ID) return [config.CLICKUP_PPC_SPACE_ID];
+  if (_cachedSpaceIds) return _cachedSpaceIds;
+  try {
+    const result = await getSpaces();
+    _cachedSpaceIds = (result.spaces || []).map(s => s.id);
+    log.info('Auto-discovered ClickUp spaces', { count: _cachedSpaceIds.length, ids: _cachedSpaceIds });
+    return _cachedSpaceIds;
+  } catch (e) {
+    log.warn('Failed to auto-discover ClickUp spaces', { error: e.message });
+    return [];
+  }
+}
+
 // --- Filtered Queries ---
 
 export async function getOverdueTasks(spaceId) {
   const now = Date.now();
-  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, {
-    space_ids: [spaceId || config.CLICKUP_PPC_SPACE_ID],
+  const spaceIds = spaceId ? [spaceId] : await resolveSpaceIds();
+  const params = {
     'due_date_lt': now,
     'statuses[]': ['open', 'in progress', 'review'],
     subtasks: true,
     include_closed: false,
-  });
+  };
+  if (spaceIds.length > 0) params.space_ids = spaceIds;
+  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
 }
 
 export async function getTasksDueToday(spaceId) {
@@ -80,26 +103,46 @@ export async function getTasksDueToday(spaceId) {
   const endOfDay = new Date();
   endOfDay.setHours(23, 59, 59, 999);
 
-  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, {
-    space_ids: [spaceId || config.CLICKUP_PPC_SPACE_ID],
+  const spaceIds = spaceId ? [spaceId] : await resolveSpaceIds();
+  const params = {
     'due_date_gt': startOfDay.getTime(),
     'due_date_lt': endOfDay.getTime(),
     subtasks: true,
     include_closed: false,
-  });
+  };
+  if (spaceIds.length > 0) params.space_ids = spaceIds;
+  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
 }
 
 export async function getTasksDueSoon(spaceId, daysAhead = 3) {
   const now = Date.now();
   const future = now + daysAhead * 24 * 60 * 60 * 1000;
 
-  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, {
-    space_ids: [spaceId || config.CLICKUP_PPC_SPACE_ID],
+  const spaceIds = spaceId ? [spaceId] : await resolveSpaceIds();
+  const params = {
     'due_date_gt': now,
     'due_date_lt': future,
     subtasks: true,
     include_closed: false,
-  });
+  };
+  if (spaceIds.length > 0) params.space_ids = spaceIds;
+  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
+}
+
+/**
+ * Get ALL open tasks across the workspace (no space or date filter).
+ * Supports optional filters: assignee, status, page.
+ */
+export async function getAllTasks(opts = {}) {
+  const params = {
+    subtasks: true,
+    include_closed: false,
+    page: opts.page || 0,
+  };
+  if (opts.assignees) params['assignees[]'] = Array.isArray(opts.assignees) ? opts.assignees : [opts.assignees];
+  if (opts.statuses) params['statuses[]'] = Array.isArray(opts.statuses) ? opts.statuses : [opts.statuses];
+  if (opts.spaceIds) params.space_ids = opts.spaceIds;
+  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
 }
 
 // --- Templates ---
@@ -130,5 +173,6 @@ export default {
   getTasks, getTask, createTask, updateTask, addComment,
   getSpaces, getFolders, getLists,
   getOverdueTasks, getTasksDueToday, getTasksDueSoon,
+  getAllTasks, resolveSpaceIds,
   createOnboardingProject,
 };
