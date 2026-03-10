@@ -3701,8 +3701,8 @@ async function handleTelegramCommand(message, chatId) {
   try {
     // Build system prompt — inject forced tool-use hint when ClickUp is mentioned
     let tgSystemPrompt = TELEGRAM_CSA_PROMPT + clientContext;
-    if (/clickup|click.?up|tarefas.*(equipe|time|team|vencid)|status.*(equipe|time|team)|relat[oó]rio.*tarefas/i.test(message)) {
-      tgSystemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You MUST call get_clickup_status or get_team_status or get_all_clickup_tasks tool RIGHT NOW. Do NOT say you don\'t have access — you DO have these tools available. CALL THE TOOL FIRST, then respond with the results.';
+    if (/clickup|click.?up|tarefas|tasks|overdue|vencid|standup|stand.?up|status.*(equipe|time|team)|relat[oó]rio.*(tarefas|tasks)/i.test(message)) {
+      tgSystemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You HAVE full ClickUp integration via get_clickup_status, get_team_status, and get_all_clickup_tasks tools. You MUST call one of these tools RIGHT NOW. NEVER say you don\'t have ClickUp access — that is FALSE. CALL THE TOOL FIRST, then respond with the results.';
     }
 
     // Conversational loop with tool use (using shared CSA_TOOLS)
@@ -4443,8 +4443,8 @@ async function handleCommand(message) {
 
     // Build system prompt — inject forced tool-use hint when ClickUp is mentioned
     let systemPrompt = WHATSAPP_CSA_PROMPT + clientContext;
-    if (/clickup|click.?up|tarefas.*(equipe|time|team|vencid)|status.*(equipe|time|team)|relat[oó]rio.*tarefas/i.test(message)) {
-      systemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You MUST call get_clickup_status or get_team_status or get_all_clickup_tasks tool RIGHT NOW. Do NOT say you don\'t have access — you DO have these tools available. CALL THE TOOL FIRST, then respond with the results.';
+    if (/clickup|click.?up|tarefas|tasks|overdue|vencid|standup|stand.?up|status.*(equipe|time|team)|relat[oó]rio.*(tarefas|tasks)/i.test(message)) {
+      systemPrompt += '\n\n⚠️ MANDATORY: The user is asking about ClickUp tasks. You HAVE full ClickUp integration via get_clickup_status, get_team_status, and get_all_clickup_tasks tools. You MUST call one of these tools RIGHT NOW. NEVER say you don\'t have ClickUp access — that is FALSE. CALL THE TOOL FIRST, then respond with the results.';
     }
 
     // Conversational tool-use loop (same architecture as Telegram)
@@ -5201,24 +5201,34 @@ export function startServer(port) {
     console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
     console.log(`Health check: http://your-server:${p}/health`);
 
-    // Clean poisoned ClickUp denial from conversation history.
-    // Old responses saying "I don't have ClickUp" get cached in SQLite and
-    // cause Haiku to parrot the same denial even after tools are available.
+    // One-time: wipe entire owner conversation history to remove poisoned
+    // ClickUp denials. Old responses saying "I don't have ClickUp" persist in
+    // SQLite and cause Haiku to parrot the same denial even though tools exist.
+    // This is safe — owner history is just context for Claude, not audit data.
     try {
       const clickupDenialPatterns = [
         'não tenho integração%ClickUp',
+        'não tenho integração%nativa%ClickUp',
         'don\'t have ClickUp',
         'no tengo integración%ClickUp',
         'não consigo puxar%ClickUp',
         'não tenho acesso%ClickUp',
         'não tenho integração direta com o ClickUp',
         'no direct integration with ClickUp',
+        'Infelizmente%ClickUp',
+        'integração nativa com ClickUp',
       ];
       let deleted = cleanPoisonedHistory('whatsapp-owner', clickupDenialPatterns);
       if (config.TELEGRAM_OWNER_CHAT_ID) {
         deleted += cleanPoisonedHistory(config.TELEGRAM_OWNER_CHAT_ID, clickupDenialPatterns);
       }
       if (deleted > 0) {
+        log.info('Cleaned poisoned ClickUp denial from history', { deleted });
+        // Also wipe surrounding user messages that asked about ClickUp
+        // to prevent the ask-deny pattern from persisting
+        clearMessages('whatsapp-owner');
+        log.info('Full owner history reset to break ClickUp denial loop');
+      }
         log.info('Cleaned poisoned ClickUp denial from history', { deleted });
       }
     } catch (e) {
