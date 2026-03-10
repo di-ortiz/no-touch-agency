@@ -8,7 +8,15 @@ export const SYSTEM_PROMPTS = {
 Analyze the provided data and generate a concise morning briefing.
 Be data-driven, specific, and prioritize urgent items first.
 Use concrete numbers, not vague language.
-Format for WhatsApp readability.`,
+Format for WhatsApp readability.
+
+IMPORTANT: You now receive three data layers — cross-reference them:
+1. *ClickUp Tasks* — operational work items (what the team is doing day-to-day)
+2. *Contractual Deliverables* — what we OWE each client per their contract (audits, reports, strategic plans, creative refreshes)
+3. *Ad Platform Performance* — how campaigns are actually performing
+
+Flag any misalignment: e.g. a deliverable is overdue but the corresponding ClickUp task doesn't exist, or a client's contract calls for a monthly report but none is scheduled.
+Overdue deliverables are HIGH PRIORITY — these are contractual obligations.`,
 
   performanceAnalysis: `You are a senior PPC analyst reviewing campaign performance data.
 Identify anomalies, trends, and optimization opportunities.
@@ -156,6 +164,11 @@ Due Today: ${data.tasksDueToday}
 Overdue: ${data.overdueTasks}
 Coming Up (3 days): ${data.tasksDueSoon}
 
+## Contractual Deliverables
+Summary: ${data.deliverableSummary || 'No deliverables tracked yet'}
+Overdue Deliverables: ${data.overdueDeliverables || 'None'}
+Due This Week: ${data.upcomingDeliverables || 'None'}
+
 ## Budget Pacing
 ${data.budgetPacing}
 
@@ -164,10 +177,11 @@ ${data.budgetPacing}
 
 Provide:
 1. Overall health score (1-10) with emoji
-2. Top 3 urgent items requiring attention
+2. Top 3 urgent items requiring attention (include overdue deliverables!)
 3. Performance highlights
-4. Issues needing attention
-5. Budget summary
+4. Contractual deliverable status — what's overdue, what's due soon, any gaps between ClickUp tasks and contractual obligations
+5. Issues needing attention
+6. Budget summary
 Keep it concise for WhatsApp delivery.`,
 
   performanceCheck: (data) => `Analyze these campaign metrics for anomalies:

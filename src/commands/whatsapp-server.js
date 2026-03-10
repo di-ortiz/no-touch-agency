@@ -9,6 +9,9 @@ import {
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
+  getClientDeliverables, getOverdueDeliverables, getUpcomingDeliverables,
+  getDeliverableSummary, updateDeliverable, createDeliverable,
+  seedClientDeliverables, getStandardTimelines,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -1303,6 +1306,32 @@ const CSA_TOOLS = [
     name: 'check_credentials',
     description: 'Check which API credentials are configured and working. Use this FIRST when any Google operation fails to diagnose the exact problem and give the user step-by-step instructions to fix it.',
     input_schema: { type: 'object', properties: {} },
+  },
+  // --- Contractual Deliverables ---
+  {
+    name: 'get_deliverables',
+    description: 'Get contractual deliverables for a client or across all clients. Shows what\'s owed, due dates, and status. Use when the owner asks about deliverables, contractual obligations, what\'s due, or client timelines.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (omit for all clients)' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'overdue', 'blocked'], description: 'Filter by status (optional)' } } },
+  },
+  {
+    name: 'get_deliverable_summary',
+    description: 'Get a high-level summary of all contractual deliverables across the agency — overdue count, due this week, in progress, blocked. Use for quick status checks.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'update_deliverable',
+    description: 'Update a deliverable\'s status, due date, assignee, or notes. Use when marking a deliverable as completed, reassigning, or updating progress.',
+    input_schema: { type: 'object', properties: { deliverableId: { type: 'string', description: 'Deliverable ID' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked'] }, dueDate: { type: 'string', description: 'New due date (YYYY-MM-DD)' }, assignedTo: { type: 'string', description: 'Person assigned' }, notes: { type: 'string' } }, required: ['deliverableId'] },
+  },
+  {
+    name: 'create_deliverable',
+    description: 'Create a custom deliverable for a client. Use when the owner wants to add a new contractual obligation, one-off task, or custom milestone.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, name: { type: 'string', description: 'Deliverable name' }, category: { type: 'string', enum: ['onboarding', 'weekly', 'monthly', 'quarterly', 'one_time'] }, dueDate: { type: 'string', description: 'Due date (YYYY-MM-DD)' }, description: { type: 'string' }, assignedTo: { type: 'string' } }, required: ['clientName', 'name'] },
+  },
+  {
+    name: 'seed_standard_deliverables',
+    description: 'Seed the standard PPC agency deliverables (onboarding + recurring) for a client. Use when setting up a new client or when the owner wants to initialize the standard timeline for an existing client.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, startDate: { type: 'string', description: 'Start date for timeline calculation (YYYY-MM-DD, defaults to today)' } }, required: ['clientName'] },
   },
 ];
 
@@ -3087,6 +3116,51 @@ Return ONLY the JSON array, no other text.`;
         issues,
         summary: issues.length === 0 ? 'All credentials configured!' : `${issues.length} issue(s) found — see details above`,
       };
+    }
+
+    // --- Contractual Deliverables ---
+    case 'get_deliverables': {
+      if (toolInput.clientName) {
+        const client = getClient(toolInput.clientName);
+        if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+        const deliverables = getClientDeliverables(client.id, toolInput.status);
+        return { client: client.name, deliverables, count: deliverables.length };
+      }
+      // All clients — return overdue + upcoming
+      const overdue = getOverdueDeliverables();
+      const upcoming = getUpcomingDeliverables(7);
+      return { overdue, upcoming, overdueCount: overdue.length, upcomingCount: upcoming.length };
+    }
+    case 'get_deliverable_summary': {
+      return getDeliverableSummary();
+    }
+    case 'update_deliverable': {
+      const updates = {};
+      if (toolInput.status) updates.status = toolInput.status;
+      if (toolInput.dueDate) updates.dueDate = toolInput.dueDate;
+      if (toolInput.assignedTo) updates.assignedTo = toolInput.assignedTo;
+      if (toolInput.notes) updates.notes = toolInput.notes;
+      updateDeliverable(toolInput.deliverableId, updates);
+      return { success: true, updated: toolInput.deliverableId, changes: Object.keys(updates) };
+    }
+    case 'create_deliverable': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const result = createDeliverable({
+        clientId: client.id,
+        name: toolInput.name,
+        category: toolInput.category || 'one_time',
+        dueDate: toolInput.dueDate || null,
+        description: toolInput.description || null,
+        assignedTo: toolInput.assignedTo || null,
+      });
+      return { success: true, deliverable: result };
+    }
+    case 'seed_standard_deliverables': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const seeded = seedClientDeliverables(client.id, toolInput.startDate);
+      return { success: true, client: client.name, deliverables: seeded, count: seeded.length };
     }
 
     default:

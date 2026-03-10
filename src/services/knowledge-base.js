@@ -208,6 +208,27 @@ function getDb() {
       CREATE INDEX IF NOT EXISTS idx_onboarding_phone ON onboarding_sessions(phone);
       CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_clients(token);
       CREATE INDEX IF NOT EXISTS idx_convo_chat ON conversation_history(chat_id);
+
+      CREATE TABLE IF NOT EXISTS client_deliverables (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        category TEXT NOT NULL,       -- onboarding, monthly, weekly, quarterly, one_time
+        name TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'pending', -- pending, in_progress, completed, overdue, blocked
+        due_date TEXT,                 -- ISO date
+        completed_date TEXT,
+        assigned_to TEXT,
+        notes TEXT,
+        standard_days_offset INTEGER,  -- days from client start for standard timelines
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_deliverable_client ON client_deliverables(client_id);
+      CREATE INDEX IF NOT EXISTS idx_deliverable_status ON client_deliverables(status);
+      CREATE INDEX IF NOT EXISTS idx_deliverable_due ON client_deliverables(due_date);
     `);
 
     // Safe migration: add channel column to onboarding_sessions if missing
@@ -786,6 +807,153 @@ export function getContactChannel(phone) {
   return pending?.channel || 'whatsapp';
 }
 
+// --- Standard PPC Agency Timelines ---
+// Offset = business days from client activation date
+
+const STANDARD_DELIVERABLES = {
+  onboarding: [
+    { name: 'Kick-off call', category: 'onboarding', offset: 1, description: 'Initial strategy discussion, goals alignment, and access verification' },
+    { name: 'Brand asset collection', category: 'onboarding', offset: 3, description: 'Collect logos, brand guidelines, colors, fonts, and existing creatives' },
+    { name: 'Account audit', category: 'onboarding', offset: 5, description: 'Full audit of existing ad accounts, tracking, and analytics setup' },
+    { name: 'Tracking & pixel setup', category: 'onboarding', offset: 7, description: 'Verify/install conversion tracking, pixels, GTM, and analytics' },
+    { name: '90-day strategic plan', category: 'onboarding', offset: 10, description: 'Comprehensive media plan with budget allocation, targeting, and KPIs' },
+    { name: 'Campaign build & launch', category: 'onboarding', offset: 14, description: 'Campaign structure, ad copy, creatives, audiences — ready to go live' },
+    { name: 'Reporting dashboard setup', category: 'onboarding', offset: 14, description: 'Configure automated reporting and client dashboard access' },
+    { name: 'Client approval & go-live', category: 'onboarding', offset: 15, description: 'Final review with client, get sign-off, launch campaigns' },
+  ],
+  recurring: [
+    { name: 'Weekly performance report', category: 'weekly', description: 'Performance summary with WoW trends, spend, ROAS, and recommendations' },
+    { name: 'Weekly optimization pass', category: 'weekly', description: 'Bid adjustments, negative keywords, audience refinements, budget reallocation' },
+    { name: 'Monthly strategic review', category: 'monthly', description: 'Full performance review, strategy adjustments, next month plan' },
+    { name: 'Monthly creative refresh', category: 'monthly', description: 'New ad creatives, copy variations, A/B test setup' },
+    { name: 'Monthly budget reconciliation', category: 'monthly', description: 'Actual vs planned spend, pacing analysis, next month budget plan' },
+    { name: 'Quarterly business review', category: 'quarterly', description: 'Strategic review with stakeholders, QoQ performance, next quarter roadmap' },
+  ],
+};
+
+/**
+ * Seed standard deliverables for a new client based on their plan.
+ */
+export function seedClientDeliverables(clientId, startDate) {
+  const d = getDb();
+  const start = startDate ? new Date(startDate) : new Date();
+  const created = [];
+
+  // Add onboarding deliverables with calculated due dates
+  for (const item of STANDARD_DELIVERABLES.onboarding) {
+    const dueDate = new Date(start);
+    dueDate.setDate(dueDate.getDate() + item.offset);
+    const id = uuid();
+    d.prepare(`
+      INSERT INTO client_deliverables (id, client_id, category, name, description, status, due_date, standard_days_offset)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(id, clientId, item.category, item.name, item.description, dueDate.toISOString().split('T')[0], item.offset);
+    created.push({ id, name: item.name, dueDate: dueDate.toISOString().split('T')[0] });
+  }
+
+  // Add recurring deliverables (no fixed due date — they repeat)
+  for (const item of STANDARD_DELIVERABLES.recurring) {
+    const id = uuid();
+    d.prepare(`
+      INSERT INTO client_deliverables (id, client_id, category, name, description, status)
+      VALUES (?, ?, ?, ?, ?, 'pending')
+    `).run(id, clientId, item.category, item.name, item.description);
+    created.push({ id, name: item.name, category: item.category });
+  }
+
+  log.info(`Seeded ${created.length} standard deliverables for client`, { clientId });
+  return created;
+}
+
+// --- Client Deliverables CRUD ---
+
+export function createDeliverable(data) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`
+    INSERT INTO client_deliverables (id, client_id, category, name, description, status, due_date, assigned_to, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.clientId, data.category || 'one_time', data.name, data.description || null,
+    data.status || 'pending', data.dueDate || null, data.assignedTo || null, data.notes || null);
+  log.info('Created deliverable', { id, name: data.name, clientId: data.clientId });
+  return { id, ...data };
+}
+
+export function getClientDeliverables(clientId, statusFilter) {
+  const d = getDb();
+  if (statusFilter) {
+    return d.prepare('SELECT * FROM client_deliverables WHERE client_id = ? AND status = ? ORDER BY due_date ASC').all(clientId, statusFilter);
+  }
+  return d.prepare('SELECT * FROM client_deliverables WHERE client_id = ? ORDER BY due_date ASC').all(clientId);
+}
+
+export function getOverdueDeliverables() {
+  const d = getDb();
+  const today = new Date().toISOString().split('T')[0];
+  return d.prepare(`
+    SELECT cd.*, c.name as client_name
+    FROM client_deliverables cd
+    JOIN clients c ON cd.client_id = c.id
+    WHERE cd.due_date < ? AND cd.status IN ('pending', 'in_progress')
+    ORDER BY cd.due_date ASC
+  `).all(today);
+}
+
+export function getUpcomingDeliverables(daysAhead = 7) {
+  const d = getDb();
+  const today = new Date().toISOString().split('T')[0];
+  const future = new Date();
+  future.setDate(future.getDate() + daysAhead);
+  const futureStr = future.toISOString().split('T')[0];
+  return d.prepare(`
+    SELECT cd.*, c.name as client_name
+    FROM client_deliverables cd
+    JOIN clients c ON cd.client_id = c.id
+    WHERE cd.due_date >= ? AND cd.due_date <= ? AND cd.status IN ('pending', 'in_progress')
+    ORDER BY cd.due_date ASC
+  `).all(today, futureStr);
+}
+
+export function getDeliverableSummary() {
+  const d = getDb();
+  const today = new Date().toISOString().split('T')[0];
+  return {
+    overdue: d.prepare(`
+      SELECT COUNT(*) as count FROM client_deliverables
+      WHERE due_date < ? AND status IN ('pending', 'in_progress')
+    `).get(today)?.count || 0,
+    dueThisWeek: d.prepare(`
+      SELECT COUNT(*) as count FROM client_deliverables
+      WHERE due_date >= ? AND due_date <= date(?, '+7 days') AND status IN ('pending', 'in_progress')
+    `).get(today, today)?.count || 0,
+    inProgress: d.prepare("SELECT COUNT(*) as count FROM client_deliverables WHERE status = 'in_progress'").get()?.count || 0,
+    completed: d.prepare("SELECT COUNT(*) as count FROM client_deliverables WHERE status = 'completed'").get()?.count || 0,
+    blocked: d.prepare("SELECT COUNT(*) as count FROM client_deliverables WHERE status = 'blocked'").get()?.count || 0,
+  };
+}
+
+export function updateDeliverable(id, updates) {
+  const d = getDb();
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    fields.push(`${dbKey} = ?`);
+    values.push(value);
+  }
+  fields.push("updated_at = datetime('now')");
+  if (updates.status === 'completed' && !updates.completedDate) {
+    fields.push("completed_date = date('now')");
+  }
+  values.push(id);
+  d.prepare(`UPDATE client_deliverables SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  log.info('Updated deliverable', { id, updates: Object.keys(updates) });
+}
+
+export function getStandardTimelines() {
+  return STANDARD_DELIVERABLES;
+}
+
 export default {
   createClient, getClient, getAllClients, updateClient, searchClients,
   recordCampaignPerformance, getClientCampaignHistory,
@@ -799,4 +967,7 @@ export default {
   saveMessage, getMessages, clearMessages,
   getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
   getAllClientContacts, getLastClientMessageTime, getContactChannel,
+  seedClientDeliverables, createDeliverable, getClientDeliverables,
+  getOverdueDeliverables, getUpcomingDeliverables, getDeliverableSummary,
+  updateDeliverable, getStandardTimelines,
 };
