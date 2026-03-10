@@ -2,16 +2,15 @@
  * Chili Digital Team Briefing System
  *
  * Scheduled cron job that runs Mon-Fri at 9am BRT (12:00 UTC) and 5pm BRT (20:00 UTC).
- * Sends WhatsApp (Twilio) + Email (SendGrid) briefings to 10 Chili Digital employees
- * across 3 tiers: Leader, Director, Executive.
+ * Sends WhatsApp (Meta Cloud API via Sofia) + Email (SendGrid) briefings to
+ * 10 Chili Digital employees across 3 tiers: Leader, Director, Executive.
  *
  * Pulls task data from ClickUp workspace 9014972154.
  *
  * ENV VARS:
  *   CLICKUP_TOKEN            - ClickUp API token
- *   TWILIO_ACCOUNT_SID       - Twilio account SID
- *   TWILIO_AUTH_TOKEN         - Twilio auth token
- *   TWILIO_WHATSAPP_FROM      - Twilio WhatsApp sender (e.g. whatsapp:+14155238886)
+ *   WHATSAPP_ACCESS_TOKEN     - Meta WhatsApp Cloud API token (shared with Sofia)
+ *   WHATSAPP_PHONE_NUMBER_ID  - Meta WhatsApp phone number ID (shared with Sofia)
  *   SENDGRID_API_KEY          - SendGrid API key
  *   TEST_MODE                 - "true" → send all messages only to Diego
  *   TEST_SEND_NOW             - "true" → fire once immediately on startup
@@ -19,9 +18,9 @@
 
 import cron from 'node-cron';
 import axios from 'axios';
-import twilio from 'twilio';
 import sgMail from '@sendgrid/mail';
 import logger from './src/utils/logger.js';
+import { sendWhatsApp as sendWhatsAppCloud } from './src/api/whatsapp.js';
 
 const log = logger.child({ service: 'briefing' });
 
@@ -31,10 +30,6 @@ const CLICKUP_WORKSPACE_ID = '9014972154';
 const CLICKUP_TOKEN = process.env.CLICKUP_TOKEN || process.env.CLICKUP_API_TOKEN || '';
 const TEST_MODE = process.env.TEST_MODE === 'true';
 const TEST_SEND_NOW = process.env.TEST_SEND_NOW === 'true';
-
-const twilioClient = (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
-  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-  : null;
 
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -61,7 +56,7 @@ const EXECUTIVES = [
   { name: 'Hannah', email: 'hannah@chili.pa', whatsapp: 'whatsapp:+55XXXXXXXXXXX' },
 ];
 
-const DIEGO_WHATSAPP = 'whatsapp:+5548991081505';
+const DIEGO_WHATSAPP = '5548991081505';
 
 // ── ClickUp API helpers ────────────────────────────────────────────────────────
 
@@ -406,18 +401,15 @@ function buildExecutiveMessage(leaderData) {
 
 // ── Delivery (WhatsApp + Email) ────────────────────────────────────────────────
 
+/**
+ * Send WhatsApp message via Meta Cloud API (same connection Sofia uses).
+ * Phone numbers stored as 'whatsapp:+55...' are normalised to raw digits.
+ */
 async function sendWhatsApp(to, body) {
-  const recipient = TEST_MODE ? DIEGO_WHATSAPP : to;
-  if (!twilioClient) {
-    log.warn('Twilio not configured, skipping WhatsApp send', { to: recipient });
-    return;
-  }
+  const raw = to.replace('whatsapp:', '').replace('+', '');
+  const recipient = TEST_MODE ? DIEGO_WHATSAPP : raw;
   try {
-    await twilioClient.messages.create({
-      from: process.env.TWILIO_WHATSAPP_FROM,
-      to: recipient,
-      body,
-    });
+    await sendWhatsAppCloud(body, recipient);
     log.info('WhatsApp sent', { to: recipient, chars: body.length });
   } catch (err) {
     log.error('WhatsApp send failed', { to: recipient, error: err.message });
