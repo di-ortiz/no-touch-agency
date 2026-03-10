@@ -9,6 +9,9 @@ import {
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
+  getClientDeliverables, getOverdueDeliverables, getUpcomingDeliverables,
+  getDeliverableSummary, updateDeliverable, createDeliverable,
+  seedClientDeliverables, getStandardTimelines,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -17,6 +20,7 @@ import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from '../workflows/clickup-monitor.js';
+import * as clickup from '../api/clickup.js';
 import { onboardNewClient } from '../workflows/client-onboarding.js';
 import { generateCampaignBrief } from '../workflows/campaign-brief.js';
 import { generateCreatives } from '../workflows/creative-generation.js';
@@ -51,6 +55,9 @@ import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
+import * as googleCalendar from '../api/google-calendar.js';
+import { SOPS, listSOPs, getSOP, runComplianceAudit } from '../services/sop-registry.js';
+import { getTeamStatusReport, TEAM } from '../services/team-status.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -837,6 +844,34 @@ Communication style:
 - If something needs attention, lead with that
 - Use emojis naturally but sparingly
 
+OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
+You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
+
+1. *Team Status (PRIMARY)* — Use get_team_status FIRST for any status update. It returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red). This is your MOST IMPORTANT tool.
+2. *ClickUp Tasks* — Use get_clickup_status for task-level detail (overdue, due today, upcoming by task name).
+3. *Team Roster* — Use get_team_roster to see who manages which accounts (by tier: escalation, honeymoon, enterprise, SMB).
+4. *Google Calendar* — Use get_today_calendar, get_upcoming_calendar for team meetings and client calls.
+5. *Contractual Deliverables* — Use get_deliverables, get_deliverable_summary for what's owed to each client.
+6. *SOPs & Compliance* — Use run_compliance_check to verify procedures are being followed.
+
+THE TEAM (Chili.pa — you know them all):
+- *Diego* (Owner) — diego@chili.pa
+- *Hannah* (Operations) — hannah@chili.pa
+- *Gabriel* (SEO) — Daikin, Steck, ESEG, Joico, SGA Toyota, MeuPat, Treble BR, and more
+- *Maria Clara* (PPC) — Sicoob, SciSure, Chili BR, Infios, PayPay, Cyber Wan
+- *Thiago* (SEO/PPC Lead) — Rodelag, Avance, Poin Panama, Ri Group, Aquatics Panama
+- *Kaue* (SEO) — ESEG, Daikin, Steck, Joico, SGA Toyota, OnFly MX
+- *Arturo* (PPC) — Rodelag, Avance, Poin Panama, Ri Group, Aquatics Panama, Synergy
+- *Juan* (SEO) — Diunsa, Mapei, Multinational PR, Aruma, and 8+ LATAM accounts
+- *Igor* (Account Manager) — Clico, Innovation, Fullstop
+- *Marcelo* (Specialist) — marcelo.salvatore@chili.pa
+
+When the owner asks "give me a status update" or "what's going on" or "how is the team":
+1. Call get_team_status FIRST — this gives you everything in one call
+2. Present the team health overview (who's green/yellow/red)
+3. Flag late tasks, escalations, and missing biweekly meetings
+4. Add deliverable and calendar context if relevant
+
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.
 - You can search the Meta Ad Library directly for ANY brand, company, or domain — you do NOT need them to be an onboarded client.
@@ -947,7 +982,12 @@ const CSA_TOOLS = [
   },
   {
     name: 'get_daily_standup',
-    description: 'Generate a daily standup summary of tasks and progress.',
+    description: 'Generate and send a formatted daily standup report to the owner. Also returns the raw task data so you can reference it.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_clickup_status',
+    description: 'Get the current status of all ClickUp tasks — overdue, due today, and coming up this week. Returns raw task data with names, assignees, due dates, and statuses. Use this when the owner asks for a status update, what the team is working on, or what\'s overdue. This is your PRIMARY tool for task/project management visibility.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -1304,6 +1344,80 @@ const CSA_TOOLS = [
     description: 'Check which API credentials are configured and working. Use this FIRST when any Google operation fails to diagnose the exact problem and give the user step-by-step instructions to fix it.',
     input_schema: { type: 'object', properties: {} },
   },
+  // --- Contractual Deliverables ---
+  {
+    name: 'get_deliverables',
+    description: 'Get contractual deliverables for a client or across all clients. Shows what\'s owed, due dates, and status. Use when the owner asks about deliverables, contractual obligations, what\'s due, or client timelines.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (omit for all clients)' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'overdue', 'blocked'], description: 'Filter by status (optional)' } } },
+  },
+  {
+    name: 'get_deliverable_summary',
+    description: 'Get a high-level summary of all contractual deliverables across the agency — overdue count, due this week, in progress, blocked. Use for quick status checks.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'update_deliverable',
+    description: 'Update a deliverable\'s status, due date, assignee, or notes. Use when marking a deliverable as completed, reassigning, or updating progress.',
+    input_schema: { type: 'object', properties: { deliverableId: { type: 'string', description: 'Deliverable ID' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked'] }, dueDate: { type: 'string', description: 'New due date (YYYY-MM-DD)' }, assignedTo: { type: 'string', description: 'Person assigned' }, notes: { type: 'string' } }, required: ['deliverableId'] },
+  },
+  {
+    name: 'create_deliverable',
+    description: 'Create a custom deliverable for a client. Use when the owner wants to add a new contractual obligation, one-off task, or custom milestone.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, name: { type: 'string', description: 'Deliverable name' }, category: { type: 'string', enum: ['onboarding', 'weekly', 'monthly', 'quarterly', 'one_time'] }, dueDate: { type: 'string', description: 'Due date (YYYY-MM-DD)' }, description: { type: 'string' }, assignedTo: { type: 'string' } }, required: ['clientName', 'name'] },
+  },
+  {
+    name: 'seed_standard_deliverables',
+    description: 'Seed the standard PPC agency deliverables (onboarding + recurring) for a client. Use when setting up a new client or when the owner wants to initialize the standard timeline for an existing client.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, startDate: { type: 'string', description: 'Start date for timeline calculation (YYYY-MM-DD, defaults to today)' } }, required: ['clientName'] },
+  },
+  // --- Google Calendar ---
+  {
+    name: 'get_today_calendar',
+    description: 'Get today\'s team calendar events from Google Calendar. Shows meetings, client calls, deadlines, and attendees. Use when the owner asks about today\'s schedule, meetings, or calendar.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_upcoming_calendar',
+    description: 'Get upcoming calendar events for the next N days. Use when the owner asks about upcoming meetings, this week\'s schedule, or future calendar events.',
+    input_schema: { type: 'object', properties: { daysAhead: { type: 'number', description: 'Number of days ahead to look (default: 7, max: 30)' } } },
+  },
+  {
+    name: 'get_daily_schedule',
+    description: 'Get the full team schedule for a specific date, grouped by calendar. Use when asking about a specific day\'s schedule.',
+    input_schema: { type: 'object', properties: { date: { type: 'string', description: 'Date to check (YYYY-MM-DD, defaults to today)' } } },
+  },
+  {
+    name: 'list_calendars',
+    description: 'List all Google Calendars the service account has access to. Use to verify calendar setup or troubleshoot missing events.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  // --- SOPs & Compliance ---
+  {
+    name: 'list_sops',
+    description: 'List all standard operating procedures (SOPs) — onboarding, weekly cadence, monthly cadence, quarterly reviews, campaign launch checklist, incident response. Use when the owner asks about procedures, processes, or standard timelines.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_sop_detail',
+    description: 'Get the full detail of a specific SOP including all steps, timelines, and owners. Use when the owner asks about a specific procedure.',
+    input_schema: { type: 'object', properties: { sopId: { type: 'string', description: 'SOP ID (e.g. SOP-ONB, SOP-WKL, SOP-MTH, SOP-QTR, SOP-CMP, SOP-INC)' } }, required: ['sopId'] },
+  },
+  {
+    name: 'run_compliance_check',
+    description: 'Run a full SOP compliance audit across all clients. Compares what SHOULD be happening per SOPs vs what IS happening per ClickUp tasks, deliverables, and calendar. Flags gaps, overdue items, and missed procedures. Use when the owner asks "are we on track?" or "what are we missing?"',
+    input_schema: { type: 'object', properties: {} },
+  },
+  // --- Team Management ---
+  {
+    name: 'get_team_status',
+    description: 'Get full team status from ClickUp — each team member\'s task count, late tasks, escalations, missing biweekly meetings, and account assignments. This is the PRIMARY tool for "how is the team doing?", "who is overloaded?", "what\'s late?", or any team workload question. Returns structured data per person with health indicators (green/yellow/red).',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_team_roster',
+    description: 'Get the team roster — names, roles, emails, and which client accounts each person manages (by tier: escalation, honeymoon, enterprise, SMB). Use when the owner asks "who manages X account?" or "show me the team".',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
 
 /**
@@ -1458,8 +1572,34 @@ async function executeCSATool(toolName, toolInput) {
       return { status: 'briefing_generated' };
     }
     case 'get_daily_standup': {
-      await generateDailyStandup();
-      return { status: 'standup_generated' };
+      const standupResult = await generateDailyStandup();
+      return standupResult || { status: 'standup_sent', note: 'CLICKUP_PPC_SPACE_ID may not be configured — check .env' };
+    }
+    case 'get_clickup_status': {
+      const spaceId = config.CLICKUP_PPC_SPACE_ID;
+      if (!spaceId) return { error: 'CLICKUP_PPC_SPACE_ID is not configured in .env. Set it to your ClickUp space ID to enable task tracking.' };
+      const [overdue, dueToday, dueSoon] = await Promise.all([
+        clickup.getOverdueTasks(spaceId).catch(() => ({ tasks: [] })),
+        clickup.getTasksDueToday(spaceId).catch(() => ({ tasks: [] })),
+        clickup.getTasksDueSoon(spaceId, 7).catch(() => ({ tasks: [] })),
+      ]);
+      const formatTask = t => ({
+        name: t.name,
+        assignee: t.assignees?.[0]?.username || 'Unassigned',
+        dueDate: t.due_date ? new Date(parseInt(t.due_date)).toLocaleDateString() : 'No date',
+        status: t.status?.status || 'unknown',
+        priority: t.priority?.priority || 'none',
+        url: t.url || null,
+      });
+      return {
+        overdue: (overdue.tasks || []).map(formatTask),
+        overdueCount: (overdue.tasks || []).length,
+        dueToday: (dueToday.tasks || []).map(formatTask),
+        dueTodayCount: (dueToday.tasks || []).length,
+        dueSoon: (dueSoon.tasks || []).map(formatTask),
+        dueSoonCount: (dueSoon.tasks || []).length,
+        totalOpen: (overdue.tasks?.length || 0) + (dueToday.tasks?.length || 0) + (dueSoon.tasks?.length || 0),
+      };
     }
     case 'get_ai_cost_report': {
       const summary = getCostSummary(toolInput.period || 'month');
@@ -3005,11 +3145,14 @@ Return ONLY the JSON array, no other text.`;
       return chartResult;
     }
     case 'create_single_chart': {
+      const chartClient = toolInput.clientName ? getClient(toolInput.clientName) : null;
+      const chartFolderId = chartClient?.drive_root_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const result = await chartBuilderService.createChart({
         title: toolInput.title,
         chartType: toolInput.chartType,
         labels: toolInput.labels,
         series: toolInput.series,
+        folderId: chartFolderId || undefined,
       });
       return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
     }
@@ -3038,6 +3181,12 @@ Return ONLY the JSON array, no other text.`;
           status: credValid ? 'OK' : credFileExists ? 'INVALID — file exists but is not a valid service account JSON' : 'MISSING',
           fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
           affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
+        },
+        google_drive_folder: {
+          status: config.GOOGLE_DRIVE_ROOT_FOLDER_ID ? 'CONFIGURED' : 'NOT SET',
+          folderId: config.GOOGLE_DRIVE_ROOT_FOLDER_ID || '(not set — files will use public link sharing)',
+          affects: ['Presentation file organization', 'Spreadsheet file organization', 'Report storage'],
+          fix: config.GOOGLE_DRIVE_ROOT_FOLDER_ID ? null : 'Create a folder in Google Drive, share it with the service account email (from the service account JSON), then set GOOGLE_DRIVE_ROOT_FOLDER_ID in Railway.',
         },
         google_ads: {
           status: config.GOOGLE_ADS_DEVELOPER_TOKEN ? 'CONFIGURED' : 'NOT SET',
@@ -3068,6 +3217,7 @@ Return ONLY the JSON array, no other text.`;
       if (!credValid) issues.push(credFileExists
         ? 'CRITICAL: Google service account JSON file exists but is invalid — check the GOOGLE_SERVICE_ACCOUNT_JSON env var'
         : 'CRITICAL: Google service account JSON file is missing — Slides, Sheets, Drive, Docs will NOT work');
+      if (!config.GOOGLE_DRIVE_ROOT_FOLDER_ID) issues.push('GOOGLE_DRIVE_ROOT_FOLDER_ID not set — files will be created with public link sharing (set a folder ID for organized file management). To fix: create a folder in Google Drive, share it with the service account email, and set GOOGLE_DRIVE_ROOT_FOLDER_ID in Railway.');
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
@@ -3076,6 +3226,107 @@ Return ONLY the JSON array, no other text.`;
         checks,
         issues,
         summary: issues.length === 0 ? 'All credentials configured!' : `${issues.length} issue(s) found — see details above`,
+      };
+    }
+
+    // --- Contractual Deliverables ---
+    case 'get_deliverables': {
+      if (toolInput.clientName) {
+        const client = getClient(toolInput.clientName);
+        if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+        const deliverables = getClientDeliverables(client.id, toolInput.status);
+        return { client: client.name, deliverables, count: deliverables.length };
+      }
+      // All clients — return overdue + upcoming
+      const overdue = getOverdueDeliverables();
+      const upcoming = getUpcomingDeliverables(7);
+      return { overdue, upcoming, overdueCount: overdue.length, upcomingCount: upcoming.length };
+    }
+    case 'get_deliverable_summary': {
+      return getDeliverableSummary();
+    }
+    case 'update_deliverable': {
+      const updates = {};
+      if (toolInput.status) updates.status = toolInput.status;
+      if (toolInput.dueDate) updates.dueDate = toolInput.dueDate;
+      if (toolInput.assignedTo) updates.assignedTo = toolInput.assignedTo;
+      if (toolInput.notes) updates.notes = toolInput.notes;
+      updateDeliverable(toolInput.deliverableId, updates);
+      return { success: true, updated: toolInput.deliverableId, changes: Object.keys(updates) };
+    }
+    case 'create_deliverable': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const result = createDeliverable({
+        clientId: client.id,
+        name: toolInput.name,
+        category: toolInput.category || 'one_time',
+        dueDate: toolInput.dueDate || null,
+        description: toolInput.description || null,
+        assignedTo: toolInput.assignedTo || null,
+      });
+      return { success: true, deliverable: result };
+    }
+    case 'seed_standard_deliverables': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
+      const seeded = seedClientDeliverables(client.id, toolInput.startDate);
+      return { success: true, client: client.name, deliverables: seeded, count: seeded.length };
+    }
+
+    // --- Google Calendar ---
+    case 'get_today_calendar': {
+      const events = await googleCalendar.getTodayEvents();
+      return { date: new Date().toISOString().split('T')[0], events, count: events.length };
+    }
+    case 'get_upcoming_calendar': {
+      const days = Math.min(toolInput.daysAhead || 7, 30);
+      const events = await googleCalendar.getUpcomingEvents(days);
+      return { daysAhead: days, events, count: events.length };
+    }
+    case 'get_daily_schedule': {
+      const schedule = await googleCalendar.getDailySchedule(toolInput.date);
+      return { date: toolInput.date || new Date().toISOString().split('T')[0], schedule };
+    }
+    case 'list_calendars': {
+      const calendars = await googleCalendar.listCalendars();
+      return { calendars, count: calendars.length };
+    }
+
+    // --- SOPs & Compliance ---
+    case 'list_sops': {
+      return { sops: listSOPs() };
+    }
+    case 'get_sop_detail': {
+      const sop = getSOP(toolInput.sopId);
+      if (!sop) return { error: `SOP "${toolInput.sopId}" not found. Valid IDs: SOP-ONB, SOP-WKL, SOP-MTH, SOP-QTR, SOP-CMP, SOP-INC` };
+      return sop;
+    }
+    case 'run_compliance_check': {
+      const report = runComplianceAudit();
+      return report;
+    }
+
+    // --- Team Management ---
+    case 'get_team_status': {
+      const teamReport = await getTeamStatusReport();
+      return teamReport;
+    }
+    case 'get_team_roster': {
+      return {
+        team: TEAM.map(m => ({
+          name: m.name,
+          role: m.role,
+          email: m.email,
+          accounts: {
+            escalation: m.accounts.escalation,
+            honeymoon: m.accounts.honeymoon,
+            enterprise: m.accounts.enterprise,
+            smb: m.accounts.smb,
+          },
+          totalAccounts: [...m.accounts.escalation, ...m.accounts.honeymoon, ...m.accounts.enterprise, ...m.accounts.smb].length,
+        })),
+        teamSize: TEAM.length,
       };
     }
 
@@ -3318,6 +3569,24 @@ Communication style:
 - When sharing data, add context ("That's 15% above your target!")
 - If something needs attention, lead with that
 - Use emojis naturally but sparingly
+
+OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
+You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
+
+1. <b>Team Status (PRIMARY)</b> — Use get_team_status FIRST for any status update. Returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red).
+2. <b>ClickUp Tasks</b> — Use get_clickup_status for task-level detail.
+3. <b>Team Roster</b> — Use get_team_roster to see who manages which accounts.
+4. <b>Google Calendar</b> — Use get_today_calendar, get_upcoming_calendar for meetings.
+5. <b>Contractual Deliverables</b> — Use get_deliverables, get_deliverable_summary.
+6. <b>SOPs & Compliance</b> — Use run_compliance_check.
+
+THE TEAM: Gabriel (SEO), Maria Clara (PPC), Thiago (SEO/PPC Lead), Kaue (SEO), Arturo (PPC), Juan (SEO), Igor (Account Manager).
+
+When the owner asks for a status update:
+1. Call get_team_status FIRST
+2. Present team health (green/yellow/red per person)
+3. Flag late tasks, escalations, missing meetings
+4. Add deliverable and calendar context if relevant
 
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.

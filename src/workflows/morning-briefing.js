@@ -5,8 +5,11 @@ import * as clickup from '../api/clickup.js';
 import * as metaAds from '../api/meta-ads.js';
 import * as googleAds from '../api/google-ads.js';
 import * as tiktokAds from '../api/tiktok-ads.js';
-import { getAllClients } from '../services/knowledge-base.js';
+import { getAllClients, getOverdueDeliverables, getUpcomingDeliverables, getDeliverableSummary } from '../services/knowledge-base.js';
 import { getCostSummary } from '../services/cost-tracker.js';
+import * as googleCalendar from '../api/google-calendar.js';
+import { runComplianceAudit, formatComplianceForBriefing } from '../services/sop-registry.js';
+import { getTeamStatusReport } from '../services/team-status.js';
 import { SYSTEM_PROMPTS, USER_PROMPTS } from '../prompts/templates.js';
 
 const log = logger.child({ workflow: 'morning-briefing' });
@@ -113,7 +116,43 @@ export async function runMorningBriefing() {
     log.warn('Failed to get upcoming tasks', { error: e.message });
   }
 
-  // 3. Format platform data for Claude
+  // 3. Contractual deliverables status
+  let overdueDeliverables = [];
+  let upcomingDeliverables = [];
+  let deliverableSummary = {};
+  try {
+    overdueDeliverables = getOverdueDeliverables();
+    upcomingDeliverables = getUpcomingDeliverables(7);
+    deliverableSummary = getDeliverableSummary();
+  } catch (e) {
+    log.warn('Failed to get deliverables data', { error: e.message });
+  }
+
+  // 3b. Google Calendar — today's team schedule
+  let todayEvents = [];
+  try {
+    todayEvents = await googleCalendar.getTodayEvents();
+  } catch (e) {
+    log.warn('Failed to get calendar events', { error: e.message });
+  }
+
+  // 3c. SOP compliance audit
+  let complianceReport = { overallGaps: [], criticalCount: 0, warningCount: 0 };
+  try {
+    complianceReport = runComplianceAudit();
+  } catch (e) {
+    log.warn('Failed to run SOP compliance audit', { error: e.message });
+  }
+
+  // 3d. Team status from ClickUp (per-person task load)
+  let teamReport = null;
+  try {
+    teamReport = await getTeamStatusReport();
+  } catch (e) {
+    log.warn('Failed to get team status', { error: e.message });
+  }
+
+  // 4. Format platform data for Claude
   let platformSummary = '';
   for (const client of results.platformData) {
     platformSummary += `\n### ${client.name}:\n`;
@@ -130,15 +169,48 @@ export async function runMorningBriefing() {
   const overdueStr = results.overdueTasks.map(t => `- ${t.name} (${t.assignee}, due ${t.dueDate})`).join('\n') || 'None';
   const soonStr = results.dueSoon.map(t => `- ${t.name} (due ${t.dueDate})`).join('\n') || 'None';
 
-  // 4. AI cost info
+  // 5. AI cost info
   const costSummary = getCostSummary('today');
 
-  // 5. Ask Claude to generate the briefing
+  // 6. Format deliverables for Claude
+  const overdueDelStr = overdueDeliverables.length > 0
+    ? overdueDeliverables.map(d => `- [${d.client_name}] ${d.name} (due ${d.due_date})`).join('\n')
+    : 'None';
+  const upcomingDelStr = upcomingDeliverables.length > 0
+    ? upcomingDeliverables.map(d => `- [${d.client_name}] ${d.name} (due ${d.due_date})`).join('\n')
+    : 'None';
+  const delSummaryStr = `Overdue: ${deliverableSummary.overdue || 0} | Due this week: ${deliverableSummary.dueThisWeek || 0} | In progress: ${deliverableSummary.inProgress || 0} | Blocked: ${deliverableSummary.blocked || 0}`;
+
+  // 6b. Format calendar for Claude
+  const calendarStr = googleCalendar.formatScheduleForBriefing(todayEvents);
+
+  // 6c. Format SOP compliance for Claude
+  const sopComplianceStr = formatComplianceForBriefing(complianceReport);
+
+  // 6d. Format team status for Claude
+  let teamStatusStr = 'Team status not available';
+  if (teamReport) {
+    teamStatusStr = teamReport.formatted.teamStatus + '\n\n' + teamReport.formatted.lateTasks;
+    if (teamReport.escalations.length > 0) {
+      teamStatusStr += '\n\n' + teamReport.formatted.escalations;
+    }
+    if (teamReport.summary.totalMissingMeetings > 0) {
+      teamStatusStr += '\n\n' + teamReport.formatted.missingMeetings;
+    }
+  }
+
+  // 7. Ask Claude to generate the briefing
   const promptData = {
     platformPerformance: platformSummary || 'No data available yet',
     tasksDueToday: tasksDueStr,
     overdueTasks: overdueStr,
     tasksDueSoon: soonStr,
+    overdueDeliverables: overdueDelStr,
+    upcomingDeliverables: upcomingDelStr,
+    deliverableSummary: delSummaryStr,
+    todayCalendar: calendarStr,
+    sopCompliance: sopComplianceStr,
+    teamStatus: teamStatusStr,
     budgetPacing: results.budgetIssues.length > 0 ? results.budgetIssues.join('\n') : 'All budgets within normal range',
     activeCampaigns: results.platformData.reduce((sum, c) => sum + Object.keys(c.platforms).length, 0),
     activeClients: clients.length,
@@ -151,7 +223,7 @@ export async function runMorningBriefing() {
     maxTokens: 2048,
   });
 
-  // 6. Parse Claude's response and send via WhatsApp
+  // 8. Parse Claude's response and send via WhatsApp
   const briefingText = response.text;
 
   // Extract structured data from Claude's response (best-effort parsing)

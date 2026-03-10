@@ -161,13 +161,16 @@ export async function createDocument(name, content, folderId) {
 
   return rateLimited('google', () =>
     retry(async () => {
+      const targetFolder = folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+      const requestBody = {
+        name,
+        mimeType: 'application/vnd.google-apps.document',
+        ...(targetFolder && { parents: [targetFolder] }),
+      };
+
       // Create empty doc
       const res = await drive.files.create({
-        requestBody: {
-          name,
-          mimeType: 'application/vnd.google-apps.document',
-          parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
-        },
+        requestBody,
         fields: 'id, name, webViewLink',
       });
 
@@ -181,6 +184,18 @@ export async function createDocument(name, content, folderId) {
         });
       }
 
+      // If no shared folder, make accessible via link
+      if (!targetFolder) {
+        try {
+          await drive.permissions.create({
+            fileId: res.data.id,
+            requestBody: { type: 'anyone', role: 'reader' },
+          });
+        } catch (shareErr) {
+          log.warn('Failed to share document with link', { id: res.data.id, error: shareErr.message });
+        }
+      }
+
       log.info(`Created document: ${name}`, { id: res.data.id });
       return res.data;
     }, { retries: 3, label: 'Google Drive create doc' })
@@ -192,10 +207,11 @@ export async function uploadFile(name, content, mimeType, folderId) {
 
   return rateLimited('google', () =>
     retry(async () => {
+      const targetFolder = folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const res = await drive.files.create({
         requestBody: {
           name,
-          parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
+          ...(targetFolder && { parents: [targetFolder] }),
         },
         media: {
           mimeType,
@@ -203,6 +219,19 @@ export async function uploadFile(name, content, mimeType, folderId) {
         },
         fields: 'id, name, webViewLink',
       });
+
+      // If no shared folder, make accessible via link
+      if (!targetFolder) {
+        try {
+          await drive.permissions.create({
+            fileId: res.data.id,
+            requestBody: { type: 'anyone', role: 'reader' },
+          });
+        } catch (shareErr) {
+          log.warn('Failed to share uploaded file with link', { id: res.data.id, error: shareErr.message });
+        }
+      }
+
       return res.data;
     }, { retries: 3, label: 'Google Drive upload' })
   );

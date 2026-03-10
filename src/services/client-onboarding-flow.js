@@ -6,6 +6,7 @@ import {
   createClient, getClient, updateClient,
   getMessages,
   getPendingClientByChatId, getContactsByClientId,
+  seedClientDeliverables,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleSheets from '../api/google-sheets.js';
@@ -649,6 +650,17 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
     clientId,
     driveFolderUrl,
   });
+
+  // Seed standard contractual deliverables for the new client
+  if (clientId) {
+    try {
+      const seeded = seedClientDeliverables(clientId);
+      steps.push(`Standard deliverables seeded (${seeded.length} items)`);
+    } catch (e) {
+      log.warn('Failed to seed deliverables', { error: e.message });
+      errors.push(`Deliverables: ${e.message}`);
+    }
+  }
 
   // Notify agency owner via WhatsApp
   const ownerSummary = [
