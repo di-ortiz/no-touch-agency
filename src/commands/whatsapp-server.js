@@ -3452,8 +3452,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const caption = media?.caption || message.caption || '';
       log.info('WhatsApp media received', { from, type: message.type, mimeType: media?.mime_type });
 
-      const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
-      const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
+      const normalizePhone = (p) => p?.replace(/[^0-9]/g, '') || '';
+      const fromN = normalizePhone(from);
+      const ownerN = normalizePhone(config.WHATSAPP_OWNER_PHONE);
+      const isOwner = ownerN.length >= 8 && (
+        fromN === ownerN || fromN.endsWith(ownerN.slice(-10)) || ownerN.endsWith(fromN.slice(-10))
+      );
       if (isOwner) {
         await handleMediaUpload(from, message.type, media, caption);
       } else {
@@ -3475,11 +3479,18 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     log.info('WhatsApp message received', { from, body: body.substring(0, 100) });
 
-    // Normalize phone numbers for comparison (strip + and leading zeros)
-    const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
-    const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
+    // Normalize phone numbers for comparison (strip non-digits)
+    const normalizePhone = (p) => p?.replace(/[^0-9]/g, '') || '';
+    const fromNorm = normalizePhone(from);
+    const ownerNorm = normalizePhone(config.WHATSAPP_OWNER_PHONE);
+    // Exact match OR suffix match (last 10+ digits) to handle country code mismatches
+    const isOwner = ownerNorm.length >= 8 && (
+      fromNorm === ownerNorm ||
+      fromNorm.endsWith(ownerNorm.slice(-10)) ||
+      ownerNorm.endsWith(fromNorm.slice(-10))
+    );
 
-    log.info('WhatsApp routing', { from, isOwner, ownerPhone: config.WHATSAPP_OWNER_PHONE?.slice(-4) });
+    log.info('WhatsApp routing', { from: fromNorm, isOwner, ownerPhone: ownerNorm, fromLast4: fromNorm.slice(-4), ownerLast4: ownerNorm.slice(-4) });
 
     if (isOwner) {
       // Owner gets concurrency-guarded command access (prevents parallel mutations)
@@ -4383,6 +4394,13 @@ app.get('/debug/whatsapp', async (req, res) => {
 
   // Test 3: Owner phone config
   checks.ownerPhone = config.WHATSAPP_OWNER_PHONE ? `...${config.WHATSAPP_OWNER_PHONE.slice(-4)}` : 'MISSING';
+  checks.ownerPhoneNormalized = config.WHATSAPP_OWNER_PHONE?.replace(/[^0-9]/g, '') || 'MISSING';
+  checks.ownerPhoneLength = checks.ownerPhoneNormalized?.length || 0;
+
+  // Test 4: ClickUp config
+  checks.clickupToken = config.CLICKUP_API_TOKEN ? `${config.CLICKUP_API_TOKEN.slice(0, 6)}...` : 'MISSING';
+  checks.clickupTeamId = config.CLICKUP_TEAM_ID || 'MISSING';
+  checks.clickupSpaceId = config.CLICKUP_PPC_SPACE_ID || 'NOT SET (auto-discover enabled)';
 
   res.json(checks);
 });
@@ -4516,6 +4534,20 @@ async function handleCommand(message) {
 // --- Client Message Handler (non-owner contacts) ---
 async function handleClientMessage(from, message) {
   try {
+    // Safety net: re-check owner phone with suffix matching in case main routing missed it
+    const normPhone = (p) => p?.replace(/[^0-9]/g, '') || '';
+    const fromDigits = normPhone(from);
+    const ownerDigits = normPhone(config.WHATSAPP_OWNER_PHONE);
+    if (ownerDigits.length >= 8 && (
+      fromDigits === ownerDigits ||
+      fromDigits.endsWith(ownerDigits.slice(-10)) ||
+      ownerDigits.endsWith(fromDigits.slice(-10))
+    )) {
+      log.warn('handleClientMessage: phone matches owner — re-routing to owner handler', { from });
+      await enqueueOwnerMessage(message);
+      return;
+    }
+
     // 0. Pre-check for signup token — cancel stale sessions so fresh signups aren't blocked
     const preTokenMatch = message.match(TOKEN_RE_INLINE);
     if (preTokenMatch) {
