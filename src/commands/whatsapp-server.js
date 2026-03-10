@@ -20,6 +20,7 @@ import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from '../workflows/clickup-monitor.js';
+import * as clickup from '../api/clickup.js';
 import { onboardNewClient } from '../workflows/client-onboarding.js';
 import { generateCampaignBrief } from '../workflows/campaign-brief.js';
 import { generateCreatives } from '../workflows/creative-generation.js';
@@ -845,7 +846,7 @@ Communication style:
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
 You have direct access to ClickUp, Google Calendar, contractual deliverables, and SOPs. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS:
 
-1. *ClickUp* — Use get_daily_standup, or the underlying overdue/due-today task queries. You pull tasks, assignees, due dates, statuses directly.
+1. *ClickUp* — Use get_clickup_status to pull overdue tasks, due today, and upcoming. It returns full task data (names, assignees, due dates, statuses). Use get_daily_standup to send a formatted standup report.
 2. *Google Calendar* — Use get_today_calendar, get_upcoming_calendar, get_daily_schedule to see team meetings, client calls, deadlines.
 3. *Contractual Deliverables* — Use get_deliverables, get_deliverable_summary to check what's owed to each client and what's overdue.
 4. *SOPs & Compliance* — Use list_sops, get_sop_detail, run_compliance_check to verify the team is following standard procedures and timelines.
@@ -968,7 +969,12 @@ const CSA_TOOLS = [
   },
   {
     name: 'get_daily_standup',
-    description: 'Generate a daily standup summary of tasks and progress.',
+    description: 'Generate and send a formatted daily standup report to the owner. Also returns the raw task data so you can reference it.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_clickup_status',
+    description: 'Get the current status of all ClickUp tasks — overdue, due today, and coming up this week. Returns raw task data with names, assignees, due dates, and statuses. Use this when the owner asks for a status update, what the team is working on, or what\'s overdue. This is your PRIMARY tool for task/project management visibility.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -1542,8 +1548,34 @@ async function executeCSATool(toolName, toolInput) {
       return { status: 'briefing_generated' };
     }
     case 'get_daily_standup': {
-      await generateDailyStandup();
-      return { status: 'standup_generated' };
+      const standupResult = await generateDailyStandup();
+      return standupResult || { status: 'standup_sent', note: 'CLICKUP_PPC_SPACE_ID may not be configured — check .env' };
+    }
+    case 'get_clickup_status': {
+      const spaceId = config.CLICKUP_PPC_SPACE_ID;
+      if (!spaceId) return { error: 'CLICKUP_PPC_SPACE_ID is not configured in .env. Set it to your ClickUp space ID to enable task tracking.' };
+      const [overdue, dueToday, dueSoon] = await Promise.all([
+        clickup.getOverdueTasks(spaceId).catch(() => ({ tasks: [] })),
+        clickup.getTasksDueToday(spaceId).catch(() => ({ tasks: [] })),
+        clickup.getTasksDueSoon(spaceId, 7).catch(() => ({ tasks: [] })),
+      ]);
+      const formatTask = t => ({
+        name: t.name,
+        assignee: t.assignees?.[0]?.username || 'Unassigned',
+        dueDate: t.due_date ? new Date(parseInt(t.due_date)).toLocaleDateString() : 'No date',
+        status: t.status?.status || 'unknown',
+        priority: t.priority?.priority || 'none',
+        url: t.url || null,
+      });
+      return {
+        overdue: (overdue.tasks || []).map(formatTask),
+        overdueCount: (overdue.tasks || []).length,
+        dueToday: (dueToday.tasks || []).map(formatTask),
+        dueTodayCount: (dueToday.tasks || []).length,
+        dueSoon: (dueSoon.tasks || []).map(formatTask),
+        dueSoonCount: (dueSoon.tasks || []).length,
+        totalOpen: (overdue.tasks?.length || 0) + (dueToday.tasks?.length || 0) + (dueSoon.tasks?.length || 0),
+      };
     }
     case 'get_ai_cost_report': {
       const summary = getCostSummary(toolInput.period || 'month');
@@ -3494,7 +3526,7 @@ Communication style:
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
 You have direct access to ClickUp, Google Calendar, contractual deliverables, and SOPs. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS:
 
-1. <b>ClickUp</b> — Use get_daily_standup, or the underlying overdue/due-today task queries. You pull tasks, assignees, due dates, statuses directly.
+1. <b>ClickUp</b> — Use get_clickup_status to pull overdue tasks, due today, and upcoming. It returns full task data (names, assignees, due dates, statuses). Use get_daily_standup to send a formatted standup report.
 2. <b>Google Calendar</b> — Use get_today_calendar, get_upcoming_calendar, get_daily_schedule to see team meetings, client calls, deadlines.
 3. <b>Contractual Deliverables</b> — Use get_deliverables, get_deliverable_summary to check what's owed to each client and what's overdue.
 4. <b>SOPs & Compliance</b> — Use list_sops, get_sop_detail, run_compliance_check to verify the team is following standard procedures and timelines.
