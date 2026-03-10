@@ -24,7 +24,18 @@ const WORKSPACE_ID = config.CLICKUP_TEAM_ID;
 
 export const TEAM = [
   {
+    name: 'Diego', id: '', email: 'diego@chili.pa', role: 'Agency Owner',
+    accounts: { escalation: [], honeymoon: [], enterprise: [], smb: [] },
+    calendarId: 'diego@chili.pa',
+  },
+  {
+    name: 'Hannah', id: '', email: 'hannah@chili.pa', role: 'Operations',
+    accounts: { escalation: [], honeymoon: [], enterprise: [], smb: [] },
+    calendarId: 'hannah@chili.pa',
+  },
+  {
     name: 'Gabriel', id: '88481221', email: 'gabriel.cardoso@chili.pa', role: 'SEO Specialist',
+    calendarId: 'gabriel.cardoso@chili.pa',
     accounts: {
       escalation: ['SEO - SoEnergy BR'],
       honeymoon: [],
@@ -34,6 +45,7 @@ export const TEAM = [
   },
   {
     name: 'Maria Clara', id: '94133217', email: 'maria.gibeli@chili.pa', role: 'PPC Specialist',
+    calendarId: 'maria.gibeli@chili.pa',
     accounts: {
       escalation: [],
       honeymoon: [],
@@ -43,6 +55,7 @@ export const TEAM = [
   },
   {
     name: 'Thiago', id: '88483662', email: 'thiago.gamero@chili.pa', role: 'SEO/PPC Lead',
+    calendarId: 'thiago.gamero@chili.pa',
     accounts: {
       escalation: ['SEO - SoEnergy BR', 'PPC - Luna de Oriente'],
       honeymoon: ['SEO-Thiago', 'SEO - OM Style', 'SEO - Tarmex', 'SEO-Virbac'],
@@ -52,6 +65,7 @@ export const TEAM = [
   },
   {
     name: 'Kaue', id: '88481223', email: 'kaue.dias@chili.pa', role: 'SEO Specialist',
+    calendarId: 'kaue.dias@chili.pa',
     accounts: {
       escalation: ['SEO - SoEnergy BR'],
       honeymoon: [],
@@ -61,6 +75,7 @@ export const TEAM = [
   },
   {
     name: 'Arturo', id: '88488396', email: 'arturo@chili.pa', role: 'PPC Specialist',
+    calendarId: 'arturo@chili.pa',
     accounts: {
       escalation: ['PPC - Luna de Oriente'],
       honeymoon: [],
@@ -70,6 +85,7 @@ export const TEAM = [
   },
   {
     name: 'Juan', id: '88481225', email: 'juan.amesty@chili.pa', role: 'SEO Specialist',
+    calendarId: 'juan.amesty@chili.pa',
     accounts: {
       escalation: [],
       honeymoon: ['SEO - OM Style', 'SEO - Tarmex', 'SEO-Virbac'],
@@ -79,12 +95,18 @@ export const TEAM = [
   },
   {
     name: 'Igor', id: '60331930', email: 'igor@chili.pa', role: 'Account Manager',
+    calendarId: 'igor@chili.pa',
     accounts: {
       escalation: [],
       honeymoon: [],
       enterprise: ['Clico', 'Innovation', 'Fullstop'],
       smb: [],
     },
+  },
+  {
+    name: 'Marcelo', id: '', email: 'marcelo.salvatore@chili.pa', role: 'Specialist',
+    calendarId: 'marcelo.salvatore@chili.pa',
+    accounts: { escalation: [], honeymoon: [], enterprise: [], smb: [] },
   },
 ];
 
@@ -105,14 +127,15 @@ async function getTasksForUser(userId) {
 
 export async function getAllTeamTasks() {
   const results = await Promise.all(
-    TEAM.map(member =>
-      getTasksForUser(member.id)
+    TEAM.map(member => {
+      if (!member.id) return Promise.resolve({ ...member, tasks: [] });
+      return getTasksForUser(member.id)
         .then(tasks => ({ ...member, tasks }))
         .catch(e => {
           log.warn(`Failed to get tasks for ${member.name}`, { error: e.message });
           return { ...member, tasks: [] };
-        })
-    )
+        });
+    })
   );
   return results;
 }
