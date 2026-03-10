@@ -183,6 +183,9 @@ ${data.todayCalendar || 'No calendar events (not configured yet)'}
 ## SOP Compliance
 ${data.sopCompliance || 'No SOP gaps detected'}
 
+## Team Status (Per Person)
+${data.teamStatus || 'Team status not available'}
+
 ## Budget Pacing
 ${data.budgetPacing}
 
@@ -191,12 +194,12 @@ ${data.budgetPacing}
 
 Provide:
 1. Overall health score (1-10) with emoji
-2. Top 3 urgent items requiring attention (include overdue deliverables and SOP violations!)
-3. Today's calendar highlights — client calls that need prep, internal meetings
-4. Performance highlights
-5. Contractual deliverable status — what's overdue, what's due soon, any gaps between ClickUp tasks and contractual obligations
-6. SOP compliance — any procedures falling behind standard timelines
-7. Issues needing attention
+2. Team health — who's green/yellow/red, who's overloaded, any escalations
+3. Top 3 urgent items requiring attention (late tasks, overdue deliverables, escalations)
+4. Today's calendar highlights — client calls that need prep, internal meetings
+5. Performance highlights
+6. Contractual deliverable status — what's overdue, gaps between tasks and obligations
+7. Missing biweekly meetings — accounts that don't have scheduled check-ins
 8. Budget summary
 Keep it concise for WhatsApp delivery.`,
 

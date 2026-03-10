@@ -57,6 +57,7 @@ import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
 import * as googleCalendar from '../api/google-calendar.js';
 import { SOPS, listSOPs, getSOP, runComplianceAudit } from '../services/sop-registry.js';
+import { getTeamStatusReport, TEAM } from '../services/team-status.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -844,20 +845,29 @@ Communication style:
 - Use emojis naturally but sparingly
 
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
-You have direct access to ClickUp, Google Calendar, contractual deliverables, and SOPs. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS:
+You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
 
-1. *ClickUp* — Use get_clickup_status to pull overdue tasks, due today, and upcoming. It returns full task data (names, assignees, due dates, statuses). Use get_daily_standup to send a formatted standup report.
-2. *Google Calendar* — Use get_today_calendar, get_upcoming_calendar, get_daily_schedule to see team meetings, client calls, deadlines.
-3. *Contractual Deliverables* — Use get_deliverables, get_deliverable_summary to check what's owed to each client and what's overdue.
-4. *SOPs & Compliance* — Use list_sops, get_sop_detail, run_compliance_check to verify the team is following standard procedures and timelines.
-5. *Seed Deliverables* — Use seed_standard_deliverables to initialize standard PPC agency timelines for any client.
+1. *Team Status (PRIMARY)* — Use get_team_status FIRST for any status update. It returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red). This is your MOST IMPORTANT tool.
+2. *ClickUp Tasks* — Use get_clickup_status for task-level detail (overdue, due today, upcoming by task name).
+3. *Team Roster* — Use get_team_roster to see who manages which accounts (by tier: escalation, honeymoon, enterprise, SMB).
+4. *Google Calendar* — Use get_today_calendar, get_upcoming_calendar for team meetings and client calls.
+5. *Contractual Deliverables* — Use get_deliverables, get_deliverable_summary for what's owed to each client.
+6. *SOPs & Compliance* — Use run_compliance_check to verify procedures are being followed.
 
-When the owner asks "give me a status update" or "what's going on today" or "how are we doing", cross-reference ALL of these:
-- Pull today's calendar events (client calls, meetings)
-- Check ClickUp for overdue and due-today tasks
-- Check deliverables for anything overdue or due this week
-- Run a compliance check if they ask about procedures or SOPs
-Present it as one unified briefing, not separate disconnected lists.
+THE TEAM (you know them):
+- *Gabriel* (SEO) — Daikin, Steck, ESEG, Joico, SGA Toyota, MeuPat, Treble BR, and more
+- *Maria Clara* (PPC) — Sicoob, SciSure, Chili BR, Infios, PayPay, Cyber Wan
+- *Thiago* (SEO/PPC Lead) — Rodelag, Avance, Poin Panama, Ri Group, Aquatics Panama
+- *Kaue* (SEO) — ESEG, Daikin, Steck, Joico, SGA Toyota, OnFly MX
+- *Arturo* (PPC) — Rodelag, Avance, Poin Panama, Ri Group, Aquatics Panama, Synergy
+- *Juan* (SEO) — Diunsa, Mapei, Multinational PR, Aruma, and 8+ LATAM accounts
+- *Igor* (Account Manager) — Clico, Innovation, Fullstop
+
+When the owner asks "give me a status update" or "what's going on" or "how is the team":
+1. Call get_team_status FIRST — this gives you everything in one call
+2. Present the team health overview (who's green/yellow/red)
+3. Flag late tasks, escalations, and missing biweekly meetings
+4. Add deliverable and calendar context if relevant
 
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.
@@ -1392,6 +1402,17 @@ const CSA_TOOLS = [
   {
     name: 'run_compliance_check',
     description: 'Run a full SOP compliance audit across all clients. Compares what SHOULD be happening per SOPs vs what IS happening per ClickUp tasks, deliverables, and calendar. Flags gaps, overdue items, and missed procedures. Use when the owner asks "are we on track?" or "what are we missing?"',
+    input_schema: { type: 'object', properties: {} },
+  },
+  // --- Team Management ---
+  {
+    name: 'get_team_status',
+    description: 'Get full team status from ClickUp — each team member\'s task count, late tasks, escalations, missing biweekly meetings, and account assignments. This is the PRIMARY tool for "how is the team doing?", "who is overloaded?", "what\'s late?", or any team workload question. Returns structured data per person with health indicators (green/yellow/red).',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_team_roster',
+    description: 'Get the team roster — names, roles, emails, and which client accounts each person manages (by tier: escalation, honeymoon, enterprise, SMB). Use when the owner asks "who manages X account?" or "show me the team".',
     input_schema: { type: 'object', properties: {} },
   },
 ];
@@ -3283,6 +3304,29 @@ Return ONLY the JSON array, no other text.`;
       return report;
     }
 
+    // --- Team Management ---
+    case 'get_team_status': {
+      const teamReport = await getTeamStatusReport();
+      return teamReport;
+    }
+    case 'get_team_roster': {
+      return {
+        team: TEAM.map(m => ({
+          name: m.name,
+          role: m.role,
+          email: m.email,
+          accounts: {
+            escalation: m.accounts.escalation,
+            honeymoon: m.accounts.honeymoon,
+            enterprise: m.accounts.enterprise,
+            smb: m.accounts.smb,
+          },
+          totalAccounts: [...m.accounts.escalation, ...m.accounts.honeymoon, ...m.accounts.enterprise, ...m.accounts.smb].length,
+        })),
+        teamSize: TEAM.length,
+      };
+    }
+
     default:
       return { error: `Unknown tool: ${toolName}` };
   }
@@ -3524,20 +3568,22 @@ Communication style:
 - Use emojis naturally but sparingly
 
 OPERATIONS & TEAM MANAGEMENT — YOU HAVE FULL ACCESS:
-You have direct access to ClickUp, Google Calendar, contractual deliverables, and SOPs. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS:
+You have direct access to ClickUp, Google Calendar, contractual deliverables, SOPs, and the full team roster. When the owner asks for a status update, DON'T say you can't access something — USE YOUR TOOLS IMMEDIATELY:
 
-1. <b>ClickUp</b> — Use get_clickup_status to pull overdue tasks, due today, and upcoming. It returns full task data (names, assignees, due dates, statuses). Use get_daily_standup to send a formatted standup report.
-2. <b>Google Calendar</b> — Use get_today_calendar, get_upcoming_calendar, get_daily_schedule to see team meetings, client calls, deadlines.
-3. <b>Contractual Deliverables</b> — Use get_deliverables, get_deliverable_summary to check what's owed to each client and what's overdue.
-4. <b>SOPs & Compliance</b> — Use list_sops, get_sop_detail, run_compliance_check to verify the team is following standard procedures and timelines.
-5. <b>Seed Deliverables</b> — Use seed_standard_deliverables to initialize standard PPC agency timelines for any client.
+1. <b>Team Status (PRIMARY)</b> — Use get_team_status FIRST for any status update. Returns each team member's task count, late tasks, escalations, missing biweekly meetings, and health (green/yellow/red).
+2. <b>ClickUp Tasks</b> — Use get_clickup_status for task-level detail.
+3. <b>Team Roster</b> — Use get_team_roster to see who manages which accounts.
+4. <b>Google Calendar</b> — Use get_today_calendar, get_upcoming_calendar for meetings.
+5. <b>Contractual Deliverables</b> — Use get_deliverables, get_deliverable_summary.
+6. <b>SOPs & Compliance</b> — Use run_compliance_check.
 
-When the owner asks "give me a status update" or "what's going on today" or "how are we doing", cross-reference ALL of these:
-- Pull today's calendar events (client calls, meetings)
-- Check ClickUp for overdue and due-today tasks
-- Check deliverables for anything overdue or due this week
-- Run a compliance check if they ask about procedures or SOPs
-Present it as one unified briefing, not separate disconnected lists.
+THE TEAM: Gabriel (SEO), Maria Clara (PPC), Thiago (SEO/PPC Lead), Kaue (SEO), Arturo (PPC), Juan (SEO), Igor (Account Manager).
+
+When the owner asks for a status update:
+1. Call get_team_status FIRST
+2. Present team health (green/yellow/red per person)
+3. Flag late tasks, escalations, missing meetings
+4. Add deliverable and calendar context if relevant
 
 CRITICAL RULES:
 - When the user asks you to do something, DO IT immediately using your tools. Never tell the user to "onboard a client first" or ask them to set up anything before you can act.

@@ -9,6 +9,7 @@ import { getAllClients, getOverdueDeliverables, getUpcomingDeliverables, getDeli
 import { getCostSummary } from '../services/cost-tracker.js';
 import * as googleCalendar from '../api/google-calendar.js';
 import { runComplianceAudit, formatComplianceForBriefing } from '../services/sop-registry.js';
+import { getTeamStatusReport } from '../services/team-status.js';
 import { SYSTEM_PROMPTS, USER_PROMPTS } from '../prompts/templates.js';
 
 const log = logger.child({ workflow: 'morning-briefing' });
@@ -143,6 +144,14 @@ export async function runMorningBriefing() {
     log.warn('Failed to run SOP compliance audit', { error: e.message });
   }
 
+  // 3d. Team status from ClickUp (per-person task load)
+  let teamReport = null;
+  try {
+    teamReport = await getTeamStatusReport();
+  } catch (e) {
+    log.warn('Failed to get team status', { error: e.message });
+  }
+
   // 4. Format platform data for Claude
   let platformSummary = '';
   for (const client of results.platformData) {
@@ -178,6 +187,18 @@ export async function runMorningBriefing() {
   // 6c. Format SOP compliance for Claude
   const sopComplianceStr = formatComplianceForBriefing(complianceReport);
 
+  // 6d. Format team status for Claude
+  let teamStatusStr = 'Team status not available';
+  if (teamReport) {
+    teamStatusStr = teamReport.formatted.teamStatus + '\n\n' + teamReport.formatted.lateTasks;
+    if (teamReport.escalations.length > 0) {
+      teamStatusStr += '\n\n' + teamReport.formatted.escalations;
+    }
+    if (teamReport.summary.totalMissingMeetings > 0) {
+      teamStatusStr += '\n\n' + teamReport.formatted.missingMeetings;
+    }
+  }
+
   // 7. Ask Claude to generate the briefing
   const promptData = {
     platformPerformance: platformSummary || 'No data available yet',
@@ -189,6 +210,7 @@ export async function runMorningBriefing() {
     deliverableSummary: delSummaryStr,
     todayCalendar: calendarStr,
     sopCompliance: sopComplianceStr,
+    teamStatus: teamStatusStr,
     budgetPacing: results.budgetIssues.length > 0 ? results.budgetIssues.join('\n') : 'All budgets within normal range',
     activeCampaigns: results.platformData.reduce((sum, c) => sum + Object.keys(c.platforms).length, 0),
     activeClients: clients.length,
