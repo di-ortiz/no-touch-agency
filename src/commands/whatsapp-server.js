@@ -54,6 +54,8 @@ import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
+import * as googleCalendar from '../api/google-calendar.js';
+import { SOPS, listSOPs, getSOP, runComplianceAudit } from '../services/sop-registry.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import axios from 'axios';
 import config from '../config.js';
@@ -1332,6 +1334,43 @@ const CSA_TOOLS = [
     name: 'seed_standard_deliverables',
     description: 'Seed the standard PPC agency deliverables (onboarding + recurring) for a client. Use when setting up a new client or when the owner wants to initialize the standard timeline for an existing client.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string' }, startDate: { type: 'string', description: 'Start date for timeline calculation (YYYY-MM-DD, defaults to today)' } }, required: ['clientName'] },
+  },
+  // --- Google Calendar ---
+  {
+    name: 'get_today_calendar',
+    description: 'Get today\'s team calendar events from Google Calendar. Shows meetings, client calls, deadlines, and attendees. Use when the owner asks about today\'s schedule, meetings, or calendar.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_upcoming_calendar',
+    description: 'Get upcoming calendar events for the next N days. Use when the owner asks about upcoming meetings, this week\'s schedule, or future calendar events.',
+    input_schema: { type: 'object', properties: { daysAhead: { type: 'number', description: 'Number of days ahead to look (default: 7, max: 30)' } } },
+  },
+  {
+    name: 'get_daily_schedule',
+    description: 'Get the full team schedule for a specific date, grouped by calendar. Use when asking about a specific day\'s schedule.',
+    input_schema: { type: 'object', properties: { date: { type: 'string', description: 'Date to check (YYYY-MM-DD, defaults to today)' } } },
+  },
+  {
+    name: 'list_calendars',
+    description: 'List all Google Calendars the service account has access to. Use to verify calendar setup or troubleshoot missing events.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  // --- SOPs & Compliance ---
+  {
+    name: 'list_sops',
+    description: 'List all standard operating procedures (SOPs) — onboarding, weekly cadence, monthly cadence, quarterly reviews, campaign launch checklist, incident response. Use when the owner asks about procedures, processes, or standard timelines.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_sop_detail',
+    description: 'Get the full detail of a specific SOP including all steps, timelines, and owners. Use when the owner asks about a specific procedure.',
+    input_schema: { type: 'object', properties: { sopId: { type: 'string', description: 'SOP ID (e.g. SOP-ONB, SOP-WKL, SOP-MTH, SOP-QTR, SOP-CMP, SOP-INC)' } }, required: ['sopId'] },
+  },
+  {
+    name: 'run_compliance_check',
+    description: 'Run a full SOP compliance audit across all clients. Compares what SHOULD be happening per SOPs vs what IS happening per ClickUp tasks, deliverables, and calendar. Flags gaps, overdue items, and missed procedures. Use when the owner asks "are we on track?" or "what are we missing?"',
+    input_schema: { type: 'object', properties: {} },
   },
 ];
 
@@ -3161,6 +3200,39 @@ Return ONLY the JSON array, no other text.`;
       if (!client) return { error: `Client "${toolInput.clientName}" not found.` };
       const seeded = seedClientDeliverables(client.id, toolInput.startDate);
       return { success: true, client: client.name, deliverables: seeded, count: seeded.length };
+    }
+
+    // --- Google Calendar ---
+    case 'get_today_calendar': {
+      const events = await googleCalendar.getTodayEvents();
+      return { date: new Date().toISOString().split('T')[0], events, count: events.length };
+    }
+    case 'get_upcoming_calendar': {
+      const days = Math.min(toolInput.daysAhead || 7, 30);
+      const events = await googleCalendar.getUpcomingEvents(days);
+      return { daysAhead: days, events, count: events.length };
+    }
+    case 'get_daily_schedule': {
+      const schedule = await googleCalendar.getDailySchedule(toolInput.date);
+      return { date: toolInput.date || new Date().toISOString().split('T')[0], schedule };
+    }
+    case 'list_calendars': {
+      const calendars = await googleCalendar.listCalendars();
+      return { calendars, count: calendars.length };
+    }
+
+    // --- SOPs & Compliance ---
+    case 'list_sops': {
+      return { sops: listSOPs() };
+    }
+    case 'get_sop_detail': {
+      const sop = getSOP(toolInput.sopId);
+      if (!sop) return { error: `SOP "${toolInput.sopId}" not found. Valid IDs: SOP-ONB, SOP-WKL, SOP-MTH, SOP-QTR, SOP-CMP, SOP-INC` };
+      return sop;
+    }
+    case 'run_compliance_check': {
+      const report = runComplianceAudit();
+      return report;
     }
 
     default:

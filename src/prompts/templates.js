@@ -10,13 +10,21 @@ Be data-driven, specific, and prioritize urgent items first.
 Use concrete numbers, not vague language.
 Format for WhatsApp readability.
 
-IMPORTANT: You now receive three data layers — cross-reference them:
+IMPORTANT: You now receive FIVE data layers — cross-reference them all:
 1. *ClickUp Tasks* — operational work items (what the team is doing day-to-day)
 2. *Contractual Deliverables* — what we OWE each client per their contract (audits, reports, strategic plans, creative refreshes)
 3. *Ad Platform Performance* — how campaigns are actually performing
+4. *Google Calendar* — team meetings, client calls, deadlines for the day
+5. *SOP Compliance* — whether standard procedures and timelines are being followed vs falling behind
 
-Flag any misalignment: e.g. a deliverable is overdue but the corresponding ClickUp task doesn't exist, or a client's contract calls for a monthly report but none is scheduled.
-Overdue deliverables are HIGH PRIORITY — these are contractual obligations.`,
+Cross-reference ALL layers and flag misalignment:
+- Deliverable overdue but no ClickUp task exists for it
+- Client call on calendar but no prep tasks in ClickUp
+- SOP says weekly optimization should happen today but no task is scheduled
+- Client onboarding falling behind the standard timeline
+- Recurring deliverable (monthly report, creative refresh) is missing
+
+Overdue deliverables and SOP violations are HIGH PRIORITY — these are contractual obligations.`,
 
   performanceAnalysis: `You are a senior PPC analyst reviewing campaign performance data.
 Identify anomalies, trends, and optimization opportunities.
@@ -169,6 +177,12 @@ Summary: ${data.deliverableSummary || 'No deliverables tracked yet'}
 Overdue Deliverables: ${data.overdueDeliverables || 'None'}
 Due This Week: ${data.upcomingDeliverables || 'None'}
 
+## Team Calendar (Today)
+${data.todayCalendar || 'No calendar events (not configured yet)'}
+
+## SOP Compliance
+${data.sopCompliance || 'No SOP gaps detected'}
+
 ## Budget Pacing
 ${data.budgetPacing}
 
@@ -177,11 +191,13 @@ ${data.budgetPacing}
 
 Provide:
 1. Overall health score (1-10) with emoji
-2. Top 3 urgent items requiring attention (include overdue deliverables!)
-3. Performance highlights
-4. Contractual deliverable status — what's overdue, what's due soon, any gaps between ClickUp tasks and contractual obligations
-5. Issues needing attention
-6. Budget summary
+2. Top 3 urgent items requiring attention (include overdue deliverables and SOP violations!)
+3. Today's calendar highlights — client calls that need prep, internal meetings
+4. Performance highlights
+5. Contractual deliverable status — what's overdue, what's due soon, any gaps between ClickUp tasks and contractual obligations
+6. SOP compliance — any procedures falling behind standard timelines
+7. Issues needing attention
+8. Budget summary
 Keep it concise for WhatsApp delivery.`,
 
   performanceCheck: (data) => `Analyze these campaign metrics for anomalies:

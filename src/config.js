@@ -25,6 +25,7 @@ const envSchema = z.object({
   GOOGLE_APPLICATION_CREDENTIALS: z.string().optional().default(''),
   GOOGLE_DRIVE_ROOT_FOLDER_ID: z.string().optional().default(''),
   GOOGLE_SHEETS_REPORTS_ID: z.string().optional().default(''),
+  GOOGLE_CALENDAR_IDS: z.string().optional().default(''),
 
   // HubSpot
   HUBSPOT_ACCESS_TOKEN: z.string().optional().default(''),

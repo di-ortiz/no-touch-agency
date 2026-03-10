@@ -7,6 +7,8 @@ import * as googleAds from '../api/google-ads.js';
 import * as tiktokAds from '../api/tiktok-ads.js';
 import { getAllClients, getOverdueDeliverables, getUpcomingDeliverables, getDeliverableSummary } from '../services/knowledge-base.js';
 import { getCostSummary } from '../services/cost-tracker.js';
+import * as googleCalendar from '../api/google-calendar.js';
+import { runComplianceAudit, formatComplianceForBriefing } from '../services/sop-registry.js';
 import { SYSTEM_PROMPTS, USER_PROMPTS } from '../prompts/templates.js';
 
 const log = logger.child({ workflow: 'morning-briefing' });
@@ -125,6 +127,22 @@ export async function runMorningBriefing() {
     log.warn('Failed to get deliverables data', { error: e.message });
   }
 
+  // 3b. Google Calendar — today's team schedule
+  let todayEvents = [];
+  try {
+    todayEvents = await googleCalendar.getTodayEvents();
+  } catch (e) {
+    log.warn('Failed to get calendar events', { error: e.message });
+  }
+
+  // 3c. SOP compliance audit
+  let complianceReport = { overallGaps: [], criticalCount: 0, warningCount: 0 };
+  try {
+    complianceReport = runComplianceAudit();
+  } catch (e) {
+    log.warn('Failed to run SOP compliance audit', { error: e.message });
+  }
+
   // 4. Format platform data for Claude
   let platformSummary = '';
   for (const client of results.platformData) {
@@ -154,6 +172,12 @@ export async function runMorningBriefing() {
     : 'None';
   const delSummaryStr = `Overdue: ${deliverableSummary.overdue || 0} | Due this week: ${deliverableSummary.dueThisWeek || 0} | In progress: ${deliverableSummary.inProgress || 0} | Blocked: ${deliverableSummary.blocked || 0}`;
 
+  // 6b. Format calendar for Claude
+  const calendarStr = googleCalendar.formatScheduleForBriefing(todayEvents);
+
+  // 6c. Format SOP compliance for Claude
+  const sopComplianceStr = formatComplianceForBriefing(complianceReport);
+
   // 7. Ask Claude to generate the briefing
   const promptData = {
     platformPerformance: platformSummary || 'No data available yet',
@@ -163,6 +187,8 @@ export async function runMorningBriefing() {
     overdueDeliverables: overdueDelStr,
     upcomingDeliverables: upcomingDelStr,
     deliverableSummary: delSummaryStr,
+    todayCalendar: calendarStr,
+    sopCompliance: sopComplianceStr,
     budgetPacing: results.budgetIssues.length > 0 ? results.budgetIssues.join('\n') : 'All budgets within normal range',
     activeCampaigns: results.platformData.reduce((sum, c) => sum + Object.keys(c.platforms).length, 0),
     activeClients: clients.length,
