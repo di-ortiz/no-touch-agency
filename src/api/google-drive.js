@@ -305,13 +305,31 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
 export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
   // Always download the image (needed for both Drive upload and WhatsApp direct send)
   let imageBuffer, mimeType;
-  try {
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    imageBuffer = Buffer.from(response.data);
-    mimeType = response.headers['content-type'] || 'image/png';
-  } catch (e) {
-    log.warn('Failed to download image from URL', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
-    return null;
+
+  // Handle base64 data URIs (e.g. from Gemini Imagen 3)
+  if (typeof imageUrl === 'string' && imageUrl.startsWith('data:')) {
+    try {
+      const mimeMatch = imageUrl.match(/^data:(image\/[\w+]+);base64,/);
+      mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+      const base64 = imageUrl.replace(/^data:[^;]+;base64,/, '');
+      imageBuffer = Buffer.from(base64, 'base64');
+      if (imageBuffer.length < 100) {
+        log.warn('Base64 image too small, skipping Drive upload', { size: imageBuffer.length });
+        return null;
+      }
+    } catch (e) {
+      log.warn('Failed to decode base64 image', { error: e.message });
+      return null;
+    }
+  } else {
+    try {
+      const response = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      imageBuffer = Buffer.from(response.data);
+      mimeType = response.headers['content-type'] || 'image/png';
+    } catch (e) {
+      log.warn('Failed to download image from URL', { error: e.message, imageUrl: imageUrl?.slice(0, 80) });
+      return null;
+    }
   }
 
   const drive = getDrive();

@@ -85,6 +85,10 @@ function isFallbackError(error) {
   if (status === 401 || status === 403) return true;
   if (msg.includes('api_key') || msg.includes('not configured') || msg.includes('unauthorized')) return true;
 
+  // Not found — model endpoint may have changed or been deprecated
+  if (status === 404) return true;
+  if (msg.includes('not found') || msg.includes('404') || msg.includes('does not exist')) return true;
+
   // Safety / content policy (different providers handle different content)
   if (msg.includes('safety') || msg.includes('content_policy') || msg.includes('blocked')) return true;
 

@@ -1754,16 +1754,45 @@ Return ONLY the JSON array, no other text.`;
       const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
 
       // Use the image router with smart fallback across DALL-E 3, Flux Pro, Imagen 3
-      const images = await imageRouter.generateAdImages({
-        prompt: imagePrompt,
-        platform: toolInput.platform,
-        formats,
-        quality: 'hd',
-        style: 'natural',
-        preferred: toolInput.preferredProvider,
-        workflow: 'ad-image-generation',
-        clientId: client?.id,
-      });
+      let images;
+      try {
+        images = await imageRouter.generateAdImages({
+          prompt: imagePrompt,
+          platform: toolInput.platform,
+          formats,
+          quality: 'hd',
+          style: 'natural',
+          preferred: toolInput.preferredProvider,
+          workflow: 'ad-image-generation',
+          clientId: client?.id,
+        });
+      } catch (genError) {
+        log.error('Image generation failed across all providers', { error: genError.message });
+        const status = imageRouter.getProviderStatus();
+        const statusSummary = Object.entries(status)
+          .map(([k, v]) => `${k}: ${v.configured ? (v.coolingDown ? 'cooling down' : 'configured') : 'not configured'}`)
+          .join(', ');
+        return {
+          error: `Image generation failed: ${genError.message}`,
+          providerStatus: statusSummary,
+          suggestion: 'Check that at least one image provider API key is valid and the service is available. Provider status: ' + statusSummary,
+        };
+      }
+
+      // Check if any images were actually generated
+      const successfulImages = images.filter(i => !i.error && i.url);
+      if (successfulImages.length === 0) {
+        const errors = images.map(i => `${i.format}: ${i.error}`).join('; ');
+        const status = imageRouter.getProviderStatus();
+        const statusSummary = Object.entries(status)
+          .map(([k, v]) => `${k}: ${v.configured ? (v.coolingDown ? 'cooling down' : 'configured') : 'not configured'}`)
+          .join(', ');
+        return {
+          error: `All image formats failed to generate. Errors: ${errors}`,
+          providerStatus: statusSummary,
+          suggestion: 'The configured image providers may be experiencing issues. Try again in a few minutes or check API key validity.',
+        };
+      }
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
       // Runs ALL uploads in parallel to avoid sequential 10s+ waits per image
