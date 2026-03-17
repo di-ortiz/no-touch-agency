@@ -1,17 +1,18 @@
 import axios from 'axios';
 import logger from '../utils/logger.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
-import * as firecrawl from './firecrawl.js';
+// Use named imports to avoid ESM namespace object resolution quirks
+import { isConfigured as firecrawlIsConfigured, scrape as firecrawlScrape } from './firecrawl.js';
 
 const log = logger.child({ platform: 'web-scraper' });
 
 /**
  * Safe wrapper — returns true only when firecrawl module is loaded AND API key is set.
- * Defends against module resolution quirks where firecrawl.isConfigured may be undefined.
+ * Uses named import to avoid ESM namespace object issues.
  */
 function isFirecrawlReady() {
   try {
-    return typeof firecrawl.isConfigured === 'function' ? firecrawl.isConfigured() : false;
+    return typeof firecrawlIsConfigured === 'function' ? firecrawlIsConfigured() : false;
   } catch {
     return false;
   }
@@ -68,7 +69,7 @@ async function fetchWithFirecrawl(url, opts = {}) {
   const formats = ['markdown'];
   if (opts.includeLinks) formats.push('links');
 
-  const result = await firecrawl.scrape(url, { formats });
+  const result = await firecrawlScrape(url, { formats });
   const md = result.markdown || '';
   const meta = result.metadata || {};
 

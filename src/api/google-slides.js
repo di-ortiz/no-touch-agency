@@ -11,6 +11,19 @@ let auth;
 let slidesClient;
 let driveClient;
 
+// Cooldown for persistent permission errors
+let _slidesCooldownUntil = 0;
+const SLIDES_COOLDOWN_MS = 10 * 60 * 1000;
+
+function isSlidesCoolingDown() {
+  return Date.now() < _slidesCooldownUntil;
+}
+
+function activateSlidesCooldown(errorMsg) {
+  _slidesCooldownUntil = Date.now() + SLIDES_COOLDOWN_MS;
+  log.warn('Google Slides cooldown activated — skipping operations for 10 minutes', { error: errorMsg });
+}
+
 function getAuth() {
   if (!auth) {
     const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
@@ -69,35 +82,47 @@ const COLORS = {
  * Create a new presentation.
  */
 export async function createPresentation(title, folderId) {
+  if (isSlidesCoolingDown()) {
+    throw new Error('Google Slides is temporarily unavailable due to permission issues. The service account may need Google Slides API enabled or domain-wide delegation configured.');
+  }
+
   const slides = getSlides();
   const drive = getDrive();
   if (!slides || !drive) return null;
 
-  return rateLimited('google', () =>
-    retry(async () => {
-      const res = await slides.presentations.create({
-        requestBody: { title },
-      });
-
-      const presentationId = res.data.presentationId;
-
-      // Move to folder if specified
-      if (folderId) {
-        const file = await drive.files.get({ fileId: presentationId, fields: 'parents' });
-        const previousParents = file.data.parents?.join(',') || '';
-        await drive.files.update({
-          fileId: presentationId,
-          addParents: folderId,
-          removeParents: previousParents,
-          fields: 'id, parents',
+  try {
+    return await rateLimited('google', () =>
+      retry(async () => {
+        const res = await slides.presentations.create({
+          requestBody: { title },
         });
-      }
 
-      const url = `https://docs.google.com/presentation/d/${presentationId}/edit`;
-      log.info(`Created presentation: ${title}`, { presentationId });
-      return { presentationId, url };
-    }, { retries: 3, label: 'Google Slides create' })
-  );
+        const presentationId = res.data.presentationId;
+
+        // Move to folder if specified
+        if (folderId) {
+          const file = await drive.files.get({ fileId: presentationId, fields: 'parents' });
+          const previousParents = file.data.parents?.join(',') || '';
+          await drive.files.update({
+            fileId: presentationId,
+            addParents: folderId,
+            removeParents: previousParents,
+            fields: 'id, parents',
+          });
+        }
+
+        const url = `https://docs.google.com/presentation/d/${presentationId}/edit`;
+        log.info(`Created presentation: ${title}`, { presentationId });
+        return { presentationId, url };
+      }, { retries: 1, label: 'Google Slides create' })
+    );
+  } catch (e) {
+    const msg = e.message || '';
+    if (msg.includes('not have permission') || msg.includes('caller does not have')) {
+      activateSlidesCooldown(msg);
+    }
+    throw e;
+  }
 }
 
 /**

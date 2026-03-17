@@ -42,7 +42,7 @@ import * as creativeEngine from '../services/creative-engine.js';
 import * as imageOverlay from '../services/image-overlay.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
-import * as firecrawlApi from '../api/firecrawl.js';
+import { isConfigured as _firecrawlIsConfigured, scrape as firecrawlScrape, crawl as firecrawlCrawl, search as firecrawlSearch, map as firecrawlMap } from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
 import * as seoAdvanced from '../services/seo-advanced.js';
 import * as ppcKnowledge from '../services/ppc-knowledge.js';
@@ -65,6 +65,15 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
 const log = logger.child({ workflow: 'whatsapp-command' });
+
+// Safe firecrawl check — caches result to avoid ESM namespace resolution issues
+function isFirecrawlConfigured() {
+  try {
+    return typeof _firecrawlIsConfigured === 'function' ? _firecrawlIsConfigured() : false;
+  } catch {
+    return false;
+  }
+}
 
 // Token regex: matches both legacy 12-char hex tokens AND UUID v4 format
 const TOKEN_RE_START = /^\/start\s+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{12})$/i;
@@ -418,9 +427,9 @@ async function extractMetaAdImages(snapshotUrl) {
  * Returns the screenshot data (base64 data URL or hosted URL), or null if failed.
  */
 async function captureScreenshot(url) {
-  if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) return null;
+  if (!isFirecrawlConfigured()) return null;
   try {
-    const result = await firecrawlApi.scrape(url, {
+    const result = await firecrawlScrape(url, {
       formats: ['screenshot'],
       waitFor: 3000,
       timeout: 10000,
@@ -2409,7 +2418,7 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'crawl_website': {
-      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
+      if (!isFirecrawlConfigured()) {
         return { error: 'Website crawling is not available — Firecrawl API key is not configured.' };
       }
       try {
@@ -2421,7 +2430,7 @@ Return ONLY the JSON array, no other text.`;
         if (toolInput.includePaths) crawlOpts.includePaths = toolInput.includePaths.split(',').map(p => p.trim());
         if (toolInput.excludePaths) crawlOpts.excludePaths = toolInput.excludePaths.split(',').map(p => p.trim());
 
-        const result = await firecrawlApi.crawl(toolInput.url, crawlOpts);
+        const result = await firecrawlCrawl(toolInput.url, crawlOpts);
         return {
           totalPages: result.totalPages,
           pages: result.pages.map(p => ({
@@ -2439,11 +2448,11 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'search_web': {
-      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
+      if (!isFirecrawlConfigured()) {
         return { error: 'Web search is not available — Firecrawl API key is not configured.' };
       }
       try {
-        const searchResult = await firecrawlApi.search(toolInput.query, {
+        const searchResult = await firecrawlSearch(toolInput.query, {
           limit: Math.min(toolInput.limit || 5, 10),
           lang: toolInput.lang || 'en',
           country: toolInput.country || 'us',
@@ -2465,11 +2474,11 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'map_website': {
-      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
+      if (!isFirecrawlConfigured()) {
         return { error: 'Website mapping is not available — Firecrawl API key is not configured.' };
       }
       try {
-        const mapResult = await firecrawlApi.map(toolInput.url, {
+        const mapResult = await firecrawlMap(toolInput.url, {
           limit: toolInput.limit || 100,
           search: toolInput.search || undefined,
         });

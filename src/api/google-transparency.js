@@ -1,5 +1,5 @@
 import logger from '../utils/logger.js';
-import * as firecrawl from './firecrawl.js';
+import { isConfigured as firecrawlIsConfigured, scrape as firecrawlScrape, search as firecrawlSearch } from './firecrawl.js';
 
 const log = logger.child({ platform: 'google-transparency' });
 
@@ -40,7 +40,7 @@ function buildTransparencyUrl(query, region) {
  * Extracts ALL images found in the page as ad creatives.
  */
 async function scrapeTransparencyPage(url) {
-  const result = await firecrawl.scrape(url, {
+  const result = await firecrawlScrape(url, {
     formats: ['markdown', 'screenshot'],
     waitFor: 8000, // Extra time for ad thumbnails to render
     timeout: 20000,
@@ -75,7 +75,7 @@ export async function searchAdvertiser(opts = {}) {
   const region = opts.region || '';
   const transparencyUrl = buildTransparencyUrl(query, region);
 
-  if (typeof firecrawl.isConfigured !== 'function' || !firecrawl.isConfigured()) {
+  if (typeof firecrawlIsConfigured !== 'function' || !firecrawlIsConfigured()) {
     return {
       advertisers: [],
       query,
@@ -127,7 +127,7 @@ export async function searchAdvertiser(opts = {}) {
   try {
     log.info('Searching web for advertiser transparency page', { query });
 
-    const searchResults = await firecrawl.search(
+    const searchResults = await firecrawlSearch(
       `"${query}" site:adstransparency.google.com`,
       { limit: 5 }
     );
@@ -189,7 +189,7 @@ export async function searchAdvertiser(opts = {}) {
 export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
   if (!advertiserUrl) throw new Error('Advertiser URL is required');
 
-  if (typeof firecrawl.isConfigured !== 'function' || !firecrawl.isConfigured()) {
+  if (typeof firecrawlIsConfigured !== 'function' || !firecrawlIsConfigured()) {
     return {
       creatives: [],
       totalFound: 0,

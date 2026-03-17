@@ -11,6 +11,32 @@ const log = logger.child({ platform: 'whatsapp' });
 const GRAPH_API_BASE = 'https://graph.facebook.com/v21.0';
 
 /**
+ * Check if a WhatsApp API error is retryable.
+ * Non-retryable: re-engagement (131047), invalid recipient, template errors.
+ */
+function isRetryableWhatsAppError(error) {
+  const status = error.response?.status;
+  const data = error.response?.data?.error;
+  const code = data?.code;
+
+  // Non-retryable WhatsApp-specific errors
+  if (code === 131047) return false; // Re-engagement: user hasn't messaged in 24h
+  if (code === 131026) return false; // Message undeliverable (invalid number)
+  if (code === 131021) return false; // Recipient not on WhatsApp
+  if (code === 131009) return false; // Parameter missing/invalid
+  if (code === 131051) return false; // Unsupported message type
+  if (code === 131053) return false; // Media download/upload error (permanent)
+  if (status === 400) return false;  // Bad request (won't change on retry)
+  if (status === 401) return false;  // Unauthorized
+
+  // Retryable: rate limits, server errors, network errors
+  if (status === 429) return true;
+  if (status >= 500) return true;
+  if (!error.response) return true; // Network error
+  return false;
+}
+
+/**
  * Send a WhatsApp text message via Meta Cloud API.
  * @param {string} message - Message text (supports WhatsApp formatting: *bold*, _italic_, ```code```)
  * @param {string} [to] - Recipient number (defaults to OWNER). Use raw number without 'whatsapp:' prefix.
@@ -52,6 +78,7 @@ export async function sendWhatsApp(message, to) {
       }, {
         retries: 3,
         label: 'WhatsApp send',
+        shouldRetry: isRetryableWhatsAppError,
       });
     });
   }
@@ -197,7 +224,7 @@ export async function sendWhatsAppImageDirect(imageUrl, caption, to) {
       recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
       log.debug('WhatsApp image sent via direct upload', { to: recipient, mediaId });
       return result.data;
-    }, { retries: 2, label: 'WhatsApp image send (direct)' })
+    }, { retries: 2, label: 'WhatsApp image send (direct)', shouldRetry: isRetryableWhatsAppError })
   );
 }
 
@@ -235,7 +262,7 @@ export async function sendWhatsAppImage(imageUrl, caption, to) {
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
         log.debug('WhatsApp image sent via link', { to: recipient });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp image send (link)' });
+      }, { retries: 2, label: 'WhatsApp image send (link)', shouldRetry: isRetryableWhatsAppError });
     });
   } catch (linkError) {
     log.warn('WhatsApp image send failed completely', { error: linkError.message, url: imageUrl?.slice(0, 100) });
@@ -265,7 +292,7 @@ export async function sendWhatsAppVideo(videoUrl, caption, to) {
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
         log.debug('WhatsApp video sent', { to: recipient });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp video send' });
+      }, { retries: 2, label: 'WhatsApp video send', shouldRetry: isRetryableWhatsAppError });
     });
   } catch (error) {
     log.warn('WhatsApp video send failed, falling back to text URL', { error: error.message });
@@ -295,7 +322,7 @@ export async function sendWhatsAppDocument(documentUrl, filename, caption, to) {
         recordCost({ platform: 'whatsapp-cloud', workflow: 'whatsapp-media', costCentsOverride: 0.5 });
         log.debug('WhatsApp document sent', { to: recipient, filename });
         return result.data;
-      }, { retries: 2, label: 'WhatsApp document send' });
+      }, { retries: 2, label: 'WhatsApp document send', shouldRetry: isRetryableWhatsAppError });
     });
   } catch (error) {
     log.warn('WhatsApp document send failed, falling back to text URL', { error: error.message });

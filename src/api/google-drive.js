@@ -14,6 +14,25 @@ let auth;
 let driveClient;
 let docsClient;
 
+// Cooldown for persistent permission/quota errors — avoids spamming Google API
+let _driveCooldownUntil = 0;
+const DRIVE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+function isDriveCoolingDown() {
+  return Date.now() < _driveCooldownUntil;
+}
+
+function activateDriveCooldown(errorMsg) {
+  _driveCooldownUntil = Date.now() + DRIVE_COOLDOWN_MS;
+  log.warn('Google Drive cooldown activated — skipping uploads for 10 minutes', { error: errorMsg });
+}
+
+function isPermanentDriveError(msg) {
+  const lower = (msg || '').toLowerCase();
+  return lower.includes('storage quota') || lower.includes('not have permission') ||
+    lower.includes('caller does not have') || lower.includes('oauth delegation');
+}
+
 function getAuth() {
   if (!auth) {
     const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
@@ -333,8 +352,8 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
   }
 
   const drive = getDrive();
-  if (!drive) {
-    // No Google Drive configured — still return the buffer for WhatsApp direct upload
+  if (!drive || isDriveCoolingDown()) {
+    // No Google Drive configured or cooling down — still return the buffer for WhatsApp direct upload
     return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
   }
 
@@ -375,6 +394,10 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
     return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink, imageBuffer, mimeType };
   } catch (e) {
     log.warn('Failed to persist image to Google Drive (buffer still available)', { error: e.message });
+    // Activate cooldown for permanent errors to stop spamming the API
+    if (isPermanentDriveError(e.message)) {
+      activateDriveCooldown(e.message);
+    }
     // Drive upload failed but we still have the buffer for WhatsApp direct upload
     return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType };
   }

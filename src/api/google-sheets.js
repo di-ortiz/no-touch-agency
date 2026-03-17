@@ -11,6 +11,19 @@ let auth;
 let sheetsClient;
 let driveClient;
 
+// Cooldown for persistent permission errors
+let _sheetsCooldownUntil = 0;
+const SHEETS_COOLDOWN_MS = 10 * 60 * 1000;
+
+function isSheetsCoolingDown() {
+  return Date.now() < _sheetsCooldownUntil;
+}
+
+function activateSheetsCooldown(errorMsg) {
+  _sheetsCooldownUntil = Date.now() + SHEETS_COOLDOWN_MS;
+  log.warn('Google Sheets cooldown activated — skipping operations for 10 minutes', { error: errorMsg });
+}
+
 function getAuth() {
   if (!auth) {
     const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
@@ -57,40 +70,52 @@ function getDrive() {
 // --- Create Spreadsheet ---
 
 export async function createSpreadsheet(title, folderId) {
+  if (isSheetsCoolingDown()) {
+    throw new Error('Google Sheets is temporarily unavailable due to permission issues. The service account may need Google Sheets API enabled or domain-wide delegation configured.');
+  }
+
   const sheets = getSheets();
   const drive = getDrive();
   if (!sheets || !drive) return null;
 
-  return rateLimited('google', () =>
-    retry(async () => {
-      const res = await sheets.spreadsheets.create({
-        requestBody: {
-          properties: { title },
-        },
-      });
-
-      const spreadsheetId = res.data.spreadsheetId;
-      const url = res.data.spreadsheetUrl;
-
-      // Move to folder if specified
-      if (folderId) {
-        const file = await drive.files.get({
-          fileId: spreadsheetId,
-          fields: 'parents',
+  try {
+    return await rateLimited('google', () =>
+      retry(async () => {
+        const res = await sheets.spreadsheets.create({
+          requestBody: {
+            properties: { title },
+          },
         });
-        const previousParents = file.data.parents?.join(',') || '';
-        await drive.files.update({
-          fileId: spreadsheetId,
-          addParents: folderId,
-          removeParents: previousParents,
-          fields: 'id, parents',
-        });
-      }
 
-      log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
-      return { spreadsheetId, url };
-    }, { retries: 3, label: 'Google Sheets create' })
-  );
+        const spreadsheetId = res.data.spreadsheetId;
+        const url = res.data.spreadsheetUrl;
+
+        // Move to folder if specified
+        if (folderId) {
+          const file = await drive.files.get({
+            fileId: spreadsheetId,
+            fields: 'parents',
+          });
+          const previousParents = file.data.parents?.join(',') || '';
+          await drive.files.update({
+            fileId: spreadsheetId,
+            addParents: folderId,
+            removeParents: previousParents,
+            fields: 'id, parents',
+          });
+        }
+
+        log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
+        return { spreadsheetId, url };
+      }, { retries: 1, label: 'Google Sheets create' })
+    );
+  } catch (e) {
+    const msg = e.message || '';
+    if (msg.includes('not have permission') || msg.includes('caller does not have')) {
+      activateSheetsCooldown(msg);
+    }
+    throw e;
+  }
 }
 
 // --- Write Data ---
