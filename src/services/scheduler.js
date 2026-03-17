@@ -86,6 +86,9 @@ export function initializeSchedule(workflows) {
     eveningCostAlert,
     weeklySEOCheck,
     monthlyContentAnalysis,
+    dayBeforeConfirmation,
+    staleConfirmationCleanup,
+    contentPublisher,
   } = workflows;
 
   // Workflow 1: Morning Intelligence Briefing - 8 AM
@@ -132,6 +135,15 @@ export function initializeSchedule(workflows) {
   // SEO Monitoring - weekly check Monday 9 AM, monthly content analysis 1st Monday at 10 AM
   if (weeklySEOCheck) registerJob('weekly-seo-check', '0 9 * * 1', weeklySEOCheck);
   if (monthlyContentAnalysis) registerJob('monthly-content-analysis', '0 10 1-7 * 1', monthlyContentAnalysis);
+
+  // Content Scheduling: day-before confirmation at 9 AM BRT (12:00 UTC / ~8 AM ET)
+  if (dayBeforeConfirmation) registerJob('content-day-before-confirmation', '0 9 * * *', dayBeforeConfirmation, { timezone: 'America/Sao_Paulo' });
+
+  // Content Scheduling: auto-cancel stale confirmations at 8 AM BRT (11:00 UTC)
+  if (staleConfirmationCleanup) registerJob('content-stale-cleanup', '0 8 * * *', staleConfirmationCleanup, { timezone: 'America/Sao_Paulo' });
+
+  // Content Scheduling: publish due content every 5 minutes
+  if (contentPublisher) registerJob('content-publisher', '*/5 * * * *', contentPublisher, { timezone: 'America/Sao_Paulo' });
 
   log.info(`Initialized ${jobs.size} scheduled jobs`);
 }

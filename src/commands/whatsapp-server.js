@@ -56,6 +56,7 @@ import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
+import { handleSchedulingMessage } from '../services/content-scheduler.js';
 import axios from 'axios';
 import config from '../config.js';
 import logger from '../utils/logger.js';
@@ -4614,6 +4615,18 @@ async function handleClientMessage(from, message) {
         from,
       );
       return;
+    }
+
+    // 3.5. Try content scheduling module before passing to Sofia's main loop
+    try {
+      const schedulingHandled = await handleSchedulingMessage(message, clientContext, from, sendWhatsApp);
+      if (schedulingHandled) {
+        addToHistory(from, 'user', message, 'whatsapp');
+        addToHistory(from, 'assistant', '[Content scheduling handled]', 'whatsapp');
+        return;
+      }
+    } catch (e) {
+      log.warn('Content scheduling check failed, falling through to Sofia', { error: e.message });
     }
 
     // 4. Known client — greet by name and use context with full conversation history
