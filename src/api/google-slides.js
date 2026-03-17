@@ -90,27 +90,39 @@ export async function createPresentation(title, folderId) {
   const drive = getDrive();
   if (!slides || !drive) return null;
 
+  const targetFolder = folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
   try {
     return await rateLimited('google', () =>
       retry(async () => {
+        // Create via Drive API (supports parents at creation time) to avoid
+        // service account storage quota issues. Slides API create() doesn't
+        // support parents, so the file would be created in the SA's own storage
+        // (which has 0 bytes quota), then the move would fail.
+        if (targetFolder) {
+          const file = await drive.files.create({
+            requestBody: {
+              name: title,
+              mimeType: 'application/vnd.google-apps.presentation',
+              parents: [targetFolder],
+            },
+            fields: 'id, name, webViewLink',
+            supportsAllDrives: true,
+          });
+
+          const presentationId = file.data.id;
+          const url = file.data.webViewLink || `https://docs.google.com/presentation/d/${presentationId}/edit`;
+
+          log.info(`Created presentation: ${title}`, { presentationId });
+          return { presentationId, url };
+        }
+
+        // Fallback: no folder configured — use Slides API directly
         const res = await slides.presentations.create({
           requestBody: { title },
         });
 
         const presentationId = res.data.presentationId;
-
-        // Move to folder if specified
-        if (folderId) {
-          const file = await drive.files.get({ fileId: presentationId, fields: 'parents' });
-          const previousParents = file.data.parents?.join(',') || '';
-          await drive.files.update({
-            fileId: presentationId,
-            addParents: folderId,
-            removeParents: previousParents,
-            fields: 'id, parents',
-          });
-        }
-
         const url = `https://docs.google.com/presentation/d/${presentationId}/edit`;
         log.info(`Created presentation: ${title}`, { presentationId });
         return { presentationId, url };
@@ -118,7 +130,7 @@ export async function createPresentation(title, folderId) {
     );
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('not have permission') || msg.includes('caller does not have')) {
+    if (msg.includes('not have permission') || msg.includes('caller does not have') || msg.includes('storage quota')) {
       activateSlidesCooldown(msg);
     }
     throw e;

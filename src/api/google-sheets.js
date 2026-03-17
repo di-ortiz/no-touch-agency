@@ -78,32 +78,40 @@ export async function createSpreadsheet(title, folderId) {
   const drive = getDrive();
   if (!sheets || !drive) return null;
 
+  const targetFolder = folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
   try {
     return await rateLimited('google', () =>
       retry(async () => {
+        // Create via Drive API (supports parents at creation time) to avoid
+        // service account storage quota issues. Sheets API create() doesn't
+        // support parents, so the file would be created in the SA's own storage
+        // (which has 0 bytes quota), then the move would fail.
+        if (targetFolder) {
+          const file = await drive.files.create({
+            requestBody: {
+              name: title,
+              mimeType: 'application/vnd.google-apps.spreadsheet',
+              parents: [targetFolder],
+            },
+            fields: 'id, name, webViewLink',
+            supportsAllDrives: true,
+          });
+
+          const spreadsheetId = file.data.id;
+          const url = file.data.webViewLink || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+
+          log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
+          return { spreadsheetId, url };
+        }
+
+        // Fallback: no folder configured — use Sheets API directly
         const res = await sheets.spreadsheets.create({
-          requestBody: {
-            properties: { title },
-          },
+          requestBody: { properties: { title } },
         });
 
         const spreadsheetId = res.data.spreadsheetId;
         const url = res.data.spreadsheetUrl;
-
-        // Move to folder if specified
-        if (folderId) {
-          const file = await drive.files.get({
-            fileId: spreadsheetId,
-            fields: 'parents',
-          });
-          const previousParents = file.data.parents?.join(',') || '';
-          await drive.files.update({
-            fileId: spreadsheetId,
-            addParents: folderId,
-            removeParents: previousParents,
-            fields: 'id, parents',
-          });
-        }
 
         log.info(`Created spreadsheet: ${title}`, { spreadsheetId });
         return { spreadsheetId, url };
@@ -111,7 +119,7 @@ export async function createSpreadsheet(title, folderId) {
     );
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('not have permission') || msg.includes('caller does not have')) {
+    if (msg.includes('not have permission') || msg.includes('caller does not have') || msg.includes('storage quota')) {
       activateSheetsCooldown(msg);
     }
     throw e;

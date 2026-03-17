@@ -8,9 +8,11 @@ if (!process.env.CLICKUP_API_TOKEN || process.env.CLICKUP_API_TOKEN === 'your_cl
   }
 }
 
-// Normalize ClickUp team ID: support both CLICKUP_TEAM_ID and CLICKUP_WORKSPACE_ID
-if (!process.env.CLICKUP_TEAM_ID && process.env.CLICKUP_WORKSPACE_ID) {
+// Normalize ClickUp team ID: CLICKUP_WORKSPACE_ID takes priority (newer naming convention)
+if (process.env.CLICKUP_WORKSPACE_ID) {
   process.env.CLICKUP_TEAM_ID = process.env.CLICKUP_WORKSPACE_ID;
+} else if (!process.env.CLICKUP_TEAM_ID) {
+  // neither set — leave empty, Zod will catch it
 }
 
 const envSchema = z.object({

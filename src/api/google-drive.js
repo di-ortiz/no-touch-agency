@@ -89,6 +89,8 @@ export async function listFiles(folderId, opts = {}) {
         fields: 'files(id, name, mimeType, modifiedTime, size)',
         orderBy: 'modifiedTime desc',
         pageSize: opts.limit || 100,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
       });
       return res.data;
     }, { retries: 3, label: 'Google Drive list' })
@@ -104,6 +106,7 @@ export async function getFile(fileId) {
       const res = await drive.files.get({
         fileId,
         fields: 'id, name, mimeType, modifiedTime, size, parents',
+        supportsAllDrives: true,
       });
       return res.data;
     }, { retries: 3, label: 'Google Drive get file' })
@@ -155,6 +158,7 @@ export async function createFolder(name, parentId) {
           parents: [parentId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
         },
         fields: 'id, name',
+        supportsAllDrives: true,
       });
       log.info(`Created folder: ${name}`, { id: res.data.id });
       return res.data;
@@ -177,6 +181,7 @@ export async function createDocument(name, content, folderId) {
           parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
         },
         fields: 'id, name, webViewLink',
+        supportsAllDrives: true,
       });
 
       // Insert content
@@ -211,6 +216,7 @@ export async function uploadFile(name, content, mimeType, folderId) {
           body: content,
         },
         fields: 'id, name, webViewLink',
+        supportsAllDrives: true,
       });
       return res.data;
     }, { retries: 3, label: 'Google Drive upload' })
@@ -280,6 +286,7 @@ export async function shareFolderWithAnyone(folderId, role = 'writer') {
           type: 'anyone',
           role,
         },
+        supportsAllDrives: true,
       });
       log.info(`Shared folder ${folderId} with anyone (${role})`);
       return { folderId, shared: true, role };
@@ -304,6 +311,7 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
           emailAddress: email,
         },
         sendNotificationEmail: true,
+        supportsAllDrives: true,
       });
       log.info(`Shared folder ${folderId} with ${email} (${role})`);
       return { folderId, email, shared: true, role };
@@ -373,6 +381,7 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
             body: stream,
           },
           fields: 'id, name, webViewLink, webContentLink',
+          supportsAllDrives: true,
         });
         return res.data;
       }, { retries: 2, label: 'Google Drive upload image from URL' })
@@ -384,6 +393,7 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
         await drive.permissions.create({
           fileId: uploaded.id,
           requestBody: { type: 'anyone', role: 'reader' },
+          supportsAllDrives: true,
         });
       }, { retries: 2, label: 'Google Drive set image public' })
     );

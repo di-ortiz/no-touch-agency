@@ -37,6 +37,14 @@ function isRetryableWhatsAppError(error) {
 }
 
 /**
+ * Check if a WhatsApp error is a re-engagement error (131047).
+ * This means the user hasn't messaged in 24h and free-form messages are blocked.
+ */
+function isReEngagementError(error) {
+  return error.response?.data?.error?.code === 131047;
+}
+
+/**
  * Send a WhatsApp text message via Meta Cloud API.
  * @param {string} message - Message text (supports WhatsApp formatting: *bold*, _italic_, ```code```)
  * @param {string} [to] - Recipient number (defaults to OWNER). Use raw number without 'whatsapp:' prefix.
@@ -48,39 +56,49 @@ export async function sendWhatsApp(message, to) {
   const chunks = splitMessage(message, 4000);
 
   for (const chunk of chunks) {
-    await rateLimited('whatsapp', async () => {
-      return retry(async () => {
-        const result = await axios.post(
-          `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: recipient,
-            type: 'text',
-            text: { body: chunk },
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
-              'Content-Type': 'application/json',
+    try {
+      await rateLimited('whatsapp', async () => {
+        return retry(async () => {
+          const result = await axios.post(
+            `${GRAPH_API_BASE}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: recipient,
+              type: 'text',
+              text: { body: chunk },
             },
-          }
-        );
+            {
+              headers: {
+                Authorization: `Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
 
-        recordCost({
-          platform: 'whatsapp-cloud',
-          workflow: 'whatsapp',
-          costCentsOverride: 0.5, // ~$0.005 per message (varies by country)
+          recordCost({
+            platform: 'whatsapp-cloud',
+            workflow: 'whatsapp',
+            costCentsOverride: 0.5, // ~$0.005 per message (varies by country)
+          });
+
+          log.debug('WhatsApp sent', { messageId: result.data?.messages?.[0]?.id, to: recipient });
+          return result.data;
+        }, {
+          retries: 3,
+          label: 'WhatsApp send',
+          shouldRetry: isRetryableWhatsAppError,
         });
-
-        log.debug('WhatsApp sent', { messageId: result.data?.messages?.[0]?.id, to: recipient });
-        return result.data;
-      }, {
-        retries: 3,
-        label: 'WhatsApp send',
-        shouldRetry: isRetryableWhatsAppError,
       });
-    });
+    } catch (e) {
+      if (isReEngagementError(e)) {
+        // 131047: user hasn't messaged in 24h — WhatsApp blocks free-form messages.
+        // Log as warning (not error) and don't throw — Telegram fallback in dual() handles delivery.
+        log.warn('WhatsApp re-engagement blocked (24h window expired), message not delivered via WhatsApp', { to: recipient });
+        return; // Skip remaining chunks — all will fail with same error
+      }
+      throw e;
+    }
   }
 }
 
