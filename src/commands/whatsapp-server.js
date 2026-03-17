@@ -1803,6 +1803,11 @@ Return ONLY the JSON array, no other text.`;
 
       // Apply text overlay (headline, CTA, offer) if provided
       const hasTextOverlay = toolInput.headline || toolInput.cta || toolInput.offer;
+      if (!hasTextOverlay) {
+        log.warn('generate_ad_images called WITHOUT headline/cta overlay params — Sofia should always include these for ad creatives', {
+          clientName: toolInput.clientName, platform: toolInput.platform,
+        });
+      }
       if (hasTextOverlay) {
         try {
           log.info('Applying text overlay to generated images', {
@@ -2998,6 +3003,10 @@ Return ONLY the JSON array, no other text.`;
           status: config.GA4_PROPERTY_ID ? 'CONFIGURED' : 'NOT SET',
           affects: ['Google Analytics metrics, pages, traffic, audience'],
         },
+        firecrawl: {
+          status: config.FIRECRAWL_API_KEY ? 'CONFIGURED' : 'NOT SET',
+          affects: ['Website browsing (browse_website)', 'Website crawling (crawl_website)', 'Web search (search_web)', 'Site mapping (map_website)'],
+        },
       };
 
       const issues = [];
@@ -3005,6 +3014,7 @@ Return ONLY the JSON array, no other text.`;
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
+      if (!config.FIRECRAWL_API_KEY) issues.push('Firecrawl not configured — website browsing/crawling will use direct fetch fallback (may fail on JS-heavy sites)');
 
       return {
         checks,

@@ -21,16 +21,31 @@ export async function fetchWebpage(url, opts = {}) {
   if (!url) throw new Error('URL is required');
   if (!url.startsWith('http')) url = `https://${url}`;
 
+  let firecrawlError = null;
+
   // Try Firecrawl first (handles JS rendering, returns clean markdown)
   if (firecrawl.isConfigured()) {
     try {
       return await fetchWithFirecrawl(url, opts);
     } catch (e) {
+      firecrawlError = e.message;
       log.warn('Firecrawl scrape failed, falling back to direct fetch', { url, error: e.message });
     }
   }
 
-  return fetchWithAxios(url, opts);
+  try {
+    return await fetchWithAxios(url, opts);
+  } catch (e) {
+    // Both methods failed — throw a descriptive error
+    const reasons = [];
+    if (!firecrawl.isConfigured()) {
+      reasons.push('Firecrawl API key is not configured (direct fetch only)');
+    } else if (firecrawlError) {
+      reasons.push(`Firecrawl failed: ${firecrawlError}`);
+    }
+    reasons.push(`Direct fetch failed: ${e.message}`);
+    throw new Error(`Could not fetch ${url}. ${reasons.join('. ')}. The website may be blocking automated requests or temporarily unavailable. Try again in a moment or try a different URL.`);
+  }
 }
 
 /**
@@ -115,9 +130,16 @@ async function fetchWithAxios(url, opts = {}) {
     const response = await axios.get(url, {
       timeout: 15000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; AgencyBot/1.0)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
       },
       maxRedirects: 5,
       validateStatus: (s) => s < 500,
