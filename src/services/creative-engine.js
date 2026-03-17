@@ -204,7 +204,7 @@ export async function generateImagePrompt(opts = {}) {
 
   const response = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.imagePromptEngineer,
-    userMessage: `Write a DALL-E 3 prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). Remember to end with "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind".`,
+    userMessage: `Write a DALL-E 3 prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words).\n\nIMPORTANT COMPOSITION RULES:\n- The image will have marketing text (headline + CTA button) composited on top programmatically, so DESIGN THE COMPOSITION to accommodate text overlays\n- Leave the lower third or a clear area with darker/simpler tones where white text will be readable\n- The image should look like a PROFESSIONAL AD BACKGROUND — intentionally designed for text placement, not a standalone photo\n- End with "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind".`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1500,
     workflow: 'image-prompt-engineering',

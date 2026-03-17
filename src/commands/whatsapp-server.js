@@ -39,6 +39,7 @@ import * as imageRouter from '../api/image-router.js';
 import * as geminiApi from '../api/gemini.js';
 import * as googleSlides from '../api/google-slides.js';
 import * as creativeEngine from '../services/creative-engine.js';
+import * as imageOverlay from '../services/image-overlay.js';
 import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
 import * as firecrawlApi from '../api/firecrawl.js';
@@ -1065,8 +1066,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images from ALL available AI providers in parallel (ChatGPT gpt-image-1, Gemini Imagen 3, Flux Pro). Each provider generates its own version so the client can compare side-by-side and pick their favourite. Images are sent inline as media messages. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['openai', 'fal', 'gemini'], description: 'Preferred AI image provider (optional). All configured providers generate in parallel by default so the client can compare.' } }, required: ['clientName', 'platform', 'concept'] },
+    description: 'Generate ad creative images from ALL available AI providers in parallel (ChatGPT gpt-image-1, Gemini Imagen 3, Flux Pro). Each provider generates its own version so the client can compare side-by-side and pick their favourite. Images are sent inline as media messages. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. You can now add marketing text overlays (headline, CTA button, offer badge) directly onto the generated images — always include headline and cta when generating ad creatives.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['openai', 'fal', 'gemini'], description: 'Preferred AI image provider (optional). All configured providers generate in parallel by default so the client can compare.' }, headline: { type: 'string', description: 'Marketing headline text to overlay on the image (e.g. "Transform Your Business Today"). Keep it short and punchy — 3-8 words.' }, cta: { type: 'string', description: 'Call-to-action button text to overlay (e.g. "Book Your Audit Now", "Shop Now", "Get Started Free"). ALWAYS include this for ad creatives.' }, offer: { type: 'string', description: 'Offer/promo badge text for top-right corner (e.g. "50% OFF", "FREE AUDIT", "LIMITED TIME"). Optional but increases conversion.' }, subtext: { type: 'string', description: 'Secondary text below the headline (e.g. "Expert PPC management for growing businesses"). Optional.' }, overlayLayout: { type: 'string', enum: ['bottom', 'center', 'top', 'split'], description: 'Text overlay layout: bottom (default — text in lower third), center (text centered with dark overlay), top (text at top), split (headline top + CTA bottom)' }, overlayColors: { type: 'object', description: 'Custom overlay colors (optional). Properties: ctaBg (CTA button color, e.g. "#FF6B35"), headline (headline text color), offerBg (offer badge color).', properties: { ctaBg: { type: 'string' }, headline: { type: 'string' }, ctaText: { type: 'string' }, offerBg: { type: 'string' } } } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
     name: 'generate_ad_video',
@@ -1797,6 +1798,27 @@ Return ONLY the JSON array, no other text.`;
         };
       }
 
+      // Apply text overlay (headline, CTA, offer) if provided
+      const hasTextOverlay = toolInput.headline || toolInput.cta || toolInput.offer;
+      if (hasTextOverlay) {
+        try {
+          log.info('Applying text overlay to generated images', {
+            headline: toolInput.headline, cta: toolInput.cta, offer: toolInput.offer,
+            layout: toolInput.overlayLayout, imageCount: images.length,
+          });
+          images = await imageOverlay.applyOverlayBatch(images, {
+            headline: toolInput.headline,
+            cta: toolInput.cta,
+            offer: toolInput.offer,
+            subtext: toolInput.subtext,
+            layout: toolInput.overlayLayout || 'bottom',
+            colors: toolInput.overlayColors,
+          });
+        } catch (overlayErr) {
+          log.warn('Text overlay failed, delivering images without overlay', { error: overlayErr.message });
+        }
+      }
+
       // Download + persist images to Google Drive and keep buffers for WhatsApp direct upload
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const uploadResults = await Promise.allSettled(
@@ -1848,6 +1870,10 @@ Return ONLY the JSON array, no other text.`;
       }
 
       const providers = [...new Set(images.filter(i => i.provider && !i.error).map(i => i.providerLabel || i.provider))];
+      const overlayApplied = hasTextOverlay && images.some(i => i.hasOverlay);
+      const overlayInfo = overlayApplied
+        ? ` with text overlay (headline: "${toolInput.headline || ''}", CTA: "${toolInput.cta || ''}"${toolInput.offer ? `, offer: "${toolInput.offer}"` : ''})`
+        : '';
       const result = {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
@@ -1859,7 +1885,9 @@ Return ONLY the JSON array, no other text.`;
         providers,
         sheetUrl,
         mode: 'multi-provider',
-        message: `Generated ${successfulImages.length} image(s) from ${providers.join(', ')}. Each image is from a different AI provider — ask the client which one they prefer.`,
+        hasTextOverlay: overlayApplied,
+        overlayDetails: overlayApplied ? { headline: toolInput.headline, cta: toolInput.cta, offer: toolInput.offer, layout: toolInput.overlayLayout || 'bottom' } : null,
+        message: `Generated ${successfulImages.length} image(s) from ${providers.join(', ')}${overlayInfo}. Each image is from a different AI provider — ask the client which one they prefer.`,
       };
       // Attach image buffers for deliverMediaInline (not serialized to JSON for Claude)
       result._imageBuffers = _imageBuffers;
@@ -3614,7 +3642,9 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
 3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
 4. After delivering real images, ask if they want adjustments
+5. ALWAYS include headline and cta parameters when calling generate_ad_images — this adds professional marketing text overlays directly on the images. Write a short, punchy headline (3-8 words) and a clear CTA (e.g. "Book Now", "Get Your Free Audit", "Shop Now"). If the client mentions an offer, include the offer parameter too (e.g. "50% OFF", "FREE AUDIT").
 IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
+TEXT OVERLAY RULE: You CAN now render text directly onto images. When generating ad creatives, ALWAYS include headline and cta parameters. You no longer need to say "AI can't add text to images" — the system composites text overlays programmatically after generation. If a client asks for text on images, just include it in the headline/cta/offer/subtext parameters.
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:
@@ -4205,7 +4235,9 @@ When the client asks for ads, visuals, creatives, or mockups:
 2. Use client data from the knowledge base (brand_colors, target_audience, website, industry) to fill any gaps in the request
 3. If you truly have zero context about the brand/product, ask at most 1 quick question, then generate immediately
 4. After delivering real images, ask if they want adjustments
+5. ALWAYS include headline and cta parameters when calling generate_ad_images — this adds professional marketing text overlays directly on the images. Write a short, punchy headline (3-8 words) and a clear CTA (e.g. "Book Now", "Get Your Free Audit", "Shop Now"). If the client mentions an offer, include the offer parameter too (e.g. "50% OFF", "FREE AUDIT").
 IMAGE DELIVERY RULE: Images are AUTOMATICALLY sent as separate media messages. Do NOT include image URLs, markdown image links, or raw links in your text. Just describe what you created conversationally.
+TEXT OVERLAY RULE: You CAN now render text directly onto images. When generating ad creatives, ALWAYS include headline and cta parameters. You no longer need to say "AI can't add text to images" — the system composites text overlays programmatically after generation. If a client asks for text on images, just include it in the headline/cta/offer/subtext parameters.
 
 SEO & CONTENT DELIVERY — MANDATORY TWO-OPTION APPROVAL:
 When delivering ANY content for the client's website (blog posts, meta tags, page updates, schema markup), you MUST:

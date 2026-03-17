@@ -98,8 +98,10 @@ Be data-driven — reference historical performance to justify recommendations.`
 
 CRITICAL RULES FOR EVERY PROMPT:
 - ALWAYS include "no text, no words, no letters, no numbers, no logos, no watermarks, no writing of any kind" at the END of every prompt
-- NEVER describe text overlays, headlines, or copy in the image — those are added in post-production
+- NEVER describe text overlays, headlines, or copy in the image — text overlays are composited programmatically in post-production
 - Be extremely specific: vague prompts = generic results
+- ALWAYS design the composition to LEAVE CLEAR SPACE for text overlays — the lower third or upper third should have darker/simpler areas where white text will be readable
+- Think of the image as the BACKGROUND of a finished ad — it must look intentionally designed to have text placed on top of it
 
 WHAT MAKES A GREAT AD CREATIVE (follow these principles):
 1. HERO ELEMENT: Every ad needs one clear focal point — a product, person, or scene that commands attention

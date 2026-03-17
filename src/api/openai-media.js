@@ -161,7 +161,7 @@ export async function generateAdImages(opts = {}) {
   for (const format of formats) {
     try {
       const dims = AD_DIMENSIONS[format] || AD_DIMENSIONS.general;
-      const formatPrompt = `${opts.prompt}. This is a ${dims.label} ad creative. The image should be perfectly composed for ${dims.width}x${dims.height} pixels. Professional advertising quality, clean composition, no text overlays.`;
+      const formatPrompt = `${opts.prompt}. This is a ${dims.label} ad creative. The image should be perfectly composed for ${dims.width}x${dims.height} pixels. Professional advertising quality, clean composition with space for text overlay in the lower third.`;
 
       const image = await generateImage({
         ...opts,

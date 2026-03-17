@@ -204,7 +204,7 @@ export async function generateFromAllProviders(opts = {}) {
 
   const format = opts.format || 'general';
   const formatLabel = format.replace(/_/g, ' ');
-  const prompt = `${opts.prompt}. Professional advertising quality for ${formatLabel} format. Clean composition, no text overlays.`;
+  const prompt = `${opts.prompt}. Professional advertising quality for ${formatLabel} format. Clean composition with space for text overlay in the lower third.`;
 
   log.info(`Multi-provider generation: ${providers.length} providers for format ${format}`, {
     providers: providers.map(p => p.key),
@@ -273,7 +273,7 @@ export async function generateAdImages(opts = {}) {
       return Promise.race([
         generateImage({
           ...opts,
-          prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Clean composition, no text overlays.`,
+          prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Clean composition with space for text overlay in the lower third.`,
           format,
         }),
         new Promise((_, reject) =>
