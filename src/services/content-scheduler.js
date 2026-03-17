@@ -4,6 +4,8 @@ import {
   updateContentItem,
   findPendingApproval,
 } from '../api/supabase-content-queue.js';
+import { buildPlatformAccessStatus } from '../services/client-onboarding-flow.js';
+import { getClient } from '../services/knowledge-base.js';
 import logger from '../utils/logger.js';
 
 const log = logger.child({ service: 'content-scheduler' });
@@ -191,6 +193,30 @@ export async function handleSchedulingMessage(message, clientContext, from, send
     }
 
     await sendWhatsAppFn(preview.preview_message, from);
+
+    // Warn if platform access hasn't been granted yet
+    try {
+      const platformsNeedingAccess = { instagram: 'facebook', facebook: 'facebook', google: 'google', tiktok: 'tiktok', wordpress: 'wordpress' };
+      const credPlatform = platformsNeedingAccess[intent.platform];
+      if (credPlatform && clientContext.clientId) {
+        const client = getClient(clientContext.clientId);
+        if (client) {
+          const accessStatus = buildPlatformAccessStatus(client);
+          const hasAccess = accessStatus.granted.some(g => g.platform === credPlatform);
+          if (!hasAccess) {
+            await sendWhatsAppFn(
+              `⚠️ *Atenção:* Ainda não tenho acesso ao *${intent.platform}*. ` +
+              'Para que eu possa publicar automaticamente, preciso que você autorize o acesso via Leadsie. ' +
+              'Me peça o link de acesso quando quiser! 🔑',
+              from,
+            );
+          }
+        }
+      }
+    } catch (accessErr) {
+      log.warn('Platform access check failed during scheduling', { error: accessErr.message });
+    }
+
     return true;
   }
 

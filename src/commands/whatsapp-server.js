@@ -55,6 +55,7 @@ import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
+import * as pdfReportGenerator from '../services/pdf-report-generator.js';
 import { SYSTEM_PROMPTS } from '../prompts/templates.js';
 import { handleSchedulingMessage } from '../services/content-scheduler.js';
 import axios from 'axios';
@@ -1519,13 +1520,13 @@ const CSA_TOOLS = [
   // --- PDF Reports ---
   {
     name: 'generate_performance_pdf',
-    description: 'Generate a performance report as a Google Doc with PDF download link. Includes all metrics, campaign data, analytics, keywords, and AI analysis. Returns both editable Doc URL and PDF download link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas }' }, analytics: { type: 'object', description: 'GA4 data' }, campaigns: { type: 'array' }, topKeywords: { type: 'array' }, audienceData: { type: 'object' }, analysis: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+    description: 'Generate a branded performance report PDF and send it via WhatsApp. Includes metrics, campaign data, analytics, keywords, and AI-generated analysis. The PDF is sent directly as a document message.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas }' }, analytics: { type: 'object', description: 'GA4 data' }, campaigns: { type: 'array' }, topKeywords: { type: 'array' }, audienceData: { type: 'object' }, analysis: { type: 'string' }, recommendations: { type: 'string' }, sendTo: { type: 'string', description: 'WhatsApp number to send the PDF to (defaults to owner)' } }, required: ['clientName'] },
   },
   {
     name: 'generate_competitor_pdf',
-    description: 'Generate a competitor analysis report as a Google Doc with PDF download link. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array' }, keywordGap: { type: 'array' }, competitorAds: { type: 'array' }, summary: { type: 'string' }, recommendations: { type: 'string' } }, required: ['clientName'] },
+    description: 'Generate a branded competitor analysis PDF and send it via WhatsApp. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations. The PDF is sent directly as a document message.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array' }, keywordGap: { type: 'array' }, competitorAds: { type: 'array' }, summary: { type: 'string' }, recommendations: { type: 'string' }, sendTo: { type: 'string', description: 'WhatsApp number to send the PDF to (defaults to owner)' } }, required: ['clientName'] },
   },
   // --- Charts ---
   {
@@ -3256,11 +3257,9 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
-    // --- PDF Reports ---
+    // --- PDF Reports (pdfmake — no Google dependency) ---
     case 'generate_performance_pdf': {
-      const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await reportBuilder.generatePerformanceReport({
+      const buffer = await pdfReportGenerator.generatePerformancePdf({
         clientName: toolInput.clientName,
         reportType: toolInput.reportType,
         dateRange: toolInput.dateRange,
@@ -3271,26 +3270,26 @@ Return ONLY the JSON array, no other text.`;
         audienceData: toolInput.audienceData,
         analysis: toolInput.analysis,
         recommendations: toolInput.recommendations,
-        folderId,
-        clientId: client?.id,
       });
-      if (!result) return { error: 'Failed to generate report. Check Google credentials.' };
-      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      const type = toolInput.reportType || 'weekly';
+      const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_${type}_report.pdf`;
+      const caption = `📊 ${toolInput.clientName} — ${type === 'monthly' ? 'Monthly' : 'Weekly'} Performance Report`;
+      const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
+      return { clientName: toolInput.clientName, fileName, sent, message: sent ? `PDF report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
     }
     case 'generate_competitor_pdf': {
-      const client = getClient(toolInput.clientName);
-      const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await reportBuilder.generateCompetitorReport({
+      const buffer = await pdfReportGenerator.generateCompetitorPdf({
         clientName: toolInput.clientName,
         competitors: toolInput.competitors,
         keywordGap: toolInput.keywordGap,
         competitorAds: toolInput.competitorAds,
         summary: toolInput.summary,
         recommendations: toolInput.recommendations,
-        folderId,
       });
-      if (!result) return { error: 'Failed to generate competitor report. Check Google credentials.' };
-      return { clientName: toolInput.clientName, docUrl: result.docUrl, pdfUrl: result.pdfUrl, message: `Competitor report ready! Doc: ${result.docUrl} | PDF: ${result.pdfUrl}` };
+      const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_competitor_analysis.pdf`;
+      const caption = `🔍 ${toolInput.clientName} — Competitive Analysis Report`;
+      const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
+      return { clientName: toolInput.clientName, fileName, sent, message: sent ? `Competitor report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
     }
 
     // --- Charts ---
@@ -4134,6 +4133,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       'search_google_ads_transparency',
       'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
       'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
+      'generate_performance_pdf', 'generate_competitor_pdf',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -4740,6 +4740,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       'search_google_ads_transparency',
       'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
       'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
+      'generate_performance_pdf', 'generate_competitor_pdf',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)

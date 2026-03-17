@@ -991,7 +991,7 @@ export function getClientContextByPhone(phone) {
  * Compare requested platforms vs actually granted credentials to determine access status.
  * Returns { granted: [...], pending: [...], allGranted: bool }
  */
-function buildPlatformAccessStatus(client) {
+export function buildPlatformAccessStatus(client) {
   if (!client) return { granted: [], pending: [], allGranted: true };
 
   // Map platform names to the credential fields that indicate access was granted
