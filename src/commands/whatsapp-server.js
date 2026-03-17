@@ -1413,6 +1413,13 @@ const CSA_TOOLS = [
       monthlyConversions: { type: 'number', description: 'Current monthly conversion count' },
     }, required: ['platform', 'monthlyConversions'] },
   },
+  {
+    name: 'get_industry_budget',
+    description: 'Get recommended ad budget allocation by industry/business model. Returns platform split percentages, minimum monthly budget, profitability timeline, and strategy notes. Supports: ecommerce, b2bSaas, localServices, b2bEnterprise, infoProducts.',
+    input_schema: { type: 'object', properties: {
+      industry: { type: 'string', enum: ['ecommerce', 'b2bSaas', 'localServices', 'b2bEnterprise', 'infoProducts'], description: 'Business model/industry type' },
+    }, required: ['industry'] },
+  },
   // --- Client Onboarding (Leadsie) ---
   {
     name: 'create_onboarding_link',
@@ -2925,6 +2932,23 @@ Return ONLY the JSON array, no other text.`;
       return {
         ...result,
         message: `For ${result.platform} with ${result.monthlyConversions} conversions/month: recommended bidding strategy is *${result.recommended}*. ${result.note}`,
+      };
+    }
+
+    case 'get_industry_budget': {
+      const budget = ppcKnowledge.INDUSTRY_BUDGETS[toolInput.industry];
+      if (!budget) {
+        return {
+          error: `Industry "${toolInput.industry}" not found.`,
+          supported: Object.keys(ppcKnowledge.INDUSTRY_BUDGETS),
+        };
+      }
+      return {
+        industry: toolInput.industry,
+        ...budget,
+        dangerSignals: ppcKnowledge.DANGER_SIGNALS,
+        merBenchmarks: ppcKnowledge.BENCHMARKS.mer,
+        message: `Budget allocation for ${toolInput.industry}: ${Object.entries(budget.allocation).map(([k, v]) => `${k}: ${v}`).join(', ')}. Min monthly: ${budget.minMonthly}. Profitability window: ${budget.profitabilityWindow}.`,
       };
     }
 

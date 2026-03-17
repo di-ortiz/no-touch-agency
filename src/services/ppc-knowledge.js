@@ -67,9 +67,15 @@ export const BENCHMARKS = {
     textLinkAdsCPC: '70% cheaper than standard',
     messageFrequency: '1 per 30-45 days max',
   },
+  mer: {
+    ecommerce: { healthy: '3.0-5.0', haltScaling: '<3.0' },
+    note: 'MER = Total Revenue / Total Ad Spend. Platform ROAS overclaims by 20-40%. Use MER as authoritative macro metric.',
+    attributionHierarchy: '1. CRM/Backend → 2. MER Aggregation → 3. Platform Dashboards',
+  },
   microsoft: {
     cpcAdvantage: '20-35% lower than Google',
     copilotCTR: '73% higher',
+    copilotConvRate: '63% higher vs standard search',
     userClickRate: '25% more often than Google',
   },
 };
@@ -126,6 +132,57 @@ export const COMPLIANCE = {
     privacySandbox: 'Retired October 2025',
   },
 };
+
+// ============================================================
+// Industry-Specific Budget Allocation
+// ============================================================
+
+export const INDUSTRY_BUDGETS = {
+  ecommerce: {
+    allocation: { meta: '50%', googlePMax: '30%', tiktok: '15%', email: '5%' },
+    profitabilityWindow: '0-2 months',
+    minMonthly: '$3,000',
+    strategy: 'Advantage+ Sales campaigns, PMax for full funnel, TikTok for discovery',
+  },
+  b2bSaas: {
+    allocation: { google: '35-45%', linkedin: '30-40%', meta: '15-25%' },
+    profitabilityWindow: '2-4 months',
+    minMonthly: '$5,000',
+    strategy: 'Google for intent capture, LinkedIn Thought Leader Ads, Meta for retargeting',
+  },
+  localServices: {
+    allocation: { googleLSA: '40%', metaLocal: '35%', youtube: '25%' },
+    profitabilityWindow: '1-2 months',
+    minMonthly: '$2,000',
+    strategy: 'Local Service Ads for high intent, geofenced Meta/YouTube retargeting',
+  },
+  b2bEnterprise: {
+    allocation: { linkedin: '60%', googleSearch: '20%', abmDisplay: '20%' },
+    profitabilityWindow: '6-12 months',
+    minMonthly: '$10,000',
+    strategy: 'LinkedIn ABM, Google brand/intent, Display retargeting to named accounts',
+  },
+  infoProducts: {
+    allocation: { meta: '45%', youtube: '30%', tiktok: '25%' },
+    profitabilityWindow: '1-3 months',
+    minMonthly: '$2,000',
+    strategy: 'Founder-led video authority, 3-second hook optimization, tripwire funnels',
+  },
+};
+
+// ============================================================
+// Danger Signals (auto-alert thresholds)
+// ============================================================
+
+export const DANGER_SIGNALS = [
+  { signal: '20%+ CPA drift over 3-5 days', action: 'Review targeting and creative, reduce budget if trend continues' },
+  { signal: '>3 days consecutive zero conversions', action: 'Check tracking, landing page, ad approvals' },
+  { signal: 'Frequency exceeding platform threshold', action: 'Refresh creative, expand audience, cap frequency' },
+  { signal: '>30% CTR decline over 14 days', action: 'Pause fatigued creatives, launch new variants' },
+  { signal: 'CPA >3x target', action: '3x Kill Rule — pause immediately, fix before restart' },
+  { signal: 'Learning phase reset (budget/targeting change)', action: 'Wait 72 hours, avoid further changes' },
+  { signal: 'Audience overlap >30%', action: 'Consolidate ad sets, exclude overlapping segments' },
+];
 
 // ============================================================
 // Platform-Specific Quick Wins (<15 min each)
@@ -484,6 +541,8 @@ export function getPlatformSpecs(platform) {
     quickWins: QUICK_WINS[platformKey] || [],
     trackingRequirements: COMPLIANCE.trackingRequirements[platformKey] || null,
     specialCategories: COMPLIANCE.specialCategories,
+    dangerSignals: DANGER_SIGNALS,
+    merBenchmarks: BENCHMARKS.mer,
   };
 }
 
@@ -519,4 +578,6 @@ export default {
   BIDDING_LADDERS,
   COMPLIANCE,
   QUICK_WINS,
+  INDUSTRY_BUDGETS,
+  DANGER_SIGNALS,
 };
