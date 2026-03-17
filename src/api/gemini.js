@@ -74,27 +74,27 @@ export async function generateImage(opts = {}) {
     retry(async () => {
       log.info('Generating Imagen 3 image', { format, aspectRatio, prompt: opts.prompt?.slice(0, 100) });
 
+      // Gemini API uses :generateImages (not :predict which is Vertex AI)
       const response = await axios.post(
-        `${GEMINI_BASE}/models/imagen-3.0-generate-002:predict?key=${config.GEMINI_API_KEY}`,
+        `${GEMINI_BASE}/models/imagen-3.0-generate-002:generateImages?key=${config.GEMINI_API_KEY}`,
         {
-          instances: [{ prompt: opts.prompt }],
-          parameters: {
-            sampleCount: 1,
+          prompt: opts.prompt,
+          config: {
+            numberOfImages: 1,
             aspectRatio,
           },
         },
         { headers: { 'Content-Type': 'application/json' }, timeout: 60000 },
       );
 
-      const predictions = response.data?.predictions;
-      if (!predictions?.length || !predictions[0].bytesBase64Encoded) {
+      // Gemini API returns generatedImages array with image.imageBytes (base64)
+      const generatedImages = response.data?.generatedImages;
+      if (!generatedImages?.length || !generatedImages[0]?.image?.imageBytes) {
         throw new Error('No image returned from Imagen 3');
       }
 
-      // Convert base64 to a data URI (Sofia delivers via URL, but we'll upload to temporary hosting)
-      // For now, return as base64 data URI — the image router will handle upload if needed
-      const base64 = predictions[0].bytesBase64Encoded;
-      const mimeType = predictions[0].mimeType || 'image/png';
+      const base64 = generatedImages[0].image.imageBytes;
+      const mimeType = generatedImages[0].image.mimeType || 'image/png';
       const dataUri = `data:${mimeType};base64,${base64}`;
 
       const dims = ASPECT_DIMENSIONS[aspectRatio] || ASPECT_DIMENSIONS['1:1'];
