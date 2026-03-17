@@ -1,6 +1,18 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+// Normalize ClickUp token: support both CLICKUP_API_TOKEN and CLICKUP_TOKEN env vars
+if (!process.env.CLICKUP_API_TOKEN || process.env.CLICKUP_API_TOKEN === 'your_clickup_token_here') {
+  if (process.env.CLICKUP_TOKEN) {
+    process.env.CLICKUP_API_TOKEN = process.env.CLICKUP_TOKEN;
+  }
+}
+
+// Normalize ClickUp team ID: support both CLICKUP_TEAM_ID and CLICKUP_WORKSPACE_ID
+if (!process.env.CLICKUP_TEAM_ID && process.env.CLICKUP_WORKSPACE_ID) {
+  process.env.CLICKUP_TEAM_ID = process.env.CLICKUP_WORKSPACE_ID;
+}
+
 const envSchema = z.object({
   // Core AI
   ANTHROPIC_API_KEY: z.string().min(1),
@@ -23,6 +35,7 @@ const envSchema = z.object({
 
   // Google
   GOOGLE_APPLICATION_CREDENTIALS: z.string().optional().default(''),
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional().default(''),
   GOOGLE_DRIVE_ROOT_FOLDER_ID: z.string().optional().default(''),
   GOOGLE_SHEETS_REPORTS_ID: z.string().optional().default(''),
 
