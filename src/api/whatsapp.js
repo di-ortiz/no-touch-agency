@@ -10,6 +10,49 @@ const log = logger.child({ platform: 'whatsapp' });
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v21.0';
 
+// ─── 24-HOUR WINDOW TRACKING ─────────────────────────────────────────────────
+// WhatsApp Cloud API only allows free-form messages within 24h of the user's
+// last inbound message. Outside that window, error 131047 is returned.
+// Track last inbound per recipient to avoid unnecessary API calls.
+const lastInboundTimestamp = new Map(); // phone → Date.now()
+const WINDOW_MS = 23 * 60 * 60 * 1000; // 23h (1h buffer before actual 24h expiry)
+
+/**
+ * Record that a message was received FROM this phone number.
+ * Call this from the webhook handler whenever an inbound message arrives.
+ */
+export function recordInboundMessage(phone) {
+  if (!phone) return;
+  // Normalise — remove leading '+' or 'whatsapp:' prefix
+  const normalised = phone.replace(/^\+/, '').replace(/^whatsapp:/, '');
+  lastInboundTimestamp.set(normalised, Date.now());
+}
+
+/**
+ * Check if the 24h messaging window is still open for a given recipient.
+ * Returns true if we can send free-form messages, false if likely expired.
+ */
+export function isWindowOpen(phone) {
+  if (!phone) return true; // optimistic if no phone
+  const normalised = phone.replace(/^\+/, '').replace(/^whatsapp:/, '');
+  const lastTs = lastInboundTimestamp.get(normalised);
+  if (!lastTs) return false; // never received a message → window closed
+  return (Date.now() - lastTs) < WINDOW_MS;
+}
+
+/**
+ * Check if we should attempt WhatsApp delivery for a given recipient.
+ * For the owner, checks the 24h window. For other contacts, always attempts.
+ */
+function shouldAttemptWhatsApp(to) {
+  const recipient = to || config.WHATSAPP_OWNER_PHONE;
+  // Only gate outbound (scheduled) messages — if recipient == owner
+  if (recipient === config.WHATSAPP_OWNER_PHONE) {
+    return isWindowOpen(recipient);
+  }
+  return true; // For clients, always attempt (they initiated conversation)
+}
+
 /**
  * Check if a WhatsApp API error is retryable.
  * Non-retryable: re-engagement (131047), invalid recipient, template errors.
@@ -51,6 +94,12 @@ function isReEngagementError(error) {
  */
 export async function sendWhatsApp(message, to) {
   const recipient = to || config.WHATSAPP_OWNER_PHONE;
+
+  // Skip if 24h window is known to be expired (avoid unnecessary 131047 errors)
+  if (!shouldAttemptWhatsApp(to)) {
+    log.debug('Skipping WhatsApp send — 24h window expired for recipient', { to: recipient });
+    return;
+  }
 
   // WhatsApp has a 4096 char limit per message. Split if needed.
   const chunks = splitMessage(message, 4000);
@@ -368,4 +417,4 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppImageDirect, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage };
+export default { sendWhatsApp, sendWhatsAppImage, sendWhatsAppImageDirect, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia, sendAlert, sendMorningBriefing, sendApprovalRequest, sendThinkingMessage, recordInboundMessage, isWindowOpen };

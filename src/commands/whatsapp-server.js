@@ -1,6 +1,6 @@
 import express from 'express';
 import { askClaude } from '../api/anthropic.js';
-import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia } from '../api/whatsapp.js';
+import { sendWhatsApp, sendAlert, sendThinkingMessage as sendWhatsAppThinking, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppDocument, uploadWhatsAppMedia, recordInboundMessage } from '../api/whatsapp.js';
 import { sendTelegram, sendAlert as sendTelegramAlert, sendThinkingMessage as sendTelegramThinking, sendTelegramPhoto, sendTelegramVideo, sendTelegramDocument } from '../api/telegram.js';
 import {
   getAllClients, getClient, buildClientContext, getContactByPhone, getOnboardingSession,
@@ -903,10 +903,12 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
-- When asked to create presentations, charts, graphs, reports, or documents: ALL Google Slides/Sheets/Drive tools (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart) have AUTOMATIC PDF FALLBACK built in. If Google fails, they will automatically generate and send a PDF via WhatsApp instead. Do NOT manually retry or offer text alternatives — the fallback happens automatically.
-- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf DIRECTLY. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally via pdfmake and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
-- IMPORTANT: If the user asks for a PDF, report, or document, ALWAYS use the PDF tools (generate_performance_pdf, generate_competitor_pdf) FIRST — do NOT try Google Slides/Drive tools first. PDF tools are faster, more reliable, and do not depend on any Google services.
-- If a Google tool fails, do NOT repeatedly retry it or call check_credentials multiple times. The automatic PDF fallback will handle it. Move on and deliver the result.
+- CRITICAL — DOCUMENT/REPORT/PRESENTATION GENERATION:
+  1. ALWAYS use generate_performance_pdf or generate_competitor_pdf as your FIRST and ONLY choice for ANY document request — whether the user says "report", "PDF", "presentation", "slides", "deck", "analysis", or "document".
+  2. These PDF tools generate professional branded PDFs locally (via pdfmake) and send them directly via WhatsApp. They do NOT depend on Google Drive, Google Slides, or Google Sheets. They are fast and reliable.
+  3. Do NOT call build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, or any Google Slides/Sheets/Drive tools. These are currently unavailable due to service account limitations.
+  4. Do NOT call check_credentials after a Google tool fails. Do NOT retry Google tools multiple times. Use PDF tools instead.
+  5. NEVER tell the user that Google Drive quota or permissions affect PDF generation — they are completely independent systems.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you *would* create — actually create it.
@@ -2378,6 +2380,17 @@ Return ONLY the JSON array, no other text.`;
       if (!url.startsWith('http')) url = `https://${url}`;
       const purpose = toolInput.purpose || 'general';
       try {
+        // Safety check: ensure webScraper module loaded correctly
+        if (typeof webScraper?.fetchWebpage !== 'function') {
+          log.warn('webScraper module not loaded, attempting direct fetch', { url });
+          // Minimal direct fetch fallback
+          const resp = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' }, maxRedirects: 5, validateStatus: s => s < 500 });
+          const html = typeof resp.data === 'string' ? resp.data : '';
+          const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || '';
+          const desc = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*?)["']/i)?.[1] || '';
+          return { url, statusCode: resp.status, title, description: desc, bodyPreview: html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000), wordCount: 0 };
+        }
+
         if (purpose === 'creative_inspiration') {
           const analysis = await webScraper.analyzeForCreativeInspiration(url);
           return {
@@ -3649,6 +3662,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     log.info('WhatsApp message received', { from, body: body.substring(0, 100) });
 
+    // Record inbound message for 24h window tracking
+    recordInboundMessage(from);
+
     // Normalize phone numbers for comparison (strip + and leading zeros)
     const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
     const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
@@ -3771,9 +3787,12 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
-- When asked to create presentations, charts, graphs, reports, or documents, MUST call the appropriate tool. ALL Google Slides/Sheets tools have AUTOMATIC PDF FALLBACK — if Google fails, a PDF is generated and sent via WhatsApp automatically. NEVER substitute with text-based tables, ASCII art, or emoji-based charts.
-- IMPORTANT: If the user asks for a PDF, report, or document, use generate_performance_pdf or generate_competitor_pdf DIRECTLY — these are local (pdfmake) and do NOT depend on Google. They are faster and more reliable.
-- Do NOT repeatedly retry failed Google tools or call check_credentials multiple times. The automatic PDF fallback handles Google failures gracefully.
+- CRITICAL — DOCUMENT/REPORT/PRESENTATION GENERATION:
+  1. ALWAYS use generate_performance_pdf or generate_competitor_pdf as your FIRST and ONLY choice for ANY document request — whether the user says "report", "PDF", "presentation", "slides", "deck", "analysis", or "document".
+  2. These PDF tools generate professional branded PDFs locally (via pdfmake) and send them directly via WhatsApp. They do NOT depend on Google Drive, Google Slides, or Google Sheets.
+  3. Do NOT call build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, or any Google Slides/Sheets/Drive tools.
+  4. Do NOT call check_credentials after a Google tool fails. Use PDF tools instead.
+  5. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you <i>would</i> create — actually create it.
