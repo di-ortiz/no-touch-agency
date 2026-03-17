@@ -903,10 +903,10 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
-- When asked to create presentations, charts, or graphs, use Google Slides/Sheets tools (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart). NEVER substitute with text-based tables, ASCII art, or emoji-based charts.
-- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
-- If a Google Slides/Sheets/Drive tool fails due to quota or permissions, ALWAYS offer the PDF alternative (generate_performance_pdf or generate_competitor_pdf) as a fallback. PDFs do NOT require Google Drive.
-- If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
+- When asked to create presentations, charts, graphs, reports, or documents: ALL Google Slides/Sheets/Drive tools (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart) have AUTOMATIC PDF FALLBACK built in. If Google fails, they will automatically generate and send a PDF via WhatsApp instead. Do NOT manually retry or offer text alternatives — the fallback happens automatically.
+- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf DIRECTLY. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally via pdfmake and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
+- IMPORTANT: If the user asks for a PDF, report, or document, ALWAYS use the PDF tools (generate_performance_pdf, generate_competitor_pdf) FIRST — do NOT try Google Slides/Drive tools first. PDF tools are faster, more reliable, and do not depend on any Google services.
+- If a Google tool fails, do NOT repeatedly retry it or call check_credentials multiple times. The automatic PDF fallback will handle it. Move on and deliver the result.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you *would* create — actually create it.
@@ -3166,105 +3166,136 @@ Return ONLY the JSON array, no other text.`;
     case 'build_media_plan_deck': {
       const client = getClient(toolInput.clientName);
       const folderId = client?.drive_strategic_plans_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await presentationBuilder.buildMediaPlanDeck({
-        clientName: toolInput.clientName,
-        campaignName: toolInput.campaignName,
-        mediaPlan: toolInput.mediaPlan,
-        creatives: toolInput.creatives,
-        charts: toolInput.charts,
-        folderId,
-      });
-      if (!result) return { error: 'Failed to build media plan deck. Check Google credentials.' };
-
-      // Save companion Sheet to Drive
-      let sheetUrl = null;
       try {
-        const sheet = await campaignRecord.createMediaPlanRecord({
+        const result = await presentationBuilder.buildMediaPlanDeck({
           clientName: toolInput.clientName,
           campaignName: toolInput.campaignName,
           mediaPlan: toolInput.mediaPlan,
+          creatives: toolInput.creatives,
+          charts: toolInput.charts,
           folderId,
         });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create media plan record sheet', { error: e.message });
-      }
+        if (!result) throw new Error('Google Slides creation returned null');
 
-      return {
-        clientName: toolInput.clientName,
-        presentationUrl: result.url,
-        presentationId: result.presentationId,
-        sheetUrl,
-        message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
-      };
+        // Save companion Sheet to Drive
+        let sheetUrl = null;
+        try {
+          const sheet = await campaignRecord.createMediaPlanRecord({
+            clientName: toolInput.clientName,
+            campaignName: toolInput.campaignName,
+            mediaPlan: toolInput.mediaPlan,
+            folderId,
+          });
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create media plan record sheet', { error: e.message });
+        }
+
+        return {
+          clientName: toolInput.clientName,
+          presentationUrl: result.url,
+          presentationId: result.presentationId,
+          sheetUrl,
+          message: `Media plan deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        };
+      } catch (slidesError) {
+        log.warn('Google Slides failed for media plan deck, falling back to PDF', { error: slidesError.message });
+        try {
+          const mp = toolInput.mediaPlan || {};
+          const sections = [];
+          if (mp.objective) sections.push({ title: 'Campaign Objective', text: mp.objective });
+          if (mp.targetAudience) sections.push({ title: 'Target Audience', text: typeof mp.targetAudience === 'string' ? mp.targetAudience : JSON.stringify(mp.targetAudience) });
+          if (mp.channels?.length > 0) {
+            sections.push({ title: 'Channel Strategy', table: { headers: ['Channel', 'Budget', 'Objective', 'KPI'], rows: mp.channels.map(c => [c.name || c.channel || '—', `$${c.budget || '—'}`, c.objective || '—', c.kpi || '—']) } });
+          }
+          if (mp.budget) sections.push({ title: 'Budget', metrics: { 'Total Budget': `$${mp.budget.total || mp.budget}`, ...(mp.budget.monthly ? { Monthly: `$${mp.budget.monthly}` } : {}) } });
+          if (mp.timeline) sections.push({ title: 'Timeline', text: typeof mp.timeline === 'string' ? mp.timeline : JSON.stringify(mp.timeline) });
+          const buffer = await pdfReportGenerator.generateCustomPdf({
+            title: `${toolInput.clientName} — Media Plan${toolInput.campaignName ? `: ${toolInput.campaignName}` : ''}`,
+            subtitle: new Date().toLocaleDateString('pt-BR', { day: 'numeric', month: 'long', year: 'numeric' }),
+            sections,
+          });
+          const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_media_plan.pdf`;
+          const caption = `📋 ${toolInput.clientName} — Media Plan`;
+          const sendTo = toolInput.sendTo || config.WHATSAPP_OWNER_PHONE;
+          const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, sendTo);
+          return { clientName: toolInput.clientName, fileName, sent, fallbackPdf: true, message: sent ? `Google Slides unavailable — sent media plan as PDF: ${fileName}` : 'PDF generated but delivery failed.' };
+        } catch (pdfError) {
+          log.error('PDF fallback also failed for media plan deck', { error: pdfError.message });
+          return { error: `Both Google Slides and PDF generation failed: ${pdfError.message}` };
+        }
+      }
     }
     case 'build_competitor_deck': {
       const client = getClient(toolInput.clientName);
       const folderId = client?.drive_competitor_research_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await presentationBuilder.buildCompetitorDeck({
-        clientName: toolInput.clientName,
-        competitors: toolInput.competitors,
-        keywordGap: toolInput.keywordGap,
-        competitorAds: toolInput.competitorAds,
-        serpAnalysis: toolInput.serpAnalysis,
-        domainOverview: toolInput.domainOverview,
-        summary: toolInput.summary,
-        recommendations: toolInput.recommendations,
-        charts: toolInput.charts,
-        folderId,
-      });
-      if (!result) return { error: 'Failed to build competitor deck. Check Google credentials.' };
-
-      // Save companion Sheet to Drive
-      let sheetUrl = null;
       try {
-        const sheet = await campaignRecord.createCompetitorRecord({
+        const result = await presentationBuilder.buildCompetitorDeck({
           clientName: toolInput.clientName,
           competitors: toolInput.competitors,
           keywordGap: toolInput.keywordGap,
           competitorAds: toolInput.competitorAds,
+          serpAnalysis: toolInput.serpAnalysis,
           domainOverview: toolInput.domainOverview,
           summary: toolInput.summary,
           recommendations: toolInput.recommendations,
+          charts: toolInput.charts,
           folderId,
         });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create competitor record sheet', { error: e.message });
-      }
+        if (!result) throw new Error('Google Slides creation returned null');
 
-      return {
-        clientName: toolInput.clientName,
-        presentationUrl: result.url,
-        presentationId: result.presentationId,
-        sheetUrl,
-        message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
-      };
+        // Save companion Sheet to Drive
+        let sheetUrl = null;
+        try {
+          const sheet = await campaignRecord.createCompetitorRecord({
+            clientName: toolInput.clientName,
+            competitors: toolInput.competitors,
+            keywordGap: toolInput.keywordGap,
+            competitorAds: toolInput.competitorAds,
+            domainOverview: toolInput.domainOverview,
+            summary: toolInput.summary,
+            recommendations: toolInput.recommendations,
+            folderId,
+          });
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create competitor record sheet', { error: e.message });
+        }
+
+        return {
+          clientName: toolInput.clientName,
+          presentationUrl: result.url,
+          presentationId: result.presentationId,
+          sheetUrl,
+          message: `Competitor research deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        };
+      } catch (slidesError) {
+        log.warn('Google Slides failed for competitor deck, falling back to PDF', { error: slidesError.message });
+        try {
+          const buffer = await pdfReportGenerator.generateCompetitorPdf({
+            clientName: toolInput.clientName,
+            competitors: toolInput.competitors,
+            keywordGap: toolInput.keywordGap,
+            competitorAds: toolInput.competitorAds,
+            summary: toolInput.summary,
+            recommendations: toolInput.recommendations,
+          });
+          const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_competitor_analysis.pdf`;
+          const caption = `🔍 ${toolInput.clientName} — Competitive Analysis Report`;
+          const sendTo = toolInput.sendTo || config.WHATSAPP_OWNER_PHONE;
+          const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, sendTo);
+          return { clientName: toolInput.clientName, fileName, sent, fallbackPdf: true, message: sent ? `Google Slides unavailable — sent competitor analysis as PDF: ${fileName}` : 'PDF generated but delivery failed.' };
+        } catch (pdfError) {
+          log.error('PDF fallback also failed for competitor deck', { error: pdfError.message });
+          return { error: `Both Google Slides and PDF generation failed: ${pdfError.message}` };
+        }
+      }
     }
     case 'build_performance_deck': {
       const client = getClient(toolInput.clientName);
       const folderId = client?.drive_reports_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await presentationBuilder.buildPerformanceDeck({
-        clientName: toolInput.clientName,
-        reportType: toolInput.reportType,
-        dateRange: toolInput.dateRange,
-        metrics: toolInput.metrics,
-        analytics: toolInput.analytics,
-        campaigns: toolInput.campaigns,
-        topKeywords: toolInput.topKeywords,
-        audienceData: toolInput.audienceData,
-        dailyTrend: toolInput.dailyTrend,
-        analysis: toolInput.analysis,
-        recommendations: toolInput.recommendations,
-        charts: toolInput.charts,
-        folderId,
-      });
-      if (!result) return { error: 'Failed to build performance deck. Check Google credentials.' };
-
-      // Save companion Sheet to Drive
-      let sheetUrl = null;
       try {
-        const sheet = await campaignRecord.createPerformanceRecord({
+        const result = await presentationBuilder.buildPerformanceDeck({
           clientName: toolInput.clientName,
           reportType: toolInput.reportType,
           dateRange: toolInput.dateRange,
@@ -3273,22 +3304,68 @@ Return ONLY the JSON array, no other text.`;
           campaigns: toolInput.campaigns,
           topKeywords: toolInput.topKeywords,
           audienceData: toolInput.audienceData,
+          dailyTrend: toolInput.dailyTrend,
           analysis: toolInput.analysis,
           recommendations: toolInput.recommendations,
+          charts: toolInput.charts,
           folderId,
         });
-        sheetUrl = sheet?.url || null;
-      } catch (e) {
-        log.error('Failed to create performance record sheet', { error: e.message });
-      }
+        if (!result) throw new Error('Google Slides creation returned null');
 
-      return {
-        clientName: toolInput.clientName,
-        presentationUrl: result.url,
-        presentationId: result.presentationId,
-        sheetUrl,
-        message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
-      };
+        // Save companion Sheet to Drive
+        let sheetUrl = null;
+        try {
+          const sheet = await campaignRecord.createPerformanceRecord({
+            clientName: toolInput.clientName,
+            reportType: toolInput.reportType,
+            dateRange: toolInput.dateRange,
+            metrics: toolInput.metrics,
+            analytics: toolInput.analytics,
+            campaigns: toolInput.campaigns,
+            topKeywords: toolInput.topKeywords,
+            audienceData: toolInput.audienceData,
+            analysis: toolInput.analysis,
+            recommendations: toolInput.recommendations,
+            folderId,
+          });
+          sheetUrl = sheet?.url || null;
+        } catch (e) {
+          log.error('Failed to create performance record sheet', { error: e.message });
+        }
+
+        return {
+          clientName: toolInput.clientName,
+          presentationUrl: result.url,
+          presentationId: result.presentationId,
+          sheetUrl,
+          message: `Performance report deck ready: ${result.url}` + (sheetUrl ? ` | Data sheet: ${sheetUrl}` : ''),
+        };
+      } catch (slidesError) {
+        log.warn('Google Slides failed for performance deck, falling back to PDF', { error: slidesError.message });
+        try {
+          const buffer = await pdfReportGenerator.generatePerformancePdf({
+            clientName: toolInput.clientName,
+            reportType: toolInput.reportType,
+            dateRange: toolInput.dateRange,
+            metrics: toolInput.metrics,
+            analytics: toolInput.analytics,
+            campaigns: toolInput.campaigns,
+            topKeywords: toolInput.topKeywords,
+            audienceData: toolInput.audienceData,
+            analysis: toolInput.analysis,
+            recommendations: toolInput.recommendations,
+          });
+          const type = toolInput.reportType || 'weekly';
+          const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_${type}_report.pdf`;
+          const caption = `📊 ${toolInput.clientName} — ${type === 'monthly' ? 'Monthly' : 'Weekly'} Performance Report`;
+          const sendTo = toolInput.sendTo || config.WHATSAPP_OWNER_PHONE;
+          const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, sendTo);
+          return { clientName: toolInput.clientName, fileName, sent, fallbackPdf: true, message: sent ? `Google Slides unavailable — sent performance report as PDF: ${fileName}` : 'PDF generated but delivery failed.' };
+        } catch (pdfError) {
+          log.error('PDF fallback also failed for performance deck', { error: pdfError.message });
+          return { error: `Both Google Slides and PDF generation failed: ${pdfError.message}` };
+        }
+      }
     }
 
     // --- PDF Reports (pdfmake — no Google dependency) ---
@@ -3340,23 +3417,74 @@ Return ONLY the JSON array, no other text.`;
     case 'create_chart_presentation': {
       const client = getClient(toolInput.clientName);
       const folderId = client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
-      const result = await chartBuilderService.buildChartPresentation({
-        clientName: toolInput.clientName,
-        title: toolInput.title,
-        charts: toolInput.charts,
-        folderId,
-      });
-      if (!result) return { error: 'Failed to create chart presentation. Check Google credentials.' };
-      return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
+      try {
+        const result = await chartBuilderService.buildChartPresentation({
+          clientName: toolInput.clientName,
+          title: toolInput.title,
+          charts: toolInput.charts,
+          folderId,
+        });
+        if (!result) throw new Error('Google Slides chart presentation returned null');
+        return { clientName: toolInput.clientName, presentationUrl: result.url, presentationId: result.presentationId, message: `Chart presentation ready: ${result.url}` };
+      } catch (slidesError) {
+        log.warn('Google Slides failed for chart presentation, falling back to PDF', { error: slidesError.message });
+        try {
+          const sections = (toolInput.charts || []).map(chart => ({
+            title: chart.title || 'Chart Data',
+            table: {
+              headers: ['Category', ...(chart.series || []).map(s => s.name || 'Value')],
+              rows: (chart.labels || []).map((label, i) => [label, ...(chart.series || []).map(s => String(s.values?.[i] ?? '—'))]),
+            },
+          }));
+          const buffer = await pdfReportGenerator.generateCustomPdf({
+            title: toolInput.title || `${toolInput.clientName} — Charts`,
+            subtitle: new Date().toLocaleDateString('pt-BR', { day: 'numeric', month: 'long', year: 'numeric' }),
+            sections,
+          });
+          const fileName = `${(toolInput.clientName || 'charts').replace(/\s+/g, '_')}_charts.pdf`;
+          const caption = `📊 ${toolInput.clientName || 'Charts'} — Data Report`;
+          const sendTo = toolInput.sendTo || config.WHATSAPP_OWNER_PHONE;
+          const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, sendTo);
+          return { clientName: toolInput.clientName, fileName, sent, fallbackPdf: true, message: sent ? `Google Slides unavailable — sent chart data as PDF: ${fileName}` : 'PDF generated but delivery failed.' };
+        } catch (pdfError) {
+          log.error('PDF fallback also failed for chart presentation', { error: pdfError.message });
+          return { error: `Both Google Slides and PDF generation failed: ${pdfError.message}` };
+        }
+      }
     }
     case 'create_single_chart': {
-      const result = await chartBuilderService.createChart({
-        title: toolInput.title,
-        chartType: toolInput.chartType,
-        labels: toolInput.labels,
-        series: toolInput.series,
-      });
-      return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
+      try {
+        const result = await chartBuilderService.createChart({
+          title: toolInput.title,
+          chartType: toolInput.chartType,
+          labels: toolInput.labels,
+          series: toolInput.series,
+        });
+        return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
+      } catch (sheetsError) {
+        log.warn('Google Sheets failed for single chart, falling back to PDF', { error: sheetsError.message });
+        try {
+          const sections = [{
+            title: toolInput.title || 'Chart Data',
+            table: {
+              headers: ['Category', ...(toolInput.series || []).map(s => s.name || 'Value')],
+              rows: (toolInput.labels || []).map((label, i) => [label, ...(toolInput.series || []).map(s => String(s.values?.[i] ?? '—'))]),
+            },
+          }];
+          const buffer = await pdfReportGenerator.generateCustomPdf({
+            title: toolInput.title || 'Chart Data',
+            sections,
+          });
+          const fileName = `${(toolInput.title || 'chart').replace(/\s+/g, '_')}.pdf`;
+          const caption = `📊 ${toolInput.title || 'Chart Data'}`;
+          const sendTo = config.WHATSAPP_OWNER_PHONE;
+          const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, sendTo);
+          return { fileName, sent, fallbackPdf: true, message: sent ? `Google Sheets unavailable — sent chart data as PDF: ${fileName}` : 'PDF generated but delivery failed.' };
+        } catch (pdfError) {
+          log.error('PDF fallback also failed for single chart', { error: pdfError.message });
+          return { error: `Both Google Sheets and PDF generation failed: ${pdfError.message}` };
+        }
+      }
     }
 
     // --- Kimi K2.5 AI Generation ---
@@ -3643,9 +3771,9 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
-- When asked to create presentations, charts, graphs, reports, or any Google Slides/Sheets/Drive/Docs content, you MUST call the appropriate tool (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, generate_performance_pdf, generate_competitor_pdf). NEVER substitute with text-based tables, ASCII art, or emoji-based charts. The tools create REAL Google Slides with interactive charts.
-- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
-- If a Google Slides/Sheets/Drive tool fails due to quota or permissions, ALWAYS offer the PDF alternative (generate_performance_pdf or generate_competitor_pdf) as a fallback. PDFs do NOT require Google Drive.
+- When asked to create presentations, charts, graphs, reports, or documents, MUST call the appropriate tool. ALL Google Slides/Sheets tools have AUTOMATIC PDF FALLBACK — if Google fails, a PDF is generated and sent via WhatsApp automatically. NEVER substitute with text-based tables, ASCII art, or emoji-based charts.
+- IMPORTANT: If the user asks for a PDF, report, or document, use generate_performance_pdf or generate_competitor_pdf DIRECTLY — these are local (pdfmake) and do NOT depend on Google. They are faster and more reliable.
+- Do NOT repeatedly retry failed Google tools or call check_credentials multiple times. The automatic PDF fallback handles Google failures gracefully.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you <i>would</i> create — actually create it.
