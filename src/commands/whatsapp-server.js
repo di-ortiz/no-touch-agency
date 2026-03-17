@@ -45,6 +45,7 @@ import * as leadsie from '../api/leadsie.js';
 import * as firecrawlApi from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
 import * as seoAdvanced from '../services/seo-advanced.js';
+import * as ppcKnowledge from '../services/ppc-knowledge.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
@@ -227,7 +228,7 @@ const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation 
 const MEDIUM_TOOL_TIMEOUT_MS = 90 * 1000; // 90s for scraping tools that render JS pages
 const DEFAULT_TOOL_TIMEOUT_MS = 45 * 1000; // 45s for regular tools (API calls, searches)
 const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'design_landing_page', 'create_presentation', 'generate_weekly_report', 'audit_seo_comprehensive']);
-const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit', 'analyze_eeat', 'analyze_ai_search_readiness', 'audit_seo_technical', 'analyze_seo_images', 'analyze_schema_markup']);
+const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit', 'analyze_eeat', 'analyze_ai_search_readiness', 'audit_seo_technical', 'analyze_seo_images', 'analyze_schema_markup', 'audit_ppc_health']);
 // Overall loop timeout: if the entire tool-use loop takes longer than this, bail out
 const LOOP_TIMEOUT_MS = 8 * 60 * 1000; // 8 min total for all tool rounds (image gen can take 2-3 min + Drive uploads + follow-up rounds)
 
@@ -260,6 +261,9 @@ const TOOL_PROGRESS_MESSAGES = {
   analyze_seo_images: 'Analyzing image SEO...',
   analyze_schema_markup: 'Analyzing schema markup...',
   audit_seo_comprehensive: 'Running comprehensive SEO audit... This will take a minute.',
+  audit_ppc_health: 'Auditing your ad account health...',
+  get_platform_specs: 'Looking up platform specs...',
+  get_bidding_recommendation: 'Checking bidding strategy...',
 };
 
 async function executeCSAToolWithTimeout(toolName, toolInput) {
@@ -968,62 +972,73 @@ AI SEO QUALITY GATES:
 - Add "Key Takeaway" or "TL;DR" summary sections for AI extraction
 
 PPC & PAID ADVERTISING EXPERTISE:
-You are an expert in paid advertising across Meta Ads, Google Ads, TikTok Ads, and Twitter/X Ads.
+You are an expert in paid advertising across Meta Ads, Google Ads, TikTok Ads, LinkedIn Ads, Microsoft/Bing Ads, and Twitter/X Ads.
+
+PPC TOOLS AVAILABLE:
+- audit_ppc_health: Run 190+ check health audit for any ad platform (Google 74 checks, Meta 46, TikTok 25, LinkedIn 25). Returns grade A-F with critical issues and quick wins.
+- get_platform_specs: Instant lookup of creative specs, benchmarks, bidding ladders, and best practices per platform.
+- get_bidding_recommendation: Get optimal bidding strategy based on platform and conversion volume.
 
 CAMPAIGN STRUCTURE BEST PRACTICES:
-- Meta Ads: Use CBO (Campaign Budget Optimization) for scaling, ABO for testing. Advantage+ campaigns for broad prospecting. 3-5 ad sets per campaign, 3-6 ads per ad set.
-- Google Ads: Separate campaigns by match type (exact, phrase, broad). Use RSAs (Responsive Search Ads) with 15 headlines and 4 descriptions. Pin critical headlines to position 1.
-- Performance Max: Use for full-funnel automated campaigns. Provide strong asset groups (images, videos, headlines, descriptions). Set clear conversion goals.
-- TikTok: Short-form video first (15-30s). Use Spark Ads (boosted organic). Test 3-5 creatives per ad group.
+- Meta Ads: CBO for scaling, ABO for testing. Advantage+ for prospecting. 3-5 ad sets, 3-6 ads each. Learning phase: 50 conversions/week per ad set.
+- Google Ads: Separate brand vs non-brand. RSAs: 8+ headlines (30 chars), 3+ descriptions (90 chars). Ad Strength must be "Good"/"Excellent". Pin critical headline to position 1.
+- Performance Max: 20+ images (1200x628, 1200x1200, 960x1200), 5+ videos, 5+ logos, 15 headlines, 4 descriptions.
+- TikTok: 9:16 vertical ONLY (1080x1920). 15-30s. Native feel critical — corporate aesthetics = #1 killer. Spark Ads for engagement. Safe zone: keep CTA above bottom 450px. Search Ads Toggle enabled.
+- LinkedIn: Thought Leader Ads get $2.29-4.14 CPC vs $13.23 standard — allocate ≥30% budget. Lead Gen Forms ≤5 fields (13% CVR). Min $50/day budget. InMail: 1 per 30-45 days max.
+- Microsoft: 20-35% lower CPCs than Google. Copilot placement 73% higher CTR. LinkedIn targeting for B2B.
 
-BIDDING STRATEGIES:
-- Target ROAS: Use when you have 50+ conversions/month and clear revenue data
-- Target CPA: Use when optimizing for lead gen with stable conversion rates
-- Maximize Conversions: Best for new campaigns building conversion data
-- Manual CPC: Only for brand campaigns with tight budget control
-- Bid adjustments: +20-30% for mobile if mobile converts well, -100% for placements that waste budget
+GOOGLE ADS BIDDING LADDER (by monthly conversion volume):
+- <15 conversions: Maximize Clicks (cold start)
+- 15-29: Maximize Conversions (building signal)
+- 30+: Target CPA (set at 1.1-1.2x historical CPA)
+- 50+ with revenue values: Target ROAS (use exact historical ROAS)
+- Meta/TikTok: Lowest Cost (no cap) for 90% of campaigns. Cost Cap at 1.2-1.5x CPA if predictability needed.
+- NEVER deploy Smart Bidding with <15 conversions — creates unstable signals.
 
-AUDIENCE TARGETING:
-- Lookalike/Similar audiences: Start with 1% (highest quality), expand to 3-5% for scale
-- Custom audiences: Website visitors (30/60/90 day windows), email lists, video viewers
-- Interest stacking: Combine 2-3 related interests per ad set, don't over-narrow
-- Exclusions are as important as inclusions — exclude converters, bounced visitors, irrelevant demographics
-- Broad targeting with strong creative often outperforms narrow targeting (Meta's AI optimization)
+CONVERSION TRACKING (MANDATORY):
+- Meta: CAPI (server-side) + Pixel. Event Match Quality (EMQ) target ≥8.0. 87% of accounts have poor EMQ — fixing improves performance 20-40%.
+- Google: Enhanced Conversions + Consent Mode v2 (EU mandatory since July 2025).
+- TikTok: Must capture ttclid parameter and return with ALL conversion events.
+- LinkedIn: Insight Tag + Conversions API. Offline conversion imports for B2B pipeline (90-day windows).
+- Attribution hierarchy: CRM data > MER > post-purchase surveys > GA4 > platform metrics.
 
-CREATIVE BEST PRACTICES:
-- Hook in first 3 seconds (video) or top 20% of image
-- Clear value proposition above the fold
-- Social proof: testimonials, reviews, case study numbers
-- Urgency without being spammy: limited-time offers, countdown timers
-- UGC (User Generated Content) style outperforms polished studio content 2-3x on Meta and TikTok
-- Test static vs video vs carousel — each has different sweet spots by vertical
-- Creative fatigue: refresh every 2-4 weeks or when frequency >3 and CTR drops >20%
-
-QUALITY SCORE (GOOGLE ADS):
-- Expected CTR (most important), Ad Relevance, Landing Page Experience
-- Quality Score 7+ is good, 8+ is excellent. Below 5 needs immediate attention.
-- Improve with: tighter ad group themes, keyword-specific ad copy, fast landing pages, relevant content
-
-CONVERSION TRACKING & ATTRIBUTION:
-- Meta CAPI (Conversions API): Server-side tracking alongside pixel — mandatory post-iOS 14.5
-- Google Enhanced Conversions: First-party data matching for better attribution
-- UTM parameters: Consistent naming convention across all campaigns
-- Attribution windows: Meta default 7-day click / 1-day view. Google default 30-day click.
-- GA4 data-driven attribution: Uses ML to distribute credit across touchpoints
+CREATIVE FATIGUE & REFRESH:
+- Prospecting: frequency >3/week = fatigue. Retargeting: >8/week.
+- CTR drops >20% → immediate creative refresh.
+- UGC style outperforms studio 2-3x on Meta/TikTok.
+- Min 3+ creative formats per campaign (static, video, carousel).
+- Meta feed: 4:5 (1080x1350). Stories/Reels: 9:16 (1080x1920).
 
 BUDGET MANAGEMENT:
-- 70/20/10 rule: 70% proven campaigns, 20% testing, 10% experimental
-- Never increase budget more than 20% per day (Meta learning phase reset)
-- Minimum viable budget: 2x target CPA per ad set per day
-- Budget pacing: Check daily but optimize weekly — avoid knee-jerk reactions
-- Seasonal adjustments: Increase 2-4 weeks before peak season, build audience beforehand
+- 70/20/10 rule: 70% proven, 20% growth, 10% experimental.
+- 20% Rule: Never increase budget >20% at once. Wait 3-5 days between increases.
+- 3x Kill Rule: Pause anything with CPA >3x target — needs creative/targeting changes before restart.
+- Min budget: 2x target CPA per ad set per day. TikTok: 50x CPA per ad group.
+- Q4 CPMs +30-50% (reduce ROAS targets 20%). Q1 CPMs -20-30% (aggressive testing window).
+
+QUALITY SCORE (GOOGLE):
+- Expected CTR + Ad Relevance + Landing Page Experience. Target 7+ (good), 8+ (excellent). <5 needs immediate fix.
+- Negative keyword lists on ALL campaigns. Wasted spend must be <5%.
+- Location: set to "Presence" not "Presence or Interest".
+
+PLATFORM BENCHMARKS (2026):
+- Google Search: 6.66% avg CTR, $5.26 avg CPC
+- Meta Advantage+: 4.52 ROAS avg. Retargeting: 3.61 ROAS.
+- TikTok: 40-60% cheaper CPM than Meta, 5-16% engagement
+- LinkedIn: 1.13 ROAS, Text Link Ads 70% cheaper
+- Microsoft: Users click 25% more often than Google
+
+COMPLIANCE:
+- Special Ad Categories: Housing, Employment, Credit, Financial Products, Healthcare — restricted targeting.
+- Post-iOS 14.5: 35% app opt-in. Server-side tracking mandatory.
+- Google 3-strike policy system. Meta rejected 1.3B ads in 2024.
 
 OPTIMIZATION CADENCE:
-- Daily: Check delivery, spend pacing, any anomalies
-- Weekly: Review performance metrics, pause underperformers, scale winners
-- Bi-weekly: Creative refresh assessment, audience expansion
+- Daily: Delivery, spend pacing, anomalies
+- Weekly: Metrics review, pause underperformers, scale winners
+- Bi-weekly: Creative refresh, audience expansion
 - Monthly: Full account review, strategy alignment, competitor check
-- Quarterly: Channel mix optimization, budget reallocation, goal reassessment
+- Quarterly: Channel mix, budget reallocation, goal reassessment
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
@@ -1373,6 +1388,30 @@ const CSA_TOOLS = [
     input_schema: { type: 'object', properties: {
       url: { type: 'string', description: 'URL to run comprehensive SEO audit on' },
     }, required: ['url'] },
+  },
+  // --- PPC Account Health & Knowledge ---
+  {
+    name: 'audit_ppc_health',
+    description: 'Run a PPC account health audit for a specific ad platform. Scores account health across weighted categories (conversion tracking, creative quality, account structure, targeting). Covers 190+ checks across Google Ads (74 checks), Meta/Facebook Ads (46), TikTok (25), and LinkedIn (25). Returns health grade (A-F), critical issues, and quick wins. Pass any available account data (campaigns, metrics, settings) for a more accurate audit.',
+    input_schema: { type: 'object', properties: {
+      platform: { type: 'string', enum: ['google', 'meta', 'facebook', 'tiktok', 'linkedin', 'microsoft'], description: 'Ad platform to audit' },
+      accountData: { type: 'object', description: 'Account data: { campaigns, totalSpend, conversions, avgCPA, avgROAS, topKeywords, audienceTypes, creativeFormats, trackingSetup, issues }. Pass whatever data is available.' },
+    }, required: ['platform'] },
+  },
+  {
+    name: 'get_platform_specs',
+    description: 'Get creative specifications, benchmarks, bidding strategy recommendations, and quick wins for a specific ad platform. No AI call needed — instant response with exact dimensions, character limits, CPC/CTR benchmarks, and platform-specific tips. Perfect for campaign setup and creative briefing.',
+    input_schema: { type: 'object', properties: {
+      platform: { type: 'string', enum: ['google', 'meta', 'facebook', 'tiktok', 'linkedin', 'microsoft'], description: 'Ad platform' },
+    }, required: ['platform'] },
+  },
+  {
+    name: 'get_bidding_recommendation',
+    description: 'Get the optimal bidding strategy based on a platform and current monthly conversion volume. Uses data-driven bidding ladders (e.g., Google: <15 conv → Maximize Clicks, 15-29 → Maximize Conversions, 30+ → Target CPA, 50+ → Target ROAS).',
+    input_schema: { type: 'object', properties: {
+      platform: { type: 'string', enum: ['google', 'meta', 'tiktok', 'linkedin'], description: 'Ad platform' },
+      monthlyConversions: { type: 'number', description: 'Current monthly conversion count' },
+    }, required: ['platform', 'monthlyConversions'] },
   },
   // --- Client Onboarding (Leadsie) ---
   {
@@ -2860,6 +2899,35 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    // --- PPC Account Health & Knowledge ---
+    case 'audit_ppc_health': {
+      const result = await ppcKnowledge.auditPPCHealth(toolInput.platform, toolInput.accountData || {});
+      return {
+        ...result,
+        message: result.error
+          ? result.error
+          : `PPC health audit complete for ${result.platform}. Grade: ${result.grade} (${result.overallScore}/100). ${result.criticalIssues?.length || 0} critical issues. ${result.quickWins?.length || 0} quick wins identified.`,
+      };
+    }
+
+    case 'get_platform_specs': {
+      const result = ppcKnowledge.getPlatformSpecs(toolInput.platform);
+      return {
+        ...result,
+        message: result.creativeSpecs
+          ? `Here are the ${result.platform} ad specs, benchmarks, and best practices.`
+          : `Platform "${toolInput.platform}" not found. Supported: google, meta, tiktok, linkedin, microsoft.`,
+      };
+    }
+
+    case 'get_bidding_recommendation': {
+      const result = ppcKnowledge.getBiddingRecommendation(toolInput.platform, toolInput.monthlyConversions);
+      return {
+        ...result,
+        message: `For ${result.platform} with ${result.monthlyConversions} conversions/month: recommended bidding strategy is *${result.recommended}*. ${result.note}`,
+      };
+    }
+
     // --- Leadsie Onboarding ---
     case 'create_onboarding_link': {
       const platforms = toolInput.platforms
@@ -3493,13 +3561,23 @@ GEO (GENERATIVE ENGINE OPTIMIZATION):
 9. Expertise signals  10. Multi-format content
 
 PPC & PAID ADVERTISING EXPERTISE:
-- Meta Ads: CBO for scaling, ABO for testing. Advantage+ for broad prospecting. 3-5 ad sets, 3-6 ads each.
-- Google Ads: Separate by match type. RSAs with 15 headlines, 4 descriptions. Quality Score 7+ good.
-- Bidding: Target ROAS (50+ conv/mo), Target CPA (stable conv rates), Maximize Conversions (new campaigns)
-- Audiences: Lookalike 1% start, expand to 3-5%. Exclude converters. Broad + strong creative often wins.
-- Creative: Hook in 3s. UGC outperforms studio 2-3x. Refresh every 2-4 weeks or frequency >3.
-- Budget: 70/20/10 rule. Never increase >20%/day (learning phase reset). Min 2x CPA/ad set/day.
-- Attribution: Meta CAPI mandatory. Google Enhanced Conversions. GA4 data-driven attribution.
+You are an expert in paid advertising across Meta, Google, TikTok, LinkedIn, Microsoft/Bing, and Twitter/X.
+
+PPC TOOLS: audit_ppc_health (190+ checks per platform), get_platform_specs (instant specs/benchmarks), get_bidding_recommendation (optimal strategy by conversion volume).
+
+CAMPAIGN STRUCTURE:
+- Meta: CBO scaling, ABO testing. Advantage+ prospecting. 50 conv/week per ad set for learning.
+- Google: Brand vs non-brand separated. RSAs: 8+ headlines, 3+ descriptions. QS ≥7 target.
+- PMax: 20+ images, 5+ videos, 5+ logos. TikTok: 9:16 only, native feel, 15-30s.
+- LinkedIn: Thought Leader Ads ≥30% budget ($2.29 vs $13.23 CPC). Lead Forms ≤5 fields.
+
+BIDDING LADDER (Google): <15 conv → Max Clicks, 15-29 → Max Conv, 30+ → tCPA (1.1-1.2x), 50+ → tROAS.
+Meta/TikTok: Lowest Cost default. Never Smart Bid with <15 conversions.
+
+TRACKING: Meta CAPI + Pixel (EMQ ≥8.0). Google Enhanced Conv + Consent Mode v2 (EU). TikTok: capture ttclid.
+BUDGET: 70/20/10 rule. Never >20% increase/3-5 days. 3x CPA = kill. Q4 CPMs +30-50%.
+CREATIVE: Frequency >3 = fatigue. UGC 2-3x better. Min 3 formats. Refresh ≤30 days.
+BENCHMARKS: Google 6.66% CTR, Meta Adv+ 4.52 ROAS, TikTok 40-60% cheaper CPM, LinkedIn 1.13 ROAS.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
