@@ -44,6 +44,7 @@ import * as webScraper from '../api/web-scraper.js';
 import * as leadsie from '../api/leadsie.js';
 import * as firecrawlApi from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
+import * as seoAdvanced from '../services/seo-advanced.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
@@ -225,8 +226,8 @@ function trimMessagesToFit(messages) {
 const SLOW_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for image/video generation (includes multi-format + provider fallback)
 const MEDIUM_TOOL_TIMEOUT_MS = 90 * 1000; // 90s for scraping tools that render JS pages
 const DEFAULT_TOOL_TIMEOUT_MS = 45 * 1000; // 45s for regular tools (API calls, searches)
-const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'design_landing_page', 'create_presentation', 'generate_weekly_report']);
-const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit']);
+const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'design_landing_page', 'create_presentation', 'generate_weekly_report', 'audit_seo_comprehensive']);
+const MEDIUM_TOOLS = new Set(['search_google_ads_transparency', 'browse_website', 'crawl_website', 'full_seo_audit', 'analyze_eeat', 'analyze_ai_search_readiness', 'audit_seo_technical', 'analyze_seo_images', 'analyze_schema_markup']);
 // Overall loop timeout: if the entire tool-use loop takes longer than this, bail out
 const LOOP_TIMEOUT_MS = 8 * 60 * 1000; // 8 min total for all tool rounds (image gen can take 2-3 min + Drive uploads + follow-up rounds)
 
@@ -253,6 +254,12 @@ const TOOL_PROGRESS_MESSAGES = {
   generate_weekly_report: 'Generating the weekly report...',
   generate_campaign_brief: 'Creating the campaign brief...',
   run_competitor_analysis: 'Analyzing competitors...',
+  analyze_eeat: 'Analyzing E-E-A-T signals...',
+  analyze_ai_search_readiness: 'Analyzing AI search readiness...',
+  audit_seo_technical: 'Running technical SEO audit...',
+  analyze_seo_images: 'Analyzing image SEO...',
+  analyze_schema_markup: 'Analyzing schema markup...',
+  audit_seo_comprehensive: 'Running comprehensive SEO audit... This will take a minute.',
 };
 
 async function executeCSAToolWithTimeout(toolName, toolInput) {
@@ -901,6 +908,123 @@ TEXT OVERLAY CAPABILITY (NOT A LIMITATION): This system adds headline, CTA butto
 
 IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
 
+SEO & AI SEARCH OPTIMIZATION EXPERTISE:
+You have advanced SEO skills. When asked about SEO, use these tools and knowledge:
+
+TOOLS AVAILABLE:
+- analyze_eeat: E-E-A-T analysis (Experience 20%, Expertise 25%, Authoritativeness 25%, Trustworthiness 30%)
+- analyze_ai_search_readiness: GEO (Generative Engine Optimization) — AI search readiness for Google AI Overviews, ChatGPT, Perplexity
+- audit_seo_technical: 9-category deep technical audit (crawlability, indexability, security, URLs, mobile, CWV, structured data, JS rendering, AI crawlers)
+- analyze_seo_images: Image SEO (alt text, formats, sizes, lazy loading, CLS prevention)
+- analyze_schema_markup: Schema.org detection, validation, and recommendations
+- audit_seo_comprehensive: FULL audit combining all above (weighted scoring)
+- full_seo_audit: Client-based audit using DataForSEO + PageSpeed + WordPress
+- Plus keyword research, SERP analysis, domain overview, content calendar, blog generation, meta tag fixing
+
+KEY SEO KNOWLEDGE (2026):
+- Core Web Vitals thresholds: LCP ≤2.5s (good), INP ≤200ms (good, replaced FID March 2024), CLS ≤0.1 (good)
+- E-E-A-T applies to ALL competitive queries since Dec 2025 Core Update, not just YMYL
+- Schema types: HowTo REMOVED (Sept 2023), FAQ restricted to gov/health (Aug 2023), SpecialAnnouncement deprecated (July 2025)
+- Active schema types: Organization, LocalBusiness, Product, Service, Article, BlogPosting, Review, BreadcrumbList, WebSite, VideoObject, Event, JobPosting, ProfilePage
+- Content with proper schema has ~2.5x higher chance of appearing in AI answers
+
+GEO (GENERATIVE ENGINE OPTIMIZATION) — AI SEARCH KNOWLEDGE:
+- 92% of AI Overview citations come from top-10 ranking pages
+- Brand mentions correlate 3x more with AI visibility than backlinks
+- Multi-modal content sees 156% higher AI selection rates
+- Only 11% of domains cited by both ChatGPT and Google AI Overviews for same query
+- Optimal AI-citable passages: 134-167 words with clear, structured answers
+- AI crawlers do NOT execute JavaScript — SSR is critical
+- Key AI crawlers: GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, PerplexityBot, Google-Extended, Bytespider
+- Blocking GPTBot does NOT prevent ChatGPT browsing citations
+- Blocking Google-Extended does NOT affect Google Search or AI Overviews
+- llms.txt is a new standard for providing AI-friendly site summaries
+
+10 CHATGPT RANKING FACTORS:
+1. Source authority and trust (domain reputation, editorial standards)
+2. Content relevance and specificity (direct topical match)
+3. Information freshness (recency signals, update frequency)
+4. Consensus across sources (corroborated by multiple quality sources)
+5. Content structure and clarity (headings, lists, clean formatting)
+6. Depth and comprehensiveness (thorough coverage of subtopics)
+7. Unique data and original research (first-party data, studies, surveys)
+8. User intent alignment (matching what the user actually wants)
+9. Expertise signals (author credentials, bylines, citations)
+10. Multi-format content (tables, images, videos alongside text)
+
+REDDIT MARKETING FOR AI SEO:
+- Reddit is a top-3 source for both Google AI Overviews and ChatGPT citations
+- Build genuine community presence before product mentions (10:1 value-to-promotion ratio)
+- Target subreddits where your audience asks questions → provide expert answers
+- Upvoted Reddit answers frequently appear in AI-generated responses
+- Never astroturf — Reddit users detect and destroy fake engagement
+
+AI SEO QUALITY GATES:
+- Minimum 1,500 words for pillar content targeting AI citations
+- Every page needs at least one "citable passage" (clear definition/answer in 134-167 words)
+- Add author bylines with credentials on all content
+- Include original data, screenshots, case studies (first-hand experience signals)
+- Use question-based H2/H3 headings that match conversational queries
+- Add "Key Takeaway" or "TL;DR" summary sections for AI extraction
+
+PPC & PAID ADVERTISING EXPERTISE:
+You are an expert in paid advertising across Meta Ads, Google Ads, TikTok Ads, and Twitter/X Ads.
+
+CAMPAIGN STRUCTURE BEST PRACTICES:
+- Meta Ads: Use CBO (Campaign Budget Optimization) for scaling, ABO for testing. Advantage+ campaigns for broad prospecting. 3-5 ad sets per campaign, 3-6 ads per ad set.
+- Google Ads: Separate campaigns by match type (exact, phrase, broad). Use RSAs (Responsive Search Ads) with 15 headlines and 4 descriptions. Pin critical headlines to position 1.
+- Performance Max: Use for full-funnel automated campaigns. Provide strong asset groups (images, videos, headlines, descriptions). Set clear conversion goals.
+- TikTok: Short-form video first (15-30s). Use Spark Ads (boosted organic). Test 3-5 creatives per ad group.
+
+BIDDING STRATEGIES:
+- Target ROAS: Use when you have 50+ conversions/month and clear revenue data
+- Target CPA: Use when optimizing for lead gen with stable conversion rates
+- Maximize Conversions: Best for new campaigns building conversion data
+- Manual CPC: Only for brand campaigns with tight budget control
+- Bid adjustments: +20-30% for mobile if mobile converts well, -100% for placements that waste budget
+
+AUDIENCE TARGETING:
+- Lookalike/Similar audiences: Start with 1% (highest quality), expand to 3-5% for scale
+- Custom audiences: Website visitors (30/60/90 day windows), email lists, video viewers
+- Interest stacking: Combine 2-3 related interests per ad set, don't over-narrow
+- Exclusions are as important as inclusions — exclude converters, bounced visitors, irrelevant demographics
+- Broad targeting with strong creative often outperforms narrow targeting (Meta's AI optimization)
+
+CREATIVE BEST PRACTICES:
+- Hook in first 3 seconds (video) or top 20% of image
+- Clear value proposition above the fold
+- Social proof: testimonials, reviews, case study numbers
+- Urgency without being spammy: limited-time offers, countdown timers
+- UGC (User Generated Content) style outperforms polished studio content 2-3x on Meta and TikTok
+- Test static vs video vs carousel — each has different sweet spots by vertical
+- Creative fatigue: refresh every 2-4 weeks or when frequency >3 and CTR drops >20%
+
+QUALITY SCORE (GOOGLE ADS):
+- Expected CTR (most important), Ad Relevance, Landing Page Experience
+- Quality Score 7+ is good, 8+ is excellent. Below 5 needs immediate attention.
+- Improve with: tighter ad group themes, keyword-specific ad copy, fast landing pages, relevant content
+
+CONVERSION TRACKING & ATTRIBUTION:
+- Meta CAPI (Conversions API): Server-side tracking alongside pixel — mandatory post-iOS 14.5
+- Google Enhanced Conversions: First-party data matching for better attribution
+- UTM parameters: Consistent naming convention across all campaigns
+- Attribution windows: Meta default 7-day click / 1-day view. Google default 30-day click.
+- GA4 data-driven attribution: Uses ML to distribute credit across touchpoints
+
+BUDGET MANAGEMENT:
+- 70/20/10 rule: 70% proven campaigns, 20% testing, 10% experimental
+- Never increase budget more than 20% per day (Meta learning phase reset)
+- Minimum viable budget: 2x target CPA per ad set per day
+- Budget pacing: Check daily but optimize weekly — avoid knee-jerk reactions
+- Seasonal adjustments: Increase 2-4 weeks before peak season, build audience beforehand
+
+OPTIMIZATION CADENCE:
+- Daily: Check delivery, spend pacing, any anomalies
+- Weekly: Review performance metrics, pause underperformers, scale winners
+- Bi-weekly: Creative refresh assessment, audience expansion
+- Monthly: Full account review, strategy alignment, competitor check
+- Quarterly: Channel mix optimization, budget reallocation, goal reassessment
+
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
 If a tool returns an error, explain it simply and suggest alternatives. Never show raw error objects.
@@ -1206,6 +1330,49 @@ const CSA_TOOLS = [
       pageType: { type: 'string', description: 'Schema type: LocalBusiness, Article, Product, Service, FAQ, HowTo' },
       url: { type: 'string', description: 'Page URL' },
     }, required: ['clientName', 'pageType', 'url'] },
+  },
+  // --- Advanced SEO & AI Search Optimization ---
+  {
+    name: 'analyze_eeat',
+    description: 'Analyze a webpage for E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness) signals per Google Quality Rater Guidelines (Dec 2025 Core Update). Scores each dimension, detects AI-generated content quality, assesses AI citation readiness, and provides actionable improvements. Works on ANY URL — no client needed.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to analyze for E-E-A-T signals' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'analyze_ai_search_readiness',
+    description: 'Analyze a website for AI search optimization (GEO — Generative Engine Optimization). Checks readiness for Google AI Overviews, ChatGPT, and Perplexity. Evaluates AI crawler access (robots.txt), llms.txt, citability, structural readability, multi-modal content, and authority signals. Brand mentions correlate 3x more strongly with AI visibility than backlinks.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to analyze for AI search readiness' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'audit_seo_technical',
+    description: 'Run a deep technical SEO audit across 9 categories: crawlability, indexability, security, URL structure, mobile optimization, Core Web Vitals (LCP <2.5s, INP <200ms, CLS <0.1), structured data, JavaScript rendering, and AI crawler management. Combines page analysis with PageSpeed Insights data.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to audit technically' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'analyze_seo_images',
+    description: 'Analyze a page\'s images for SEO optimization. Checks alt text quality, file formats (WebP/AVIF vs outdated), file sizes, lazy loading, responsive images, CLS prevention (width/height), fetchpriority, and CDN usage. Returns per-image issues and recommendations.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to analyze images on' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'analyze_schema_markup',
+    description: 'Detect, validate, and recommend schema.org structured data for a page. Checks JSON-LD, Microdata, and RDFa. Validates against current Google supported types (2026), warns about deprecated types (HowTo removed Sept 2023, FAQ restricted to gov/health). Content with proper schema has ~2.5x higher chance of appearing in AI answers.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to analyze schema markup on' },
+    }, required: ['url'] },
+  },
+  {
+    name: 'audit_seo_comprehensive',
+    description: 'Run the ULTIMATE comprehensive SEO audit combining ALL analysis dimensions: Technical SEO (22%), Content/E-E-A-T (23%), On-Page (20%), Schema (10%), Core Web Vitals (10%), AI Search/GEO Readiness (10%), and Images (5%). Returns a weighted overall score with detailed breakdowns and prioritized critical issues. This is the most thorough audit available.',
+    input_schema: { type: 'object', properties: {
+      url: { type: 'string', description: 'URL to run comprehensive SEO audit on' },
+    }, required: ['url'] },
   },
   // --- Client Onboarding (Leadsie) ---
   {
@@ -2644,6 +2811,55 @@ Return ONLY the JSON array, no other text.`;
       return { schema, message: `JSON-LD schema markup generated for ${toolInput.pageType}. Add this to the page's <head> section.` };
     }
 
+    // --- Advanced SEO & AI Search Optimization ---
+    case 'analyze_eeat': {
+      const result = await seoAdvanced.analyzeEEAT(toolInput.url);
+      return {
+        ...result,
+        message: `E-E-A-T analysis complete for ${result.url}. Overall score: ${result.overallScore}/100. AI citation readiness: ${result.aiCitationReadiness}/100.`,
+      };
+    }
+
+    case 'analyze_ai_search_readiness': {
+      const result = await seoAdvanced.analyzeAISearchReadiness(toolInput.url);
+      return {
+        ...result,
+        message: `AI search readiness (GEO) analysis complete for ${result.url}. GEO score: ${result.geoScore}/100. Platform readiness — Google AI Overviews: ${result.platformReadiness?.googleAIOverviews}, ChatGPT: ${result.platformReadiness?.chatGPT}, Perplexity: ${result.platformReadiness?.perplexity}.`,
+      };
+    }
+
+    case 'audit_seo_technical': {
+      const result = await seoAdvanced.technicalSEOAudit(toolInput.url);
+      return {
+        ...result,
+        message: `Technical SEO audit complete for ${result.url}. Score: ${result.technicalScore}/100. ${result.criticalIssues?.length || 0} critical issues found.`,
+      };
+    }
+
+    case 'analyze_seo_images': {
+      const result = await seoAdvanced.analyzeImageSEO(toolInput.url);
+      return {
+        ...result,
+        message: `Image SEO analysis complete for ${result.url}. Score: ${result.imageScore}/100. ${result.totalImages || 0} images analyzed — ${result.missingAltText || 0} missing alt text, ${result.estimatedOversized || 0} oversized.`,
+      };
+    }
+
+    case 'analyze_schema_markup': {
+      const result = await seoAdvanced.analyzeSchemaMarkup(toolInput.url);
+      return {
+        ...result,
+        message: `Schema markup analysis complete for ${result.url}. Score: ${result.schemaScore}/100. ${result.detectedCount || 0} schemas detected, ${result.missingOpportunities?.length || 0} opportunities identified.`,
+      };
+    }
+
+    case 'audit_seo_comprehensive': {
+      const result = await seoAdvanced.comprehensiveSEOAudit(toolInput.url);
+      return {
+        ...result,
+        message: `Comprehensive SEO audit complete for ${result.url}. Overall score: ${result.overallScore}/100. Breakdown — Technical: ${result.scoreBreakdown?.technical?.score}/100, E-E-A-T: ${result.scoreBreakdown?.contentEEAT?.score}/100, AI Search: ${result.scoreBreakdown?.aiSearchReadiness?.score}/100. ${result.criticalIssues?.length || 0} critical issues.`,
+      };
+    }
+
     // --- Leadsie Onboarding ---
     case 'create_onboarding_link': {
       const platforms = toolInput.platforms
@@ -3244,6 +3460,46 @@ IMPORTANT: The user wants to SEE images, not read about them. When in doubt, gen
 TEXT OVERLAY CAPABILITY (NOT A LIMITATION): This system adds headline, CTA button, offer badge, and subtext DIRECTLY onto generated images using a post-processing overlay engine (Sharp + SVG compositing). This is NOT raw AI text generation — it is precise, readable, professional text rendered programmatically AFTER image generation. You MUST use the headline and cta parameters every time you call generate_ad_images. NEVER tell the user that text on images is not possible, a limitation, or requires workarounds — it works perfectly. Just call the tool with the text parameters.
 
 IMAGE DELIVERY RULE: When you call generate_ad_images or generate_creative_package, the images are AUTOMATICALLY delivered as separate media messages in the chat. Do NOT include image URLs, markdown image links like ![](url), or raw links in your text response. Just describe what you created conversationally (e.g., "Here are 3 ad creatives for your Meta campaign — a feed image, a square, and a story format"). The actual images will appear as media messages.
+
+SEO & AI SEARCH OPTIMIZATION EXPERTISE:
+You have advanced SEO skills. When asked about SEO, use these tools and knowledge:
+
+TOOLS AVAILABLE:
+- analyze_eeat: E-E-A-T analysis (Experience 20%, Expertise 25%, Authoritativeness 25%, Trustworthiness 30%)
+- analyze_ai_search_readiness: GEO (Generative Engine Optimization) — AI search readiness for Google AI Overviews, ChatGPT, Perplexity
+- audit_seo_technical: 9-category deep technical audit (crawlability, indexability, security, URLs, mobile, CWV, structured data, JS rendering, AI crawlers)
+- analyze_seo_images: Image SEO (alt text, formats, sizes, lazy loading, CLS prevention)
+- analyze_schema_markup: Schema.org detection, validation, and recommendations
+- audit_seo_comprehensive: FULL audit combining all above (weighted scoring)
+- full_seo_audit: Client-based audit using DataForSEO + PageSpeed + WordPress
+
+KEY SEO KNOWLEDGE (2026):
+- Core Web Vitals: LCP ≤2.5s, INP ≤200ms (replaced FID March 2024), CLS ≤0.1
+- E-E-A-T applies to ALL competitive queries since Dec 2025 Core Update
+- Schema: HowTo REMOVED (Sept 2023), FAQ restricted to gov/health (Aug 2023)
+- Content with proper schema has ~2.5x higher chance of appearing in AI answers
+
+GEO (GENERATIVE ENGINE OPTIMIZATION):
+- 92% of AI Overview citations come from top-10 ranking pages
+- Brand mentions correlate 3x more with AI visibility than backlinks
+- Multi-modal content sees 156% higher AI selection rates
+- AI crawlers do NOT execute JavaScript — SSR is critical
+- Optimal AI-citable passages: 134-167 words
+
+10 CHATGPT RANKING FACTORS:
+1. Source authority and trust  2. Content relevance  3. Information freshness
+4. Consensus across sources  5. Content structure and clarity  6. Depth and comprehensiveness
+7. Unique data and original research  8. User intent alignment
+9. Expertise signals  10. Multi-format content
+
+PPC & PAID ADVERTISING EXPERTISE:
+- Meta Ads: CBO for scaling, ABO for testing. Advantage+ for broad prospecting. 3-5 ad sets, 3-6 ads each.
+- Google Ads: Separate by match type. RSAs with 15 headlines, 4 descriptions. Quality Score 7+ good.
+- Bidding: Target ROAS (50+ conv/mo), Target CPA (stable conv rates), Maximize Conversions (new campaigns)
+- Audiences: Lookalike 1% start, expand to 3-5%. Exclude converters. Broad + strong creative often wins.
+- Creative: Hook in 3s. UGC outperforms studio 2-3x. Refresh every 2-4 weeks or frequency >3.
+- Budget: 70/20/10 rule. Never increase >20%/day (learning phase reset). Min 2x CPA/ad set/day.
+- Attribution: Meta CAPI mandatory. Google Enhanced Conversions. GA4 data-driven attribution.
 
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
