@@ -6,6 +6,18 @@ import * as firecrawl from './firecrawl.js';
 const log = logger.child({ platform: 'web-scraper' });
 
 /**
+ * Safe wrapper — returns true only when firecrawl module is loaded AND API key is set.
+ * Defends against module resolution quirks where firecrawl.isConfigured may be undefined.
+ */
+function isFirecrawlReady() {
+  try {
+    return typeof firecrawl.isConfigured === 'function' ? firecrawl.isConfigured() : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetch a webpage and extract useful content.
  * Uses Firecrawl when available (better JS rendering, cleaner markdown),
  * falls back to direct HTML fetch + regex extraction.
@@ -24,7 +36,7 @@ export async function fetchWebpage(url, opts = {}) {
   let firecrawlError = null;
 
   // Try Firecrawl first (handles JS rendering, returns clean markdown)
-  if (firecrawl.isConfigured()) {
+  if (isFirecrawlReady()) {
     try {
       return await fetchWithFirecrawl(url, opts);
     } catch (e) {
@@ -38,7 +50,7 @@ export async function fetchWebpage(url, opts = {}) {
   } catch (e) {
     // Both methods failed — throw a descriptive error
     const reasons = [];
-    if (!firecrawl.isConfigured()) {
+    if (!isFirecrawlReady()) {
       reasons.push('Firecrawl API key is not configured (direct fetch only)');
     } else if (firecrawlError) {
       reasons.push(`Firecrawl failed: ${firecrawlError}`);

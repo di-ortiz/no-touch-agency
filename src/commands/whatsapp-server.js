@@ -404,7 +404,7 @@ async function extractMetaAdImages(snapshotUrl) {
  * Returns the screenshot data (base64 data URL or hosted URL), or null if failed.
  */
 async function captureScreenshot(url) {
-  if (!firecrawlApi.isConfigured()) return null;
+  if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) return null;
   try {
     const result = await firecrawlApi.scrape(url, {
       formats: ['screenshot'],
@@ -1801,12 +1801,33 @@ Return ONLY the JSON array, no other text.`;
         };
       }
 
-      // Apply text overlay (headline, CTA, offer) if provided
-      const hasTextOverlay = toolInput.headline || toolInput.cta || toolInput.offer;
+      // Apply text overlay (headline, CTA, offer) — auto-generate if Sofia didn't provide them
+      let hasTextOverlay = toolInput.headline || toolInput.cta || toolInput.offer;
       if (!hasTextOverlay) {
-        log.warn('generate_ad_images called WITHOUT headline/cta overlay params — Sofia should always include these for ad creatives', {
+        log.warn('generate_ad_images called WITHOUT headline/cta overlay params — auto-generating from concept', {
           clientName: toolInput.clientName, platform: toolInput.platform,
         });
+        // Auto-generate overlay text from concept/product so images always have marketing text
+        const conceptLower = (toolInput.concept || '').toLowerCase();
+        const product = toolInput.product || toolInput.clientName || '';
+        // Generate a headline from the concept (first sentence, capped at 40 chars)
+        const conceptSentence = (toolInput.concept || product).replace(/[.!?].*/, '').trim();
+        toolInput.headline = conceptSentence.length > 40 ? conceptSentence.slice(0, 37) + '...' : conceptSentence;
+        // Generate a CTA from common patterns in the concept
+        if (conceptLower.includes('audit')) toolInput.cta = 'Book Your Free Audit';
+        else if (conceptLower.includes('consult')) toolInput.cta = 'Book Your Consultation';
+        else if (conceptLower.includes('free')) toolInput.cta = 'Get Started Free';
+        else if (conceptLower.includes('demo')) toolInput.cta = 'Request a Demo';
+        else if (conceptLower.includes('shop') || conceptLower.includes('buy') || conceptLower.includes('sale')) toolInput.cta = 'Shop Now';
+        else toolInput.cta = 'Learn More';
+        // Extract offer if concept mentions it
+        if (conceptLower.includes('free') && !toolInput.offer) {
+          if (conceptLower.includes('audit')) toolInput.offer = 'FREE AUDIT';
+          else if (conceptLower.includes('consult')) toolInput.offer = 'FREE CONSULTATION';
+          else toolInput.offer = 'FREE';
+        }
+        hasTextOverlay = true;
+        log.info('Auto-generated overlay text', { headline: toolInput.headline, cta: toolInput.cta, offer: toolInput.offer });
       }
       if (hasTextOverlay) {
         try {
@@ -2142,7 +2163,7 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'crawl_website': {
-      if (!firecrawlApi.isConfigured()) {
+      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Website crawling is not available — Firecrawl API key is not configured.' };
       }
       const limit = Math.min(toolInput.limit || 10, 50);
@@ -2167,7 +2188,7 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'search_web': {
-      if (!firecrawlApi.isConfigured()) {
+      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Web search is not available — Firecrawl API key is not configured.' };
       }
       const searchResult = await firecrawlApi.search(toolInput.query, {
@@ -2188,7 +2209,7 @@ Return ONLY the JSON array, no other text.`;
     }
 
     case 'map_website': {
-      if (!firecrawlApi.isConfigured()) {
+      if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Website mapping is not available — Firecrawl API key is not configured.' };
       }
       const mapResult = await firecrawlApi.map(toolInput.url, {

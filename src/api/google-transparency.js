@@ -75,7 +75,7 @@ export async function searchAdvertiser(opts = {}) {
   const region = opts.region || '';
   const transparencyUrl = buildTransparencyUrl(query, region);
 
-  if (!firecrawl.isConfigured()) {
+  if (typeof firecrawl.isConfigured !== 'function' || !firecrawl.isConfigured()) {
     return {
       advertisers: [],
       query,
@@ -189,7 +189,7 @@ export async function searchAdvertiser(opts = {}) {
 export async function getAdvertiserCreatives(advertiserUrl, opts = {}) {
   if (!advertiserUrl) throw new Error('Advertiser URL is required');
 
-  if (!firecrawl.isConfigured()) {
+  if (typeof firecrawl.isConfigured !== 'function' || !firecrawl.isConfigured()) {
     return {
       creatives: [],
       totalFound: 0,
