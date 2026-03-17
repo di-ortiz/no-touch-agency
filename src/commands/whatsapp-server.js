@@ -46,6 +46,7 @@ import * as firecrawlApi from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
 import * as seoAdvanced from '../services/seo-advanced.js';
 import * as ppcKnowledge from '../services/ppc-knowledge.js';
+import * as kimiApi from '../api/kimi.js';
 import * as supabase from '../api/supabase.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
@@ -1040,6 +1041,14 @@ OPTIMIZATION CADENCE:
 - Monthly: Full account review, strategy alignment, competitor check
 - Quarterly: Channel mix, budget reallocation, goal reassessment
 
+KIMI K2.5 (MOONSHOT AI) — COST-OPTIMIZED AI:
+You have access to Kimi K2.5 via the generate_with_kimi tool. Use it to optimize token costs:
+- 25-37% cheaper than Claude Haiku for text generation
+- 256K context window (great for analyzing long documents)
+- Supports vision/image analysis (pass imageUrl parameter)
+- Best for: bulk ad copy generation, content writing, translations, SEO content analysis, creative brainstorming, competitor ad copy analysis
+- Use Kimi for content-heavy tasks where cost optimization matters. Use Claude for complex reasoning and tool orchestration.
+
 When you need data or want to perform actions, use the provided tools. Always explain what you're doing in a natural way ("Let me pull up those numbers for you..."). After getting tool results, present them conversationally — don't just dump raw data.
 
 If a tool returns an error, explain it simply and suggest alternatives. Never show raw error objects.
@@ -1541,6 +1550,18 @@ const CSA_TOOLS = [
       labels: { type: 'array', items: { type: 'string' }, description: 'Category labels' },
       series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
     }, required: ['title', 'chartType', 'labels', 'series'] },
+  },
+  // --- Kimi K2.5 AI Generation ---
+  {
+    name: 'generate_with_kimi',
+    description: 'Use Kimi K2.5 (Moonshot AI) for text generation tasks — ad copy, content writing, SEO analysis, marketing strategies, translations, and creative brainstorming. 25-37% cheaper than Claude for bulk generation. Has 256K context window. Use this for high-volume content tasks to optimize token costs. Also supports image analysis/vision if you pass an imageUrl.',
+    input_schema: { type: 'object', properties: {
+      prompt: { type: 'string', description: 'The generation prompt/task' },
+      systemPrompt: { type: 'string', description: 'System prompt for role/behavior (optional — defaults to marketing expert)' },
+      imageUrl: { type: 'string', description: 'URL of image to analyze with Kimi vision (optional)' },
+      maxTokens: { type: 'number', description: 'Max output tokens (default: 2048, max: 65535)' },
+      temperature: { type: 'number', description: 'Creativity 0-1 (default: 0.7)' },
+    }, required: ['prompt'] },
   },
   // --- Diagnostics ---
   {
@@ -3294,6 +3315,47 @@ Return ONLY the JSON array, no other text.`;
       return { chartId: result.chartId, sheetUrl: result.sheetUrl, spreadsheetId: result.spreadsheetId, message: `Chart created! View: ${result.sheetUrl}` };
     }
 
+    // --- Kimi K2.5 AI Generation ---
+    case 'generate_with_kimi': {
+      if (!kimiApi.isConfigured()) {
+        return { error: 'Kimi API key is not configured. Set KIMI_API_KEY in environment variables.' };
+      }
+
+      // If image URL provided, use vision analysis
+      if (toolInput.imageUrl) {
+        const result = await kimiApi.analyzeImage({
+          imageUrl: toolInput.imageUrl,
+          prompt: toolInput.prompt,
+          workflow: 'kimi-vision-tool',
+        });
+        return {
+          response: result.analysis,
+          model: result.model,
+          usage: result.usage,
+          mode: 'vision',
+          message: 'Kimi K2.5 vision analysis complete.',
+        };
+      }
+
+      // Text generation
+      const result = await kimiApi.quickGenerate(
+        toolInput.prompt,
+        toolInput.systemPrompt,
+        {
+          maxTokens: toolInput.maxTokens || 2048,
+          temperature: toolInput.temperature || 0.7,
+          workflow: 'kimi-generation-tool',
+        }
+      );
+      return {
+        response: result.text,
+        model: result.model,
+        usage: result.usage,
+        mode: 'text',
+        message: 'Kimi K2.5 generation complete.',
+      };
+    }
+
     // --- Diagnostics ---
     case 'check_credentials': {
       const fs = (await import('fs')).default;
@@ -3335,6 +3397,10 @@ Return ONLY the JSON array, no other text.`;
         firecrawl: {
           status: config.FIRECRAWL_API_KEY ? 'CONFIGURED' : 'NOT SET',
           affects: ['Website browsing (browse_website)', 'Website crawling (crawl_website)', 'Web search (search_web)', 'Site mapping (map_website)'],
+        },
+        kimi: {
+          status: config.KIMI_API_KEY ? 'CONFIGURED' : 'NOT SET',
+          affects: ['Kimi K2.5 text generation (generate_with_kimi)', 'Kimi vision analysis', 'Cost-optimized content generation'],
         },
       };
 

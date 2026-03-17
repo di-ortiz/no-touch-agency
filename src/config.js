@@ -81,6 +81,9 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().optional().default(''),
   SUPABASE_ANON_KEY: z.string().optional().default(''),
 
+  // Kimi 2.5 (Moonshot AI — text generation + visual analysis)
+  KIMI_API_KEY: z.string().optional().default(''),
+
   // Firecrawl (web scraping / crawling)
   FIRECRAWL_API_KEY: z.string().optional().default(''),
 

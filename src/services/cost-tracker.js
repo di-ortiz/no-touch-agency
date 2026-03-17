@@ -53,6 +53,7 @@ const PRICING = {
   'claude-sonnet-4-5-20250929': { input: 0.3, output: 1.5 },
   'claude-haiku-4-5-20251001': { input: 0.08, output: 0.4 },
   'gpt-4o': { input: 0.25, output: 1.0 },
+  'kimi-k2-5': { input: 0.06, output: 0.25 },  // $0.60/M input, $2.50/M output
   'dall-e-3': { perImage: 4.0 },
   'dall-e-3-hd': { perImage: 8.0 },
   'sora-2': { perSecond: 10 },       // $0.10/sec standard
