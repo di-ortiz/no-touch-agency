@@ -51,11 +51,11 @@ const ASPECT_DIMENSIONS = {
 };
 
 // ============================================================
-// Imagen 3 Image Generation
+// Imagen 4 Image Generation (upgraded from Imagen 3)
 // ============================================================
 
 /**
- * Generate an image using Google Imagen 3.
+ * Generate an image using Google Imagen 4.
  *
  * @param {object} opts
  * @param {string} opts.prompt - Image generation prompt
@@ -72,44 +72,43 @@ export async function generateImage(opts = {}) {
 
   return rateLimited('gemini', () =>
     retry(async () => {
-      log.info('Generating Imagen 3 image', { format, aspectRatio, prompt: opts.prompt?.slice(0, 100) });
+      log.info('Generating Imagen 4 image', { format, aspectRatio, prompt: opts.prompt?.slice(0, 100) });
 
-      // Gemini API uses :generateImages (not :predict which is Vertex AI)
       const response = await axios.post(
-        `${GEMINI_BASE}/models/imagen-3.0-generate-002:generateImages?key=${config.GEMINI_API_KEY}`,
+        `${GEMINI_BASE}/models/imagen-4.0-generate-001:predict?key=${config.GEMINI_API_KEY}`,
         {
-          prompt: opts.prompt,
-          config: {
-            numberOfImages: 1,
+          instances: [{ prompt: opts.prompt }],
+          parameters: {
+            sampleCount: 1,
             aspectRatio,
           },
         },
         { headers: { 'Content-Type': 'application/json' }, timeout: 60000 },
       );
 
-      // Gemini API returns generatedImages array with image.imageBytes (base64)
-      const generatedImages = response.data?.generatedImages;
-      if (!generatedImages?.length || !generatedImages[0]?.image?.imageBytes) {
-        throw new Error('No image returned from Imagen 3');
+      // Imagen 4 returns predictions array with bytesBase64Encoded
+      const predictions = response.data?.predictions;
+      if (!predictions?.length || !predictions[0]?.bytesBase64Encoded) {
+        throw new Error('No image returned from Imagen 4');
       }
 
-      const base64 = generatedImages[0].image.imageBytes;
-      const mimeType = generatedImages[0].image.mimeType || 'image/png';
+      const base64 = predictions[0].bytesBase64Encoded;
+      const mimeType = predictions[0].mimeType || 'image/png';
       const dataUri = `data:${mimeType};base64,${base64}`;
 
       const dims = ASPECT_DIMENSIONS[aspectRatio] || ASPECT_DIMENSIONS['1:1'];
 
-      // Imagen 3: ~$0.04 per image (standard)
+      // Imagen 4: ~$0.04 per image (standard)
       recordCost({
         platform: 'gemini',
-        model: 'imagen-3.0-generate-002',
+        model: 'imagen-4.0-generate-001',
         workflow: opts.workflow || 'creative-generation',
         clientId: opts.clientId,
         costCentsOverride: 4.0,
         metadata: { format, aspectRatio },
       });
 
-      log.info('Imagen 3 image generated', { format });
+      log.info('Imagen 4 image generated', { format });
       return {
         url: dataUri,
         base64,
@@ -118,7 +117,7 @@ export async function generateImage(opts = {}) {
         dimensions: { ...dims, label: FORMAT_LABELS[format] || format },
         provider: 'gemini',
       };
-    }, { retries: 1, label: 'Imagen 3', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'Imagen 4', shouldRetry: isRetryableHttpError })
   );
 }
 
@@ -147,7 +146,7 @@ export async function generateAdImages(opts = {}) {
       });
       results.push(image);
     } catch (e) {
-      log.error(`Imagen 3 failed for format ${format}`, { error: e.message });
+      log.error(`Imagen 4 failed for format ${format}`, { error: e.message });
       results.push({ format, error: e.message, provider: 'gemini' });
     }
   }

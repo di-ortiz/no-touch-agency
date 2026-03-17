@@ -18,7 +18,7 @@ const log = logger.child({ platform: 'image-router' });
  *
  * Providers:
  *   - OpenAI (gpt-image-1)  — best photorealism
- *   - Gemini (Imagen 3)     — Google's model, good variety
+ *   - Gemini (Imagen 4)     — Google's model, good variety
  *   - fal.ai (Flux Pro)     — fast, artistic/stylized
  */
 
@@ -63,7 +63,7 @@ function getAvailableProviders(preferred) {
   const all = [
     { key: 'openai', name: 'ChatGPT (gpt-image-1)', configured: !!config.OPENAI_API_KEY },
     { key: 'fal', name: 'Flux Pro (fal.ai)', configured: fal.isConfigured() },
-    { key: 'gemini', name: 'Imagen 3 (Gemini)', configured: gemini.isConfigured() },
+    { key: 'gemini', name: 'Imagen 4 (Gemini)', configured: gemini.isConfigured() },
   ];
 
   let providers = all.filter(p => p.configured && !isProviderCoolingDown(p.key));

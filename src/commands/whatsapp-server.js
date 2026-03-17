@@ -894,7 +894,9 @@ CRITICAL RULES:
 - NEVER get stuck in a loop. If a tool returns an error, explain it and try an alternative approach.
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
-- When asked to create presentations, charts, graphs, reports, or any Google Slides/Sheets/Drive/Docs content, you MUST call the appropriate tool (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, generate_performance_pdf, generate_competitor_pdf). NEVER substitute with text-based tables, ASCII art, or emoji-based charts. The tools create REAL Google Slides with interactive charts.
+- When asked to create presentations, charts, or graphs, use Google Slides/Sheets tools (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart). NEVER substitute with text-based tables, ASCII art, or emoji-based charts.
+- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
+- If a Google Slides/Sheets/Drive tool fails due to quota or permissions, ALWAYS offer the PDF alternative (generate_performance_pdf or generate_competitor_pdf) as a fallback. PDFs do NOT require Google Drive.
 - If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
@@ -2362,40 +2364,48 @@ Return ONLY the JSON array, no other text.`;
     }
     // --- Website Browsing ---
     case 'browse_website': {
+      let url = toolInput.url;
+      if (!url) return { error: 'URL is required' };
+      if (!url.startsWith('http')) url = `https://${url}`;
       const purpose = toolInput.purpose || 'general';
-      if (purpose === 'creative_inspiration') {
-        const analysis = await webScraper.analyzeForCreativeInspiration(toolInput.url);
+      try {
+        if (purpose === 'creative_inspiration') {
+          const analysis = await webScraper.analyzeForCreativeInspiration(url);
+          return {
+            url: analysis.url,
+            brandName: analysis.brand.name,
+            tagline: analysis.brand.tagline,
+            heroImage: analysis.brand.heroImage,
+            brandColors: analysis.brand.colors,
+            headline: analysis.messaging.headline,
+            subheadings: analysis.messaging.subheadings?.slice(0, 5),
+            keyPhrases: analysis.messaging.keyPhrases?.slice(0, 5),
+            images: analysis.visuals.images?.slice(0, 5),
+            contentPreview: analysis.content?.slice(0, 2000),
+            wordCount: analysis.wordCount,
+          };
+        }
+        const page = await webScraper.fetchWebpage(url, {
+          includeImages: true,
+          includeLinks: purpose === 'competitor_research',
+          maxLength: 6000,
+        });
         return {
-          url: analysis.url,
-          brandName: analysis.brand.name,
-          tagline: analysis.brand.tagline,
-          heroImage: analysis.brand.heroImage,
-          brandColors: analysis.brand.colors,
-          headline: analysis.messaging.headline,
-          subheadings: analysis.messaging.subheadings?.slice(0, 5),
-          keyPhrases: analysis.messaging.keyPhrases?.slice(0, 5),
-          images: analysis.visuals.images?.slice(0, 5),
-          contentPreview: analysis.content?.slice(0, 2000),
-          wordCount: analysis.wordCount,
+          url: page.url,
+          statusCode: page.statusCode,
+          title: page.title,
+          description: page.description,
+          headings: { h1: page.headings.h1, h2: page.headings.h2?.slice(0, 8) },
+          bodyPreview: page.bodyText?.slice(0, 3000),
+          images: page.images?.slice(0, 10),
+          links: page.links?.slice(0, 15),
+          brandColors: page.brandColors,
+          wordCount: page.wordCount,
         };
+      } catch (e) {
+        log.warn('browse_website failed, returning partial result', { url, error: e.message });
+        return { url, error: `Could not fully browse ${url}: ${e.message}. The website may block automated requests or require JavaScript rendering.` };
       }
-      const page = await webScraper.fetchWebpage(toolInput.url, {
-        includeImages: true,
-        includeLinks: purpose === 'competitor_research',
-        maxLength: 6000,
-      });
-      return {
-        url: page.url,
-        statusCode: page.statusCode,
-        title: page.title,
-        description: page.description,
-        headings: { h1: page.headings.h1, h2: page.headings.h2?.slice(0, 8) },
-        bodyPreview: page.bodyText?.slice(0, 3000),
-        images: page.images?.slice(0, 10),
-        links: page.links?.slice(0, 15),
-        brandColors: page.brandColors,
-        wordCount: page.wordCount,
-      };
     }
 
     case 'crawl_website': {
@@ -3369,7 +3379,8 @@ Return ONLY the JSON array, no other text.`;
           fileExists: credFileExists,
           status: credFileExists ? 'OK' : 'MISSING',
           fix: credFileExists ? null : `The file "${credPath}" does not exist. To fix: 1) Go to console.cloud.google.com → IAM & Admin → Service Accounts, 2) Create a service account (or use existing), 3) Click the account → Keys → Add Key → JSON, 4) Download and save the JSON file to "${credPath}". Then enable these APIs in the GCP project: Google Slides API, Google Sheets API, Google Drive API, Google Docs API.`,
-          affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Docs (PDF reports)', 'Google Analytics (if using service account)'],
+          affects: ['Google Slides (presentations, charts)', 'Google Sheets (charts, calendars, reports)', 'Google Drive (file storage, folders)', 'Google Analytics (if using service account)'],
+          note: 'PDF reports (generate_performance_pdf, generate_competitor_pdf) do NOT require Google credentials — they use pdfmake locally.',
         },
         google_ads: {
           status: config.GOOGLE_ADS_DEVELOPER_TOKEN ? 'CONFIGURED' : 'NOT SET',
