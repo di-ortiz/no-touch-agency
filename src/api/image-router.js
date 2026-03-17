@@ -7,15 +7,19 @@ import logger from '../utils/logger.js';
 const log = logger.child({ platform: 'image-router' });
 
 /**
- * Image generation router with smart provider fallback.
+ * Image generation router with two modes:
  *
- * Provider priority (tries each in order, falls back on failure):
- *   1. DALL-E 3  (OpenAI)    — highest quality, most reliable
- *   2. fal.ai    (Flux Pro)   — fast, great quality, different aesthetic
- *   3. Imagen 3  (Gemini)     — Google's model, good for variety
+ * 1. **Multi-provider** (default for ad creatives):
+ *    Generates from ALL configured providers in parallel.
+ *    Client sees images from ChatGPT, Gemini, and Flux side-by-side to pick favourites.
  *
- * On quota exhaustion, auth failure, or rate limit → automatically tries next provider.
- * Returns whichever provider succeeds first.
+ * 2. **Fallback** (for internal/single-image needs):
+ *    Tries providers in priority order, falls back on failure.
+ *
+ * Providers:
+ *   - OpenAI (gpt-image-1)  — best photorealism
+ *   - Gemini (Imagen 3)     — Google's model, good variety
+ *   - fal.ai (Flux Pro)     — fast, artistic/stylized
  */
 
 // Track transient provider failures to avoid repeatedly hitting broken providers
@@ -44,13 +48,20 @@ function recordProviderSuccess(provider) {
   providerFailures.delete(provider);
 }
 
+// Provider display names for WhatsApp captions
+const PROVIDER_LABELS = {
+  openai: 'ChatGPT',
+  fal:    'Flux Pro',
+  gemini: 'Gemini',
+};
+
 /**
  * Get ordered list of available providers (configured + not cooling down).
  * @param {string} [preferred] - Preferred provider to try first
  */
 function getAvailableProviders(preferred) {
   const all = [
-    { key: 'dalle', name: 'DALL-E 3', configured: !!config.OPENAI_API_KEY },
+    { key: 'openai', name: 'ChatGPT (gpt-image-1)', configured: !!config.OPENAI_API_KEY },
     { key: 'fal', name: 'Flux Pro (fal.ai)', configured: fal.isConfigured() },
     { key: 'gemini', name: 'Imagen 3 (Gemini)', configured: gemini.isConfigured() },
   ];
@@ -71,31 +82,60 @@ function getAvailableProviders(preferred) {
 
 /**
  * Check if an error indicates we should try the next provider.
- * (quota exhaustion, auth failure, rate limit, or safety block)
  */
 function isFallbackError(error) {
   const msg = (error.message || '').toLowerCase();
   const status = error.status || error.response?.status;
 
-  // Rate limit or quota
   if (status === 429) return true;
   if (msg.includes('rate_limit') || msg.includes('quota') || msg.includes('billing')) return true;
-
-  // Auth / config
   if (status === 401 || status === 403) return true;
   if (msg.includes('api_key') || msg.includes('not configured') || msg.includes('unauthorized')) return true;
-
-  // Not found — model endpoint may have changed or been deprecated
   if (status === 404) return true;
   if (msg.includes('not found') || msg.includes('404') || msg.includes('does not exist')) return true;
-
-  // Safety / content policy (different providers handle different content)
   if (msg.includes('safety') || msg.includes('content_policy') || msg.includes('blocked')) return true;
-
-  // Server errors (provider might be down)
   if (status >= 500) return true;
 
   return false;
+}
+
+/**
+ * Generate an image from a single provider.
+ * @param {string} providerKey - 'openai', 'fal', 'gemini'
+ * @param {object} opts - Generation options (prompt, format, etc.)
+ * @returns {object} { url, base64, mimeType, format, dimensions, provider }
+ */
+async function generateFromProvider(providerKey, opts) {
+  switch (providerKey) {
+    case 'openai':
+      return openaiMedia.generateImage({
+        prompt: opts.prompt,
+        format: opts.format || 'general',
+        quality: opts.quality || 'high',
+        model: opts.openaiModel || 'gpt-image-1',
+        workflow: opts.workflow,
+        clientId: opts.clientId,
+      });
+
+    case 'fal':
+      return fal.generateImage({
+        prompt: opts.prompt,
+        format: opts.format || 'general',
+        workflow: opts.workflow,
+        clientId: opts.clientId,
+      });
+
+    case 'gemini':
+      return gemini.generateImage({
+        prompt: opts.prompt,
+        format: opts.format || 'general',
+        workflow: opts.workflow,
+        clientId: opts.clientId,
+      });
+
+    default:
+      throw new Error(`Unknown provider: ${providerKey}`);
+  }
 }
 
 // ============================================================
@@ -104,16 +144,7 @@ function isFallbackError(error) {
 
 /**
  * Generate a single image, trying providers in priority order.
- *
- * @param {object} opts
- * @param {string} opts.prompt - Image generation prompt
- * @param {string} opts.format - Ad format key (default: 'general')
- * @param {string} opts.quality - 'standard' or 'hd' (DALL-E only)
- * @param {string} opts.style - 'vivid' or 'natural' (DALL-E only)
- * @param {string} opts.preferred - Preferred provider: 'dalle', 'fal', 'gemini'
- * @param {string} opts.workflow - Workflow name for cost tracking
- * @param {string} opts.clientId - Client ID for cost tracking
- * @returns {object} { url, format, dimensions, provider }
+ * Used for internal needs (landing pages, single creatives).
  */
 export async function generateImage(opts = {}) {
   const providers = getAvailableProviders(opts.preferred);
@@ -127,44 +158,10 @@ export async function generateImage(opts = {}) {
   for (const provider of providers) {
     try {
       log.info(`Trying ${provider.name} for image generation`, { format: opts.format });
-
-      let result;
-      switch (provider.key) {
-        case 'dalle':
-          result = await openaiMedia.generateImage({
-            prompt: opts.prompt,
-            format: opts.format || 'general',
-            quality: opts.quality || 'hd',
-            style: opts.style || 'natural',
-            workflow: opts.workflow,
-            clientId: opts.clientId,
-          });
-          result.provider = 'dalle';
-          break;
-
-        case 'fal':
-          result = await fal.generateImage({
-            prompt: opts.prompt,
-            format: opts.format || 'general',
-            workflow: opts.workflow,
-            clientId: opts.clientId,
-          });
-          break;
-
-        case 'gemini':
-          result = await gemini.generateImage({
-            prompt: opts.prompt,
-            format: opts.format || 'general',
-            workflow: opts.workflow,
-            clientId: opts.clientId,
-          });
-          break;
-      }
-
+      const result = await generateFromProvider(provider.key, opts);
       recordProviderSuccess(provider.key);
       log.info(`Image generated via ${provider.name}`, { format: opts.format, provider: provider.key });
       return result;
-
     } catch (error) {
       lastError = error;
       log.warn(`${provider.name} failed`, { error: error.message, format: opts.format });
@@ -174,8 +171,6 @@ export async function generateImage(opts = {}) {
         log.info(`Falling back to next provider after ${provider.name} failure`);
         continue;
       }
-
-      // Non-fallback error (e.g. bad prompt) — don't try other providers, same prompt will likely fail
       throw error;
     }
   }
@@ -184,23 +179,81 @@ export async function generateImage(opts = {}) {
 }
 
 // ============================================================
-// Multi-Format Ad Image Generation with Fallback
+// Multi-Provider Parallel Generation (for client comparison)
+// ============================================================
+
+const PER_PROVIDER_TIMEOUT_MS = 120_000; // 120s max per provider
+
+/**
+ * Generate images from ALL available providers in parallel for a single format.
+ * Returns one image per provider — client picks their favourite.
+ *
+ * @param {object} opts
+ * @param {string} opts.prompt - Image generation prompt
+ * @param {string} opts.format - Ad format key (default: 'general')
+ * @param {string} opts.workflow - Workflow name for cost tracking
+ * @param {string} opts.clientId - Client ID for cost tracking
+ * @returns {Array} Array of { url, base64, mimeType, format, dimensions, provider, providerLabel, error }
+ */
+export async function generateFromAllProviders(opts = {}) {
+  const providers = getAvailableProviders();
+
+  if (providers.length === 0) {
+    throw new Error('No image generation providers available. Configure at least one of: OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY.');
+  }
+
+  const format = opts.format || 'general';
+  const formatLabel = format.replace(/_/g, ' ');
+  const prompt = `${opts.prompt}. Professional advertising quality for ${formatLabel} format. Clean composition, no text overlays.`;
+
+  log.info(`Multi-provider generation: ${providers.length} providers for format ${format}`, {
+    providers: providers.map(p => p.key),
+  });
+
+  const settled = await Promise.allSettled(
+    providers.map(provider =>
+      Promise.race([
+        generateFromProvider(provider.key, { ...opts, prompt, format }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`${provider.name} timed out after ${PER_PROVIDER_TIMEOUT_MS / 1000}s`)), PER_PROVIDER_TIMEOUT_MS)
+        ),
+      ])
+    )
+  );
+
+  const results = settled.map((outcome, idx) => {
+    const provider = providers[idx];
+    if (outcome.status === 'fulfilled') {
+      recordProviderSuccess(provider.key);
+      log.info(`Multi-provider: ${provider.name} succeeded`, { format });
+      return {
+        ...outcome.value,
+        provider: provider.key,
+        providerLabel: PROVIDER_LABELS[provider.key] || provider.name,
+      };
+    }
+    log.warn(`Multi-provider: ${provider.name} failed`, { error: outcome.reason?.message, format });
+    if (isFallbackError(outcome.reason)) {
+      recordProviderFailure(provider.key);
+    }
+    return {
+      format,
+      provider: provider.key,
+      providerLabel: PROVIDER_LABELS[provider.key] || provider.name,
+      error: outcome.reason?.message || 'Unknown error',
+    };
+  });
+
+  return results;
+}
+
+// ============================================================
+// Multi-Format Ad Image Generation with Fallback (legacy)
 // ============================================================
 
 /**
  * Generate ad images for multiple platform formats, with per-image fallback.
- * If a provider fails mid-batch, remaining formats try the next provider.
- *
- * @param {object} opts
- * @param {string} opts.prompt - Base image prompt
- * @param {string} opts.platform - Platform key ('meta', 'instagram', 'google', 'tiktok')
- * @param {string[]} opts.formats - Specific format keys (optional)
- * @param {string} opts.quality - 'standard' or 'hd'
- * @param {string} opts.style - 'vivid' or 'natural'
- * @param {string} opts.preferred - Preferred provider: 'dalle', 'fal', 'gemini'
- * @param {string} opts.workflow - Workflow name
- * @param {string} opts.clientId - Client ID
- * @returns {Array} Array of generated images with metadata
+ * Used when you only need one image per format (not multi-provider comparison).
  */
 export async function generateAdImages(opts = {}) {
   const PLATFORM_DEFAULTS = {
@@ -211,14 +264,12 @@ export async function generateAdImages(opts = {}) {
   };
 
   const formats = opts.formats || PLATFORM_DEFAULTS[opts.platform] || ['general'];
-  const PER_FORMAT_TIMEOUT_MS = 180_000; // 180s max per format (allows 3 sequential provider fallbacks: 45s + 60s + 60s = 165s)
 
   log.info(`Generating ${formats.length} format(s) in parallel`, { platform: opts.platform, formats });
 
-  // Generate all formats in parallel — cuts total time from N*120s to ~120s
   const settled = await Promise.allSettled(
-    formats.map((format, idx) => {
-      log.info(`Starting image generation for format: ${format}`, { platform: opts.platform, formatIndex: idx + 1, totalFormats: formats.length });
+    formats.map((format) => {
+      log.info(`Starting image generation for format: ${format}`, { platform: opts.platform });
       return Promise.race([
         generateImage({
           ...opts,
@@ -226,14 +277,13 @@ export async function generateAdImages(opts = {}) {
           format,
         }),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Image generation timed out for format ${format} after ${PER_FORMAT_TIMEOUT_MS / 1000}s`)), PER_FORMAT_TIMEOUT_MS)
+          setTimeout(() => reject(new Error(`Image generation timed out for format ${format} after 180s`)), 180_000)
         ),
       ]);
     })
   );
 
-  // Map settled results back in format order
-  const results = settled.map((outcome, idx) => {
+  return settled.map((outcome, idx) => {
     const format = formats[idx];
     if (outcome.status === 'fulfilled') {
       log.info(`Image generated for format: ${format}`, { provider: outcome.value.provider });
@@ -242,8 +292,25 @@ export async function generateAdImages(opts = {}) {
     log.error(`All providers failed for format ${format}`, { error: outcome.reason?.message });
     return { format, error: outcome.reason?.message || 'Unknown error', provider: 'none' };
   });
+}
 
-  return results;
+// ============================================================
+// Multi-Provider Ad Image Generation (for client comparison)
+// ============================================================
+
+/**
+ * Generate ad images from ALL providers for a single format, in parallel.
+ * Returns one image per provider so the client can compare and pick.
+ *
+ * @param {object} opts
+ * @param {string} opts.prompt - Base image prompt
+ * @param {string} opts.format - Single format key (default: 'general')
+ * @param {string} opts.workflow - Workflow name
+ * @param {string} opts.clientId - Client ID
+ * @returns {Array} Array of generated images, one per provider
+ */
+export async function generateMultiProviderImages(opts = {}) {
+  return generateFromAllProviders(opts);
 }
 
 // ============================================================
@@ -255,10 +322,12 @@ export async function generateAdImages(opts = {}) {
  */
 export function getProviderStatus() {
   return {
-    dalle:  { configured: !!config.OPENAI_API_KEY, coolingDown: isProviderCoolingDown('dalle') },
+    openai: { configured: !!config.OPENAI_API_KEY, coolingDown: isProviderCoolingDown('openai') },
     fal:    { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal') },
     gemini: { configured: gemini.isConfigured(), coolingDown: isProviderCoolingDown('gemini') },
   };
 }
 
-export default { generateImage, generateAdImages, getProviderStatus };
+export { PROVIDER_LABELS };
+
+export default { generateImage, generateAdImages, generateFromAllProviders, generateMultiProviderImages, getProviderStatus, PROVIDER_LABELS };

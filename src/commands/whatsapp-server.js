@@ -427,7 +427,7 @@ async function deliverMediaInline(toolName, result, channel, chatId) {
   const sendVideo = (url, caption) =>
     channel === 'telegram' ? sendTelegramVideo(url, caption, chatId) : sendWhatsAppVideo(url, caption, chatId);
 
-  // --- Generated ad images (DALL-E / Flux / Imagen) + Landing page mockups ---
+  // --- Generated ad images (multi-provider: ChatGPT / Gemini / Flux) + Landing page mockups ---
   if ((toolName === 'generate_ad_images' || toolName === 'design_landing_page') && result.images) {
     const validImages = result.images.filter(i => (i.url || i.deliveryUrl) && !i.error);
     const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
@@ -1065,8 +1065,8 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_images',
-    description: 'Generate ad creative images using AI (DALL-E 3, Flux Pro, or Imagen 3 — auto-selects the best available provider with smart fallback). IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads. The more detail you provide, the better the output.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['dalle', 'fal', 'gemini'], description: 'Preferred AI image provider (optional — auto-selects if not specified). Use dalle for photorealism, fal for artistic/stylized, gemini for variety.' } }, required: ['clientName', 'platform', 'concept'] },
+    description: 'Generate ad creative images from ALL available AI providers in parallel (ChatGPT gpt-image-1, Gemini Imagen 3, Flux Pro). Each provider generates its own version so the client can compare side-by-side and pick their favourite. Images are sent inline as media messages. IMPORTANT: For best results, provide as much context as possible — brand colors, target audience, creative style, references, mood, and any insights from browsing the client website or competitor ads.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Platform for proper sizing' }, concept: { type: 'string', description: 'Detailed creative concept — what the image should show, the scene, the mood, the story. Be very specific.' }, product: { type: 'string', description: 'Product or service being advertised' }, audience: { type: 'string', description: 'Target audience description (demographics, interests, pain points)' }, mood: { type: 'string', description: 'Mood/emotion to evoke (e.g. "premium and aspirational", "urgent and energetic", "calm and trustworthy")' }, style: { type: 'string', description: 'Creative style: photorealistic, lifestyle photography, minimalist, editorial, flat design, cinematic, product shot, etc.' }, brandColors: { type: 'string', description: 'Brand color palette (e.g. "#1a2b3c navy blue, #ff6b35 coral orange, white")' }, references: { type: 'string', description: 'Visual references or inspiration (e.g. "Like Apple product ads — clean, minimal, lots of white space")' }, websiteInsights: { type: 'string', description: 'Key insights from browsing the client website (brand feel, visual style, messaging tone)' }, competitorInsights: { type: 'string', description: 'Insights from competitor ad research (what competitors are doing, gaps to exploit)' }, formats: { type: 'string', description: 'Comma-separated format keys: meta_feed, meta_square, meta_story, instagram_feed, instagram_story, google_display, tiktok (optional, uses platform defaults)' }, preferredProvider: { type: 'string', enum: ['openai', 'fal', 'gemini'], description: 'Preferred AI image provider (optional). All configured providers generate in parallel by default so the client can compare.' } }, required: ['clientName', 'platform', 'concept'] },
   },
   {
     name: 'generate_ad_video',
@@ -1731,7 +1731,7 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'generate_ad_images': {
       const providerStatus = imageRouter.getProviderStatus();
-      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
+      const anyConfigured = providerStatus.openai.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
       if (!anyConfigured) return { error: 'No image generation providers configured. Set at least one of OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY in .env.' };
       const client = getClient(toolInput.clientName);
 
@@ -1750,19 +1750,22 @@ Return ONLY the JSON array, no other text.`;
         competitorInsights: toolInput.competitorInsights,
       });
 
-      // Parse custom formats if provided
-      const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
+      // Parse custom format (multi-provider mode generates ONE format from ALL providers)
+      const format = toolInput.formats
+        ? toolInput.formats.split(',').map(f => f.trim())[0]
+        : (toolInput.platform === 'meta' ? 'meta_feed'
+          : toolInput.platform === 'instagram' ? 'instagram_feed'
+          : toolInput.platform === 'google' ? 'google_display'
+          : toolInput.platform === 'tiktok' ? 'tiktok'
+          : 'general');
 
-      // Use the image router with smart fallback across DALL-E 3, Flux Pro, Imagen 3
+      // Generate from ALL providers in parallel — client picks their favourite
       let images;
       try {
-        images = await imageRouter.generateAdImages({
+        images = await imageRouter.generateFromAllProviders({
           prompt: imagePrompt,
-          platform: toolInput.platform,
-          formats,
-          quality: 'hd',
-          style: 'natural',
-          preferred: toolInput.preferredProvider,
+          format,
+          quality: 'high',
           workflow: 'ad-image-generation',
           clientId: client?.id,
         });
@@ -1775,42 +1778,42 @@ Return ONLY the JSON array, no other text.`;
         return {
           error: `Image generation failed: ${genError.message}`,
           providerStatus: statusSummary,
-          suggestion: 'Check that at least one image provider API key is valid and the service is available. Provider status: ' + statusSummary,
+          suggestion: 'Check that at least one image provider API key is valid and the service is available.',
         };
       }
 
       // Check if any images were actually generated
       const successfulImages = images.filter(i => !i.error && i.url);
       if (successfulImages.length === 0) {
-        const errors = images.map(i => `${i.format}: ${i.error}`).join('; ');
+        const errors = images.map(i => `${i.providerLabel || i.provider}: ${i.error}`).join('; ');
         const status = imageRouter.getProviderStatus();
         const statusSummary = Object.entries(status)
           .map(([k, v]) => `${k}: ${v.configured ? (v.coolingDown ? 'cooling down' : 'configured') : 'not configured'}`)
           .join(', ');
         return {
-          error: `All image formats failed to generate. Errors: ${errors}`,
+          error: `All providers failed to generate. Errors: ${errors}`,
           providerStatus: statusSummary,
           suggestion: 'The configured image providers may be experiencing issues. Try again in a few minutes or check API key validity.',
         };
       }
 
-      // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
-      // Runs ALL uploads in parallel to avoid sequential 10s+ waits per image
+      // Download + persist images to Google Drive and keep buffers for WhatsApp direct upload
       const imgFolderId = client?.drive_creatives_folder_id || client?.drive_folder_id || config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
       const uploadResults = await Promise.allSettled(
         images.map(async (img) => {
           const mapped = {
             format: img.format,
-            label: img.dimensions?.label || img.format,
+            label: `${img.providerLabel || img.provider} — ${img.dimensions?.label || img.format}`,
             url: img.url,
             deliveryUrl: img.url,
             provider: img.provider,
+            providerLabel: img.providerLabel,
             error: img.error,
           };
           let imgBuffer = null;
           if (img.url && !img.error) {
             try {
-              const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.format}-${Date.now()}.png`, imgFolderId);
+              const driveResult = await googleDrive.uploadImageFromUrl(img.url, `${toolInput.clientName || 'ad'}-${img.provider}-${img.format}-${Date.now()}.png`, imgFolderId);
               if (driveResult) {
                 if (driveResult.webContentLink) {
                   mapped.driveUrl = driveResult.webContentLink;
@@ -1819,7 +1822,7 @@ Return ONLY the JSON array, no other text.`;
                 imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
               }
             } catch (e) {
-              log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format });
+              log.warn('Failed to persist ad image to Drive', { error: e.message, format: img.format, provider: img.provider });
             }
           }
           return { mapped, imgBuffer };
@@ -1844,16 +1847,19 @@ Return ONLY the JSON array, no other text.`;
         log.error('Failed to create ad images record sheet', { error: e.message });
       }
 
-      const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
+      const providers = [...new Set(images.filter(i => i.provider && !i.error).map(i => i.providerLabel || i.provider))];
       const result = {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
         concept: toolInput.concept,
+        format,
         imagePrompt,
         images: mappedImages,
-        totalGenerated: images.filter(i => !i.error).length,
+        totalGenerated: successfulImages.length,
         providers,
         sheetUrl,
+        mode: 'multi-provider',
+        message: `Generated ${successfulImages.length} image(s) from ${providers.join(', ')}. Each image is from a different AI provider — ask the client which one they prefer.`,
       };
       // Attach image buffers for deliverMediaInline (not serialized to JSON for Claude)
       result._imageBuffers = _imageBuffers;
@@ -1977,7 +1983,7 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'design_landing_page': {
       const providerStatus = imageRouter.getProviderStatus();
-      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
+      const anyConfigured = providerStatus.openai.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
       if (!anyConfigured) return { error: 'No image generation providers configured.' };
       const client = getClient(toolInput.clientName);
 
