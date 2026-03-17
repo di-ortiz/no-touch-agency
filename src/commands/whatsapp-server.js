@@ -2412,61 +2412,76 @@ Return ONLY the JSON array, no other text.`;
       if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Website crawling is not available — Firecrawl API key is not configured.' };
       }
-      const limit = Math.min(toolInput.limit || 10, 50);
-      const crawlOpts = {
-        limit,
-        maxDepth: toolInput.maxDepth || 2,
-      };
-      if (toolInput.includePaths) crawlOpts.includePaths = toolInput.includePaths.split(',').map(p => p.trim());
-      if (toolInput.excludePaths) crawlOpts.excludePaths = toolInput.excludePaths.split(',').map(p => p.trim());
+      try {
+        const limit = Math.min(toolInput.limit || 10, 50);
+        const crawlOpts = {
+          limit,
+          maxDepth: toolInput.maxDepth || 2,
+        };
+        if (toolInput.includePaths) crawlOpts.includePaths = toolInput.includePaths.split(',').map(p => p.trim());
+        if (toolInput.excludePaths) crawlOpts.excludePaths = toolInput.excludePaths.split(',').map(p => p.trim());
 
-      const result = await firecrawlApi.crawl(toolInput.url, crawlOpts);
-      return {
-        totalPages: result.totalPages,
-        pages: result.pages.map(p => ({
-          url: p.url,
-          title: p.metadata?.title || '',
-          description: p.metadata?.description || '',
-          contentPreview: p.markdown?.slice(0, 2000) || '',
-          wordCount: p.markdown ? p.markdown.split(/\s+/).length : 0,
-        })),
-      };
+        const result = await firecrawlApi.crawl(toolInput.url, crawlOpts);
+        return {
+          totalPages: result.totalPages,
+          pages: result.pages.map(p => ({
+            url: p.url,
+            title: p.metadata?.title || '',
+            description: p.metadata?.description || '',
+            contentPreview: p.markdown?.slice(0, 2000) || '',
+            wordCount: p.markdown ? p.markdown.split(/\s+/).length : 0,
+          })),
+        };
+      } catch (e) {
+        log.warn('crawl_website failed', { url: toolInput.url, error: e.message });
+        return { error: `Website crawling failed: ${e.message}` };
+      }
     }
 
     case 'search_web': {
       if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Web search is not available — Firecrawl API key is not configured.' };
       }
-      const searchResult = await firecrawlApi.search(toolInput.query, {
-        limit: Math.min(toolInput.limit || 5, 10),
-        lang: toolInput.lang || 'en',
-        country: toolInput.country || 'us',
-      });
-      return {
-        query: toolInput.query,
-        totalResults: searchResult.totalResults,
-        results: searchResult.results.map(r => ({
-          url: r.url,
-          title: r.title,
-          description: r.description,
-          contentPreview: r.markdown?.slice(0, 1500) || '',
-        })),
-      };
+      try {
+        const searchResult = await firecrawlApi.search(toolInput.query, {
+          limit: Math.min(toolInput.limit || 5, 10),
+          lang: toolInput.lang || 'en',
+          country: toolInput.country || 'us',
+        });
+        return {
+          query: toolInput.query,
+          totalResults: searchResult.totalResults,
+          results: searchResult.results.map(r => ({
+            url: r.url,
+            title: r.title,
+            description: r.description,
+            contentPreview: r.markdown?.slice(0, 1500) || '',
+          })),
+        };
+      } catch (e) {
+        log.warn('search_web failed', { query: toolInput.query, error: e.message });
+        return { error: `Web search failed: ${e.message}` };
+      }
     }
 
     case 'map_website': {
       if (typeof firecrawlApi.isConfigured !== 'function' || !firecrawlApi.isConfigured()) {
         return { error: 'Website mapping is not available — Firecrawl API key is not configured.' };
       }
-      const mapResult = await firecrawlApi.map(toolInput.url, {
-        limit: toolInput.limit || 100,
-        search: toolInput.search || undefined,
-      });
-      return {
-        url: toolInput.url,
-        totalUrls: mapResult.totalUrls,
-        urls: mapResult.urls,
-      };
+      try {
+        const mapResult = await firecrawlApi.map(toolInput.url, {
+          limit: toolInput.limit || 100,
+          search: toolInput.search || undefined,
+        });
+        return {
+          url: toolInput.url,
+          totalUrls: mapResult.totalUrls,
+          urls: mapResult.urls,
+        };
+      } catch (e) {
+        log.warn('map_website failed', { url: toolInput.url, error: e.message });
+        return { error: `Website mapping failed: ${e.message}` };
+      }
     }
 
     // --- Visual Analysis ---
@@ -3269,37 +3284,47 @@ Return ONLY the JSON array, no other text.`;
 
     // --- PDF Reports (pdfmake — no Google dependency) ---
     case 'generate_performance_pdf': {
-      const buffer = await pdfReportGenerator.generatePerformancePdf({
-        clientName: toolInput.clientName,
-        reportType: toolInput.reportType,
-        dateRange: toolInput.dateRange,
-        metrics: toolInput.metrics,
-        analytics: toolInput.analytics,
-        campaigns: toolInput.campaigns,
-        topKeywords: toolInput.topKeywords,
-        audienceData: toolInput.audienceData,
-        analysis: toolInput.analysis,
-        recommendations: toolInput.recommendations,
-      });
-      const type = toolInput.reportType || 'weekly';
-      const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_${type}_report.pdf`;
-      const caption = `📊 ${toolInput.clientName} — ${type === 'monthly' ? 'Monthly' : 'Weekly'} Performance Report`;
-      const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
-      return { clientName: toolInput.clientName, fileName, sent, message: sent ? `PDF report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
+      try {
+        const buffer = await pdfReportGenerator.generatePerformancePdf({
+          clientName: toolInput.clientName,
+          reportType: toolInput.reportType,
+          dateRange: toolInput.dateRange,
+          metrics: toolInput.metrics,
+          analytics: toolInput.analytics,
+          campaigns: toolInput.campaigns,
+          topKeywords: toolInput.topKeywords,
+          audienceData: toolInput.audienceData,
+          analysis: toolInput.analysis,
+          recommendations: toolInput.recommendations,
+        });
+        const type = toolInput.reportType || 'weekly';
+        const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_${type}_report.pdf`;
+        const caption = `📊 ${toolInput.clientName} — ${type === 'monthly' ? 'Monthly' : 'Weekly'} Performance Report`;
+        const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
+        return { clientName: toolInput.clientName, fileName, sent, message: sent ? `PDF report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
+      } catch (e) {
+        log.error('generate_performance_pdf failed', { error: e.message, clientName: toolInput.clientName });
+        return { error: `PDF generation failed: ${e.message}. This tool does NOT depend on Google Drive — the issue is likely with the data provided.` };
+      }
     }
     case 'generate_competitor_pdf': {
-      const buffer = await pdfReportGenerator.generateCompetitorPdf({
-        clientName: toolInput.clientName,
-        competitors: toolInput.competitors,
-        keywordGap: toolInput.keywordGap,
-        competitorAds: toolInput.competitorAds,
-        summary: toolInput.summary,
-        recommendations: toolInput.recommendations,
-      });
-      const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_competitor_analysis.pdf`;
-      const caption = `🔍 ${toolInput.clientName} — Competitive Analysis Report`;
-      const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
-      return { clientName: toolInput.clientName, fileName, sent, message: sent ? `Competitor report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
+      try {
+        const buffer = await pdfReportGenerator.generateCompetitorPdf({
+          clientName: toolInput.clientName,
+          competitors: toolInput.competitors,
+          keywordGap: toolInput.keywordGap,
+          competitorAds: toolInput.competitorAds,
+          summary: toolInput.summary,
+          recommendations: toolInput.recommendations,
+        });
+        const fileName = `${toolInput.clientName.replace(/\s+/g, '_')}_competitor_analysis.pdf`;
+        const caption = `🔍 ${toolInput.clientName} — Competitive Analysis Report`;
+        const sent = await pdfReportGenerator.sendPdfViaWhatsApp(buffer, fileName, caption, toolInput.sendTo);
+        return { clientName: toolInput.clientName, fileName, sent, message: sent ? `Competitor report sent via WhatsApp: ${fileName}` : 'PDF generated but delivery failed — please try again.' };
+      } catch (e) {
+        log.error('generate_competitor_pdf failed', { error: e.message, clientName: toolInput.clientName });
+        return { error: `Competitor PDF generation failed: ${e.message}. This tool does NOT depend on Google Drive — the issue is likely with the data provided.` };
+      }
     }
 
     // --- Charts ---
@@ -3610,7 +3635,8 @@ CRITICAL RULES:
 - ALWAYS follow through and complete the task. Deliver actual results, not instructions on how to get results.
 - NEVER assume a tool is broken or credentials are unavailable based on past failures. ALWAYS call the tool again — credentials and configurations can change at any time. Never tell the user that "credentials are unavailable" without actually calling the tool first to verify.
 - When asked to create presentations, charts, graphs, reports, or any Google Slides/Sheets/Drive/Docs content, you MUST call the appropriate tool (build_media_plan_deck, build_competitor_deck, build_performance_deck, create_chart_presentation, create_single_chart, generate_performance_pdf, generate_competitor_pdf). NEVER substitute with text-based tables, ASCII art, or emoji-based charts. The tools create REAL Google Slides with interactive charts.
-- If a Google tool fails, use check_credentials to diagnose the issue and report the specific error — do not give up or offer text alternatives.
+- When asked to create PDF reports, analyses, or downloadable documents, use generate_performance_pdf or generate_competitor_pdf. These PDF tools work INDEPENDENTLY of Google Drive — they generate PDFs locally and send them directly via WhatsApp. NEVER tell the user that Google Drive quota or permissions affect PDF generation.
+- If a Google Slides/Sheets/Drive tool fails due to quota or permissions, ALWAYS offer the PDF alternative (generate_performance_pdf or generate_competitor_pdf) as a fallback. PDFs do NOT require Google Drive.
 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you <i>would</i> create — actually create it.
