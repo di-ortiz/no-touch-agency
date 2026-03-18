@@ -34,8 +34,11 @@ export async function askClaude({
   tools,
   messages,
 }) {
-  return Promise.race([
-    rateLimited('anthropic', async () => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CLAUDE_API_TIMEOUT_MS);
+
+  try {
+    return await rateLimited('anthropic', async () => {
       return retry(async () => {
         const params = {
           model,
@@ -48,7 +51,7 @@ export async function askClaude({
           params.tools = tools;
         }
 
-        const response = await client.messages.create(params);
+        const response = await client.messages.create(params, { signal: controller.signal });
 
         const inputTokens = response.usage?.input_tokens || 0;
         const outputTokens = response.usage?.output_tokens || 0;
@@ -88,11 +91,15 @@ export async function askClaude({
         label: 'Claude API call',
         shouldRetry: isRetryableHttpError,
       });
-    }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Claude API call timed out after ${CLAUDE_API_TIMEOUT_MS / 1000}s`)), CLAUDE_API_TIMEOUT_MS)
-    ),
-  ]);
+    });
+  } catch (err) {
+    if (err.name === 'AbortError' || controller.signal.aborted) {
+      throw new Error(`Claude API call timed out after ${CLAUDE_API_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**

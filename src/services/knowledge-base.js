@@ -5,6 +5,52 @@ import logger from '../utils/logger.js';
 const log = logger.child({ workflow: 'knowledge-base' });
 const DB_PATH = process.env.KB_DB_PATH || 'data/knowledge.db';
 
+// Column whitelists for dynamic update functions (prevents SQL injection via field names)
+const CONTACT_COLUMNS = new Set([
+  'client_id', 'phone', 'name', 'email', 'role', 'channel', 'language',
+]);
+
+const ONBOARDING_COLUMNS = new Set([
+  'status', 'current_step', 'answers', 'client_id', 'leadsie_invite_id', 'drive_folder_url',
+  'channel', 'language',
+]);
+
+const CLIENT_COLUMNS = new Set([
+  'name', 'hubspot_id', 'industry', 'website', 'description', 'target_audience', 'competitors',
+  'brand_voice', 'brand_colors', 'brand_fonts', 'logo_drive_id', 'brand_book_drive_id',
+  'monthly_budget_cents', 'target_roas', 'target_cpa_cents', 'primary_kpi', 'goals',
+  'meta_ad_account_id', 'google_ads_customer_id', 'tiktok_advertiser_id', 'twitter_ads_account_id',
+  'drive_root_folder_id', 'drive_reports_folder_id', 'drive_creatives_folder_id', 'drive_plans_folder_id',
+  'drive_brand_assets_folder_id', 'drive_profile_sheet_id', 'onboarding_complete', 'status',
+  'location', 'channels_have', 'channels_need', 'product_service', 'plan', 'conversation_log_doc_id',
+  'pricing', 'pains', 'company_size', 'sales_cycle', 'avg_transaction_value', 'current_campaigns',
+  'sales_process', 'additional_info', 'requested_platforms',
+  'wordpress_url', 'wordpress_username', 'wordpress_app_password',
+  'shopify_store_url', 'shopify_access_token', 'godaddy_domain', 'godaddy_api_key',
+  'hubspot_access_token', 'ga4_property_id', 'cms_platform',
+]);
+
+const PENDING_CLIENT_COLUMNS = new Set([
+  'email', 'plan', 'name', 'status', 'channel', 'chat_id', 'language', 'phone',
+  'website', 'business_name', 'business_description', 'product_service',
+  'leadsie_invite_id', 'requested_platforms',
+]);
+
+function validateColumns(updates, allowedColumns, tableName) {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    if (!allowedColumns.has(dbKey)) {
+      log.warn(`Rejected unknown column "${dbKey}" in ${tableName} update`, { originalKey: key });
+      continue;
+    }
+    fields.push(`${dbKey} = ?`);
+    values.push(typeof value === 'object' && value !== null ? JSON.stringify(value) : value);
+  }
+  return { fields, values };
+}
+
 let db;
 
 function getDb() {
@@ -208,6 +254,9 @@ function getDb() {
       CREATE INDEX IF NOT EXISTS idx_onboarding_phone ON onboarding_sessions(phone);
       CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_clients(token);
       CREATE INDEX IF NOT EXISTS idx_convo_chat ON conversation_history(chat_id);
+      CREATE INDEX IF NOT EXISTS idx_convo_chat_role_date ON conversation_history(chat_id, role, created_at);
+      CREATE INDEX IF NOT EXISTS idx_contact_client_channel ON client_contacts(client_id, channel);
+      CREATE INDEX IF NOT EXISTS idx_campaign_client_date ON campaign_history(client_id, start_date);
     `);
 
     // Safe migration: add channel column to onboarding_sessions if missing
@@ -289,13 +338,8 @@ export function createContact(data) {
 export function updateContact(phone, updates) {
   const d = getDb();
   const normalized = phone?.replace(/[^0-9]/g, '');
-  const fields = [];
-  const values = [];
-  for (const [key, value] of Object.entries(updates)) {
-    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    fields.push(`${dbKey} = ?`);
-    values.push(value);
-  }
+  const { fields, values } = validateColumns(updates, CONTACT_COLUMNS, 'client_contacts');
+  if (fields.length === 0) return;
   values.push(normalized);
   d.prepare(`UPDATE client_contacts SET ${fields.join(', ')} WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).run(...values);
 }
@@ -346,13 +390,8 @@ export function createOnboardingSession(phone, channel = 'whatsapp', language = 
 
 export function updateOnboardingSession(id, updates) {
   const d = getDb();
-  const fields = [];
-  const values = [];
-  for (const [key, value] of Object.entries(updates)) {
-    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    fields.push(`${dbKey} = ?`);
-    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
-  }
+  const { fields, values } = validateColumns(updates, ONBOARDING_COLUMNS, 'onboarding_sessions');
+  if (fields.length === 0) return;
   fields.push("updated_at = datetime('now')");
   values.push(id);
   d.prepare(`UPDATE onboarding_sessions SET ${fields.join(', ')} WHERE id = ?`).run(...values);
@@ -417,13 +456,8 @@ export function getAllClients(status = 'active') {
 
 export function updateClient(id, updates) {
   const d = getDb();
-  const fields = [];
-  const values = [];
-  for (const [key, value] of Object.entries(updates)) {
-    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    fields.push(`${dbKey} = ?`);
-    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
-  }
+  const { fields, values } = validateColumns(updates, CLIENT_COLUMNS, 'clients');
+  if (fields.length === 0) return;
   fields.push("updated_at = datetime('now')");
   values.push(id);
 
@@ -633,13 +667,7 @@ export function activatePendingClient(token, chatId, channel) {
 
 export function updatePendingClient(token, updates) {
   const d = getDb();
-  const fields = [];
-  const values = [];
-  for (const [key, value] of Object.entries(updates)) {
-    const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    fields.push(`${dbKey} = ?`);
-    values.push(typeof value === 'object' ? JSON.stringify(value) : value);
-  }
+  const { fields, values } = validateColumns(updates, PENDING_CLIENT_COLUMNS, 'pending_clients');
   if (fields.length === 0) return;
   values.push(token);
   d.prepare(`UPDATE pending_clients SET ${fields.join(', ')} WHERE token = ?`).run(...values);
@@ -784,6 +812,15 @@ export function getContactChannel(phone) {
   return pending?.channel || 'whatsapp';
 }
 
+/** Close the database connection (call on graceful shutdown). */
+export function closeDb() {
+  if (db) {
+    db.close();
+    db = null;
+    log.info('Knowledge database closed');
+  }
+}
+
 export default {
   createClient, getClient, getAllClients, updateClient, searchClients,
   recordCampaignPerformance, getClientCampaignHistory,
@@ -797,4 +834,5 @@ export default {
   saveMessage, getMessages, clearMessages,
   getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
   getAllClientContacts, getLastClientMessageTime, getContactChannel,
+  closeDb,
 };

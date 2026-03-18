@@ -18,6 +18,8 @@ import { runMorningCostAlert, runEveningCostAlert } from './workflows/daily-cost
 import { runWeeklySEOCheck, runMonthlyContentAnalysis } from './workflows/seo-monitor.js';
 import { runDayBeforeConfirmation, runStaleConfirmationCleanup, runContentPublisher } from './workflows/content-confirmation.js';
 import { sendAlert } from './api/whatsapp.js';
+import { closeDb as closeKnowledgeDb } from './services/knowledge-base.js';
+import { closeDb as closeCostDb } from './services/cost-tracker.js';
 import config from './config.js';
 import fs from 'fs';
 
@@ -87,16 +89,16 @@ async function main() {
   log.info('PPC Agency Automation fully initialized');
 }
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  log.info('Received SIGTERM, shutting down');
+// Graceful shutdown — close database connections before exit
+function shutdown(signal) {
+  log.info(`Received ${signal}, shutting down`);
+  try { closeKnowledgeDb(); } catch (e) { log.warn('Error closing knowledge DB', { error: e.message }); }
+  try { closeCostDb(); } catch (e) { log.warn('Error closing cost DB', { error: e.message }); }
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  log.info('Received SIGINT, shutting down');
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('unhandledRejection', (error) => {
   log.error('Unhandled rejection', { error: error?.message, stack: error?.stack });

@@ -594,8 +594,21 @@ app.use('/webhook', rateLimit({
 }));
 
 // CORS for /api routes (called from Lovable website)
+const allowedOrigins = config.CORS_ALLOWED_ORIGINS
+  ? config.CORS_ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+  : [];
+
 app.use('/api', (req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (allowedOrigins.length > 0) {
+    if (origin && allowedOrigins.includes(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+      res.header('Vary', 'Origin');
+    }
+  } else {
+    // Fallback: allow all origins if CORS_ALLOWED_ORIGINS not configured (dev mode)
+    res.header('Access-Control-Allow-Origin', '*');
+  }
   res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -613,8 +626,10 @@ app.use('/api', rateLimit({
 // --- POST /api/client-init --- (called by Lovable after payment)
 app.post('/api/client-init', async (req, res) => {
   try {
-    // Optional API key check
-    if (config.CLIENT_INIT_API_KEY) {
+    // API key check — strongly recommended for production
+    if (!config.CLIENT_INIT_API_KEY) {
+      log.warn('CLIENT_INIT_API_KEY not set — /api/client-init is unprotected');
+    } else {
       const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
       if (apiKey !== config.CLIENT_INIT_API_KEY) {
         return res.status(401).json({ error: 'Invalid API key' });
@@ -2337,6 +2352,28 @@ Return ONLY the JSON array, no other text.`;
       let url = toolInput.url;
       if (!url) return { error: 'URL is required' };
       if (!url.startsWith('http')) url = `https://${url}`;
+      // SSRF protection: block internal/private network URLs
+      try {
+        const parsed = new URL(url);
+        const hostname = parsed.hostname.toLowerCase();
+        if (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '0.0.0.0' ||
+          hostname === '::1' ||
+          hostname.endsWith('.local') ||
+          hostname.endsWith('.internal') ||
+          /^10\./.test(hostname) ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+          /^192\.168\./.test(hostname) ||
+          /^169\.254\./.test(hostname) ||
+          parsed.protocol === 'file:'
+        ) {
+          return { error: 'URL points to a private/internal network and cannot be accessed' };
+        }
+      } catch {
+        return { error: 'Invalid URL format' };
+      }
       const purpose = toolInput.purpose || 'general';
       try {
         // Safety check: ensure webScraper module loaded correctly
@@ -3572,21 +3609,42 @@ Return ONLY the JSON array, no other text.`;
   }
 }
 
+// --- WhatsApp webhook signature verification ---
+function verifyWhatsAppSignature(req) {
+  const signature = req.headers['x-hub-signature-256'];
+  const appSecret = config.WHATSAPP_APP_SECRET;
+  if (!appSecret) return true; // Skip if not configured (log warning at startup)
+  if (!signature) {
+    log.warn('WhatsApp webhook: missing X-Hub-Signature-256 header');
+    return false;
+  }
+  const rawBody = JSON.stringify(req.body);
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
 // --- WhatsApp Cloud API Webhook Verification (GET) ---
 app.get('/webhook/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === config.WHATSAPP_VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token && token === config.WHATSAPP_VERIFY_TOKEN) {
     log.info('Webhook verified');
     return res.status(200).send(challenge);
   }
+  log.warn('WhatsApp webhook verification failed', { mode, hasToken: !!token });
   res.sendStatus(403);
 });
 
 // --- WhatsApp Cloud API Webhook (POST) ---
 app.post('/webhook/whatsapp', async (req, res) => {
+  // Verify payload signature from Meta
+  if (!verifyWhatsAppSignature(req)) {
+    log.warn('WhatsApp webhook: invalid signature — rejecting payload');
+    return res.sendStatus(403);
+  }
+
   // Respond immediately to Meta
   res.sendStatus(200);
 
@@ -3636,13 +3694,23 @@ app.post('/webhook/whatsapp', async (req, res) => {
       await handleClientMessage(from, body);
     }
   } catch (error) {
-    log.error('Command handling failed', { error: error.message });
-    await sendWhatsApp(`❌ Error: ${error.message}`);
+    log.error('Command handling failed', { error: error.message, stack: error.stack });
+    await sendWhatsApp('❌ Sorry, something went wrong. Please try again in a moment.');
   }
 });
 
 // --- Telegram Bot Webhook (POST) ---
 app.post('/webhook/telegram', async (req, res) => {
+  // Verify Telegram secret token if configured
+  const telegramSecret = config.TELEGRAM_WEBHOOK_SECRET;
+  if (telegramSecret) {
+    const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
+    if (headerSecret !== telegramSecret) {
+      log.warn('Telegram webhook: invalid secret token — rejecting payload');
+      return res.sendStatus(403);
+    }
+  }
+
   // Respond immediately to Telegram
   res.sendStatus(200);
 
@@ -3714,7 +3782,7 @@ app.post('/webhook/telegram', async (req, res) => {
   } catch (error) {
     log.error('Telegram command handling failed', { error: error.message, stack: error.stack });
     try {
-      await sendTelegram(`Error: ${error.message}`);
+      await sendTelegram('Sorry, something went wrong. Please try again in a moment.');
     } catch (e) { /* best effort */ }
   }
 });
@@ -4402,12 +4470,7 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
   } catch (error) {
     log.error('Telegram client message handling failed', { chatId, error: error.message, stack: error.stack, errorType: error.constructor?.name, status: error.status });
     try {
-      // Include error hint so we can diagnose from Telegram logs
-      const isApiError = error.message?.includes('401') || error.message?.includes('api_key') || error.message?.includes('authentication');
-      const hint = isApiError
-        ? ' (API authentication issue — check ANTHROPIC_API_KEY)'
-        : ` (${error.message?.substring(0, 80)})`;
-      await sendTelegram(`Sorry, I ran into a temporary issue${hint}. Please try again in a moment.`, chatId);
+      await sendTelegram('Sorry, I ran into a temporary issue. Please try again in a moment.', chatId);
     } catch (e) { /* best effort */ }
   }
 }
@@ -4418,8 +4481,12 @@ app.post('/webhook/leadsie', async (req, res) => {
 
   try {
     const secret = config.LEADSIE_WEBHOOK_SECRET;
-    if (secret && req.headers['x-leadsie-secret'] !== secret) {
-      log.warn('Leadsie webhook: invalid secret');
+    if (!secret) {
+      log.error('Leadsie webhook: LEADSIE_WEBHOOK_SECRET not configured — rejecting all requests');
+      return;
+    }
+    if (req.headers['x-leadsie-secret'] !== secret) {
+      log.warn('Leadsie webhook: invalid secret — rejecting payload');
       return;
     }
 

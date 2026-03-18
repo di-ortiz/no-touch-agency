@@ -186,4 +186,12 @@ if (process.argv.includes('--report')) {
   printCostReport();
 }
 
-export default { recordCost, getCostSummary, isDailyBudgetExceeded, auditLog, getAuditLog };
+/** Close the database connection (call on graceful shutdown). */
+export function closeDb() {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}
+
+export default { recordCost, getCostSummary, isDailyBudgetExceeded, auditLog, getAuditLog, closeDb };

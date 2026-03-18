@@ -25,10 +25,12 @@ const envSchema = z.object({
   WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
   WHATSAPP_OWNER_PHONE: z.string().min(1),
   WHATSAPP_VERIFY_TOKEN: z.string().optional().default(''),
+  WHATSAPP_APP_SECRET: z.string().optional().default(''), // For X-Hub-Signature-256 webhook verification
 
   // Telegram Bot
   TELEGRAM_BOT_TOKEN: z.string().optional().default(''),
   TELEGRAM_OWNER_CHAT_ID: z.string().optional().default(''),
+  TELEGRAM_WEBHOOK_SECRET: z.string().optional().default(''), // For X-Telegram-Bot-Api-Secret-Token verification
 
   // ClickUp
   CLICKUP_API_TOKEN: z.string().min(1),
@@ -90,7 +92,10 @@ const envSchema = z.object({
   // Client onboarding
   WHATSAPP_BUSINESS_PHONE: z.string().optional().default(''), // The actual phone number for wa.me links
   TELEGRAM_BOT_USERNAME: z.string().optional().default(''), // For t.me deep links
-  CLIENT_INIT_API_KEY: z.string().optional().default(''), // Optional API key to protect /api/client-init
+  CLIENT_INIT_API_KEY: z.string().optional().default(''), // API key to protect /api/client-init (strongly recommended)
+
+  // CORS
+  CORS_ALLOWED_ORIGINS: z.string().optional().default(''), // Comma-separated list of allowed origins for /api routes
 
   // Supabase (Lovable onboarding submissions)
   SUPABASE_URL: z.string().optional().default(''),
@@ -139,6 +144,8 @@ try {
       WHATSAPP_PHONE_NUMBER_ID: '000000000000',
       WHATSAPP_OWNER_PHONE: '10000000001',
       WHATSAPP_VERIFY_TOKEN: 'test-verify',
+      WHATSAPP_APP_SECRET: 'test-app-secret',
+      TELEGRAM_WEBHOOK_SECRET: 'test-telegram-secret',
       CLICKUP_API_TOKEN: 'test-clickup',
       CLICKUP_TEAM_ID: 'test-team',
       NODE_ENV: 'test',
