@@ -6,6 +6,7 @@ import {
   createClient, getClient, updateClient,
   getMessages,
   getPendingClientByChatId, getContactsByClientId,
+  buildMemorySummary, getClientModules, getClientPlanDetails,
 } from '../services/knowledge-base.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleSheets from '../api/google-sheets.js';
@@ -407,7 +408,7 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
       createContact({ phone, name: answers.name, clientId: client.id, channel });
     }
 
-    // Carry over requested_platforms and any pre-granted credentials from pending record
+    // Carry over requested_platforms, Lovable registration fields, and any pre-granted credentials from pending record
     if (pendingClient) {
       const carryOver = {};
       if (pendingClient.requested_platforms) carryOver.requested_platforms = pendingClient.requested_platforms;
@@ -420,6 +421,16 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
       if (pendingClient.hubspot_access_token) carryOver.hubspot_access_token = pendingClient.hubspot_access_token;
       if (pendingClient.shopify_store_url) carryOver.shopify_store_url = pendingClient.shopify_store_url;
       if (pendingClient.shopify_access_token) carryOver.shopify_access_token = pendingClient.shopify_access_token;
+      // Lovable frontend registration fields
+      if (pendingClient.lovable_user_id) carryOver.lovable_user_id = pendingClient.lovable_user_id;
+      if (pendingClient.selected_modules) carryOver.selected_modules = pendingClient.selected_modules;
+      if (pendingClient.monthly_price_cents) carryOver.monthly_price_cents = pendingClient.monthly_price_cents;
+      if (pendingClient.access_method) {
+        carryOver.access_method = pendingClient.access_method;
+        if (pendingClient.access_method === 'leadsie_now') {
+          carryOver.access_granted_at = new Date().toISOString();
+        }
+      }
       if (Object.keys(carryOver).length > 0) {
         updateClient(clientId, carryOver);
         log.info('Carried over platform credentials from pending client', { clientId, fields: Object.keys(carryOver) });
@@ -954,8 +965,15 @@ export function getClientContextByPhone(phone) {
   // Build platform access status: compare requested platforms vs actually granted credentials
   const platformAccess = buildPlatformAccessStatus(client);
 
+  // Build plan/module details
+  const planDetails = contact.client_id ? getClientPlanDetails(contact.client_id) : null;
+
+  // Build Sofia's memory summary
+  const memorySummary = contact.client_id ? buildMemorySummary(contact.client_id) : '';
+
   return {
     contactName: contact.name,
+    contactEmail: contact.email,
     clientId: contact.client_id,
     clientName: client?.name,
     industry: client?.industry,
@@ -984,6 +1002,18 @@ export function getClientContextByPhone(phone) {
     onboardingComplete: client?.onboarding_complete === 1,
     channels,
     platformAccess,
+    // Lovable registration data
+    lovableUserId: client?.lovable_user_id,
+    selectedModules: planDetails?.modules || [],
+    moduleLabels: planDetails?.moduleLabels || [],
+    plan: planDetails?.plan || 'smb',
+    planLabel: planDetails?.planLabel || 'SMB',
+    monthlyPriceCents: planDetails?.monthlyPriceCents || 0,
+    dailyMessageLimit: planDetails?.dailyMessageLimit || 20,
+    accessMethod: client?.access_method,
+    accessGrantedAt: client?.access_granted_at,
+    // Sofia's memory
+    memorySummary,
   };
 }
 
@@ -1083,9 +1113,28 @@ export function buildPersonalizedWelcome(pendingData, language = 'en', channel =
     pt: `${planInfo.label} (${planInfo.modules} módulos, ${planInfo.dailyMessages} mensagens/dia)`,
   };
 
+  // Parse selected modules for display
+  let modulesList = [];
+  try {
+    if (pendingData.selected_modules) {
+      const parsed = typeof pendingData.selected_modules === 'string'
+        ? JSON.parse(pendingData.selected_modules)
+        : pendingData.selected_modules;
+      const moduleLabels = {
+        social_media: 'Social Media Management', ppc: 'Paid Media (PPC)',
+        seo: 'SEO', cro: 'CRO', content: 'Content & Creatives', email: 'Email Marketing',
+      };
+      modulesList = parsed.map(m => moduleLabels[m] || m);
+    }
+  } catch (e) { /* ignore */ }
+
   // Build data summary lines
   const dataLines = [];
   dataLines.push(`  • ${b(l.plan + ':')} ${planDesc[language] || planDesc.en}`);
+  if (modulesList.length > 0) {
+    const modulesLabel = { en: 'Modules', es: 'Módulos', pt: 'Módulos' };
+    dataLines.push(`  • ${b((modulesLabel[language] || 'Modules') + ':')} ${modulesList.join(', ')}`);
+  }
   if (pendingData.website) dataLines.push(`  • ${b(l.website + ':')} ${pendingData.website}`);
   if (pendingData.business_name) dataLines.push(`  • ${b(l.business + ':')} ${pendingData.business_name}`);
   if (pendingData.business_description) dataLines.push(`  • ${b(l.description + ':')} ${pendingData.business_description}`);

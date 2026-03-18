@@ -28,12 +28,14 @@ const CLIENT_COLUMNS = new Set([
   'wordpress_url', 'wordpress_username', 'wordpress_app_password',
   'shopify_store_url', 'shopify_access_token', 'godaddy_domain', 'godaddy_api_key',
   'hubspot_access_token', 'ga4_property_id', 'cms_platform',
+  'lovable_user_id', 'selected_modules', 'monthly_price_cents', 'access_granted_at', 'access_method',
 ]);
 
 const PENDING_CLIENT_COLUMNS = new Set([
   'email', 'plan', 'name', 'status', 'channel', 'chat_id', 'language', 'phone',
   'website', 'business_name', 'business_description', 'product_service',
   'leadsie_invite_id', 'requested_platforms',
+  'lovable_user_id', 'selected_modules', 'monthly_price_cents', 'access_method',
 ]);
 
 function validateColumns(updates, allowedColumns, tableName) {
@@ -313,6 +315,34 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN hubspot_access_token TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN ga4_property_id TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN cms_platform TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migrations: Lovable frontend registration fields
+    try { db.exec("ALTER TABLE clients ADD COLUMN lovable_user_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN selected_modules TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN monthly_price_cents INTEGER DEFAULT 0"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN access_granted_at TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE clients ADD COLUMN access_method TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN lovable_user_id TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN selected_modules TEXT"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN monthly_price_cents INTEGER DEFAULT 0"); } catch (e) { /* already exists */ }
+    try { db.exec("ALTER TABLE pending_clients ADD COLUMN access_method TEXT"); } catch (e) { /* already exists */ }
+
+    // Sofia's long-lasting memory — structured notes per client
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS client_memory (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_client ON client_memory(client_id);
+      CREATE INDEX IF NOT EXISTS idx_memory_client_cat ON client_memory(client_id, category);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_client_key ON client_memory(client_id, category, key);
+    `);
   }
   return db;
 }
@@ -618,12 +648,17 @@ export function createPendingClient(data) {
   const d = getDb();
   const id = uuid();
   d.prepare(`
-    INSERT INTO pending_clients (id, token, email, plan, name, language, phone, website, business_name, business_description, product_service, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    INSERT INTO pending_clients (id, token, email, plan, name, language, phone, website, business_name, business_description, product_service, status,
+      lovable_user_id, selected_modules, monthly_price_cents, access_method)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
   `).run(id, data.token, data.email || null, data.plan || null, data.name || null,
     data.language || 'en', data.phone || null, data.website || null,
-    data.business_name || null, data.business_description || null, data.product_service || null);
-  log.info('Created pending client', { id, token: data.token });
+    data.business_name || null, data.business_description || null, data.product_service || null,
+    data.lovable_user_id || null,
+    data.selected_modules ? (typeof data.selected_modules === 'string' ? data.selected_modules : JSON.stringify(data.selected_modules)) : null,
+    data.monthly_price_cents || 0,
+    data.access_method || null);
+  log.info('Created pending client', { id, token: data.token, lovableUserId: data.lovable_user_id });
   return { id, token: data.token, ...data };
 }
 
@@ -812,6 +847,162 @@ export function getContactChannel(phone) {
   return pending?.channel || 'whatsapp';
 }
 
+// --- Sofia's Long-Lasting Memory ---
+
+/**
+ * Save or update a memory entry for a client.
+ * Categories: 'preference', 'task', 'note', 'brand', 'calendar', 'history'
+ * Upserts by (client_id, category, key).
+ */
+export function saveMemory(clientId, category, key, value) {
+  const d = getDb();
+  const existing = d.prepare(
+    'SELECT id FROM client_memory WHERE client_id = ? AND category = ? AND key = ?'
+  ).get(clientId, category, key);
+
+  if (existing) {
+    d.prepare("UPDATE client_memory SET value = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(typeof value === 'object' ? JSON.stringify(value) : value, existing.id);
+    return existing.id;
+  }
+
+  const id = uuid();
+  d.prepare('INSERT INTO client_memory (id, client_id, category, key, value) VALUES (?, ?, ?, ?, ?)')
+    .run(id, clientId, category, key, typeof value === 'object' ? JSON.stringify(value) : value);
+  return id;
+}
+
+/**
+ * Get all memory entries for a client, optionally filtered by category.
+ */
+export function getMemories(clientId, category = null) {
+  const d = getDb();
+  if (category) {
+    return d.prepare('SELECT * FROM client_memory WHERE client_id = ? AND category = ? ORDER BY updated_at DESC')
+      .all(clientId, category);
+  }
+  return d.prepare('SELECT * FROM client_memory WHERE client_id = ? ORDER BY category, updated_at DESC')
+    .all(clientId);
+}
+
+/**
+ * Get a specific memory entry by key.
+ */
+export function getMemory(clientId, category, key) {
+  const d = getDb();
+  return d.prepare('SELECT * FROM client_memory WHERE client_id = ? AND category = ? AND key = ?')
+    .get(clientId, category, key);
+}
+
+/**
+ * Delete a memory entry.
+ */
+export function deleteMemory(clientId, category, key) {
+  const d = getDb();
+  d.prepare('DELETE FROM client_memory WHERE client_id = ? AND category = ? AND key = ?')
+    .run(clientId, category, key);
+}
+
+/**
+ * Build a memory summary string for Sofia's context window.
+ * Returns categorized memory for inclusion in the system prompt.
+ */
+export function buildMemorySummary(clientId) {
+  const memories = getMemories(clientId);
+  if (memories.length === 0) return '';
+
+  const grouped = {};
+  for (const m of memories) {
+    if (!grouped[m.category]) grouped[m.category] = [];
+    grouped[m.category].push(`  • ${m.key}: ${m.value}`);
+  }
+
+  const categoryLabels = {
+    preference: 'Client Preferences',
+    task: 'Tasks & To-dos',
+    note: 'Notes',
+    brand: 'Brand Knowledge',
+    calendar: 'Calendar & Schedule',
+    history: 'Key History',
+  };
+
+  const sections = [];
+  for (const [cat, items] of Object.entries(grouped)) {
+    sections.push(`${categoryLabels[cat] || cat}:\n${items.join('\n')}`);
+  }
+
+  return `\nSOFIA'S MEMORY:\n${sections.join('\n\n')}`;
+}
+
+// --- Plan & Module Definitions ---
+
+const MODULE_DEFINITIONS = {
+  social_media: { label: 'Social Media Management', key: 'social_media' },
+  ppc: { label: 'Paid Media (PPC)', key: 'ppc' },
+  seo: { label: 'SEO', key: 'seo' },
+  cro: { label: 'CRO', key: 'cro' },
+  content: { label: 'Content & Creatives', key: 'content' },
+  email: { label: 'Email Marketing', key: 'email' },
+};
+
+const PLAN_MODULE_LIMITS = {
+  smb: 3,
+  medium: 6,
+  enterprise: Infinity, // 360° — all modules
+};
+
+/**
+ * Get the modules a client has subscribed to.
+ * Returns parsed array from selected_modules JSON, or empty array.
+ */
+export function getClientModules(clientId) {
+  const client = getClient(clientId);
+  if (!client?.selected_modules) return [];
+  try {
+    return JSON.parse(client.selected_modules);
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Check if a client has access to a specific module.
+ */
+export function clientHasModule(clientId, moduleKey) {
+  const modules = getClientModules(clientId);
+  const plan = getClient(clientId)?.plan || 'smb';
+  // Enterprise has access to all modules
+  if (plan === 'enterprise') return true;
+  return modules.includes(moduleKey);
+}
+
+/**
+ * Get plan details and usage limits for a client.
+ */
+export function getClientPlanDetails(clientId) {
+  const client = getClient(clientId);
+  if (!client) return null;
+  const plan = (client.plan || 'smb').toLowerCase();
+  const modules = getClientModules(clientId);
+  const dailyLimit = PLAN_DAILY_LIMITS[plan] || PLAN_DAILY_LIMITS.smb;
+  const moduleLimit = PLAN_MODULE_LIMITS[plan] || PLAN_MODULE_LIMITS.smb;
+
+  return {
+    plan,
+    planLabel: plan.charAt(0).toUpperCase() + plan.slice(1),
+    modules,
+    moduleLabels: modules.map(m => MODULE_DEFINITIONS[m]?.label || m),
+    monthlyPriceCents: client.monthly_price_cents || 0,
+    dailyMessageLimit: dailyLimit,
+    maxModules: moduleLimit,
+    accessMethod: client.access_method || 'pending',
+    accessGrantedAt: client.access_granted_at,
+    lovableUserId: client.lovable_user_id,
+  };
+}
+
+export { MODULE_DEFINITIONS, PLAN_MODULE_LIMITS };
+
 /** Close the database connection (call on graceful shutdown). */
 export function closeDb() {
   if (db) {
@@ -834,5 +1025,8 @@ export default {
   saveMessage, getMessages, clearMessages,
   getClientMessageCountToday, checkClientMessageLimit, getPlanLimits,
   getAllClientContacts, getLastClientMessageTime, getContactChannel,
+  saveMemory, getMemories, getMemory, deleteMemory, buildMemorySummary,
+  getClientModules, clientHasModule, getClientPlanDetails,
+  MODULE_DEFINITIONS, PLAN_MODULE_LIMITS,
   closeDb,
 };

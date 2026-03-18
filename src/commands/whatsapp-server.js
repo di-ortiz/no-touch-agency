@@ -9,6 +9,8 @@ import {
   saveMessage, getMessages, clearMessages, createOnboardingSession, updateOnboardingSession,
   createContact, checkClientMessageLimit, updateClient,
   getContactsByClientId, getCrossChannelHistory,
+  saveMemory, getMemories, deleteMemory, buildMemorySummary,
+  getClientModules, clientHasModule, getClientPlanDetails,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -636,13 +638,22 @@ app.post('/api/client-init', async (req, res) => {
       }
     }
 
-    const { email, plan, name, language, phone, website, business_name, business_description, product_service, submissionId } = req.body || {};
+    const {
+      email, plan, name, language, phone, website, business_name, business_description, product_service,
+      submissionId, lovable_user_id, selected_modules, monthly_price_cents, access_method,
+    } = req.body || {};
 
     // Use Lovable UUID as token if provided, otherwise generate a new UUID
-    const token = submissionId || crypto.randomUUID();
+    const token = submissionId || lovable_user_id || crypto.randomUUID();
 
     // Build enriched data, optionally filling gaps from Supabase
-    let enrichedData = { email, plan, name, language: language || 'en', phone, website, business_name, business_description, product_service };
+    let enrichedData = {
+      email, plan, name, language: language || 'en', phone, website, business_name, business_description, product_service,
+      lovable_user_id: lovable_user_id || submissionId || null,
+      selected_modules: selected_modules ? (typeof selected_modules === 'string' ? selected_modules : JSON.stringify(selected_modules)) : null,
+      monthly_price_cents: monthly_price_cents || 0,
+      access_method: access_method || null, // 'leadsie_now' or 'sofia_later'
+    };
     if (submissionId) {
       try {
         const supabaseData = await supabase.getOnboardingSubmission(submissionId);
@@ -730,12 +741,13 @@ app.get('/api/leadsie-connect', async (req, res) => {
       message: `Hi ${pending.name || clientName}! Welcome aboard. Please grant us access to your accounts below — it's a secure, one-click process. This lets us manage your ad campaigns and optimize your results right away.`,
     });
 
-    // Store the invite ID and requested platforms on the pending record
+    // Store the invite ID, requested platforms, and access method on the pending record
     // so we can match the Leadsie webhook callback and track what's still pending
     try {
       updatePendingClient(token, {
         leadsie_invite_id: invite.inviteId,
         requested_platforms: JSON.stringify(uniquePlatforms),
+        access_method: 'leadsie_now',
       });
     } catch (e) {
       log.warn('Failed to store Leadsie invite on pending client', { error: e.message });
@@ -1557,6 +1569,58 @@ const CSA_TOOLS = [
     name: 'check_credentials',
     description: 'Check which API credentials are configured and working. Use this FIRST when any Google operation fails to diagnose the exact problem and give the user step-by-step instructions to fix it.',
     input_schema: { type: 'object', properties: {} },
+  },
+  // --- Leadsie Access Verification ---
+  {
+    name: 'check_leadsie_access',
+    description: 'Check if a client has properly granted platform access via Leadsie. Returns which platforms are granted vs still pending. Use when a client asks about access status, or before attempting platform operations.',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID to check access for' },
+    }, required: ['client_id'] },
+  },
+  {
+    name: 'send_leadsie_invite',
+    description: 'Send a new Leadsie invite link to a client so they can grant platform access. Use when a client says they want to grant access, or when their previous invite expired.',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID' },
+      platforms: { type: 'array', items: { type: 'string' }, description: 'Platforms to request access for: facebook, google, tiktok, wordpress, shopify, hubspot, godaddy' },
+    }, required: ['client_id'] },
+  },
+  // --- Sofia Memory Management ---
+  {
+    name: 'save_memory',
+    description: 'Save a piece of information about a client that Sofia should remember long-term. Categories: preference (likes/dislikes, communication style), task (to-dos, pending work), note (general notes), brand (brand facts, guidelines learned), calendar (scheduled posts, deadlines), history (key milestones, completed work).',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID' },
+      category: { type: 'string', enum: ['preference', 'task', 'note', 'brand', 'calendar', 'history'], description: 'Memory category' },
+      key: { type: 'string', description: 'Short label for this memory (e.g., "preferred_tone", "q1_social_calendar", "logo_colors")' },
+      value: { type: 'string', description: 'The information to remember' },
+    }, required: ['client_id', 'category', 'key', 'value'] },
+  },
+  {
+    name: 'get_memories',
+    description: 'Retrieve all saved memories for a client, optionally filtered by category. Use to recall what you know about a client.',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID' },
+      category: { type: 'string', enum: ['preference', 'task', 'note', 'brand', 'calendar', 'history'], description: 'Optional: filter by category' },
+    }, required: ['client_id'] },
+  },
+  {
+    name: 'delete_memory',
+    description: 'Remove a specific memory entry that is no longer relevant (e.g., completed task, outdated note).',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID' },
+      category: { type: 'string', description: 'Memory category' },
+      key: { type: 'string', description: 'Memory key to delete' },
+    }, required: ['client_id', 'category', 'key'] },
+  },
+  // --- Client Plan & Module Info ---
+  {
+    name: 'get_client_plan',
+    description: 'Get detailed plan information for a client including their plan tier, selected modules, monthly price, message limits, and access status.',
+    input_schema: { type: 'object', properties: {
+      client_id: { type: 'string', description: 'Client ID' },
+    }, required: ['client_id'] },
   },
 ];
 
@@ -3600,6 +3664,92 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    // --- Leadsie Access Verification ---
+    case 'check_leadsie_access': {
+      const client = getClient(toolInput.client_id);
+      if (!client) return { error: 'Client not found' };
+
+      // Import buildPlatformAccessStatus from onboarding flow
+      const { buildPlatformAccessStatus } = await import('../services/client-onboarding-flow.js');
+      const accessStatus = buildPlatformAccessStatus(client);
+
+      // Also check live Leadsie status if we have an invite ID
+      let leadsieStatus = null;
+      const session = client.leadsie_invite_id ? { leadsie_invite_id: client.leadsie_invite_id } : null;
+      if (session?.leadsie_invite_id) {
+        try {
+          leadsieStatus = await leadsie.getInviteStatus(session.leadsie_invite_id);
+        } catch (e) {
+          log.warn('Could not check Leadsie invite status', { error: e.message });
+        }
+      }
+
+      return {
+        clientName: client.name,
+        accessMethod: client.access_method || 'unknown',
+        accessGrantedAt: client.access_granted_at || null,
+        granted: accessStatus.granted,
+        pending: accessStatus.pending,
+        allGranted: accessStatus.allGranted,
+        leadsieInviteStatus: leadsieStatus?.status || null,
+        leadsieGrantedAccounts: leadsieStatus?.grantedAccounts || [],
+      };
+    }
+
+    case 'send_leadsie_invite': {
+      const client = getClient(toolInput.client_id);
+      if (!client) return { error: 'Client not found' };
+      const platforms = toolInput.platforms || ['facebook', 'google'];
+      const invite = await leadsie.createInvite({
+        clientName: client.name,
+        clientEmail: null,
+        platforms,
+        message: `Hi! Please click the link below to grant us access to your accounts. This is a secure, one-click process powered by Leadsie.`,
+      });
+      // Update requested platforms on client
+      let existing = [];
+      try { existing = JSON.parse(client.requested_platforms || '[]'); } catch (e) { /* ignore */ }
+      const merged = [...new Set([...existing, ...platforms])];
+      updateClient(toolInput.client_id, { requested_platforms: JSON.stringify(merged) });
+      return {
+        inviteUrl: invite.inviteUrl,
+        inviteId: invite.inviteId,
+        platforms,
+        status: invite.status,
+      };
+    }
+
+    // --- Sofia Memory Management ---
+    case 'save_memory': {
+      const id = saveMemory(toolInput.client_id, toolInput.category, toolInput.key, toolInput.value);
+      return { success: true, id, message: `Memory saved: [${toolInput.category}] ${toolInput.key}` };
+    }
+
+    case 'get_memories': {
+      const memories = getMemories(toolInput.client_id, toolInput.category || null);
+      return {
+        count: memories.length,
+        memories: memories.map(m => ({
+          category: m.category,
+          key: m.key,
+          value: m.value,
+          updatedAt: m.updated_at,
+        })),
+      };
+    }
+
+    case 'delete_memory': {
+      deleteMemory(toolInput.client_id, toolInput.category, toolInput.key);
+      return { success: true, message: `Memory deleted: [${toolInput.category}] ${toolInput.key}` };
+    }
+
+    // --- Client Plan & Module Info ---
+    case 'get_client_plan': {
+      const planDetails = getClientPlanDetails(toolInput.client_id);
+      if (!planDetails) return { error: 'Client not found' };
+      return planDetails;
+    }
+
     default:
       return { error: `Unknown tool: ${toolName}` };
   }
@@ -4259,6 +4409,14 @@ async function handleTelegramClientMessage(chatId, message) {
     if (clientContext.channelsNeed) contextParts.push(`<b>Channels Interested In:</b> ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`<b>Brand Voice:</b> ${clientContext.brandVoice}`);
 
+    // Plan & module information
+    if (clientContext.planLabel) contextParts.push(`<b>Plan:</b> ${clientContext.planLabel}`);
+    if (clientContext.moduleLabels?.length > 0) contextParts.push(`<b>Active Modules:</b> ${clientContext.moduleLabels.join(', ')}`);
+    if (clientContext.monthlyPriceCents > 0) contextParts.push(`<b>Monthly Subscription:</b> $${(clientContext.monthlyPriceCents / 100).toFixed(0)}/mo`);
+    if (clientContext.dailyMessageLimit) contextParts.push(`<b>Daily Message Limit:</b> ${clientContext.dailyMessageLimit}`);
+    if (clientContext.contactEmail) contextParts.push(`<b>Email:</b> ${clientContext.contactEmail}`);
+    if (clientContext.lovableUserId) contextParts.push(`<b>Client ID:</b> ${clientContext.lovableUserId}`);
+
     // Build platform access status section
     let platformAccessNote = '';
     const pa = clientContext.platformAccess;
@@ -4287,8 +4445,11 @@ async function handleTelegramClientMessage(chatId, message) {
       ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
+    // Sofia's long-lasting memory about this client
+    const sofiaMemory = clientContext.memorySummary || '';
+
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via Telegram.
-${memoryContext}${platformAccessNote}${crossChannelNote}
+${memoryContext}${sofiaMemory}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -4310,10 +4471,26 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 - TEXT ON IMAGES: You CAN add text, headlines, CTAs, and offer badges directly onto generated images. The system composites text overlays AFTER AI image generation using a programmatic overlay engine. NEVER say "AI can't render text on images" — that is FALSE in this system. When the client wants text on images, use the headline, cta, offer, and subtext parameters in generate_ad_images. This is a SOLVED capability — use it confidently.
 
+LONG-LASTING MEMORY:
+You have a persistent memory system. Use the save_memory tool to remember important things about this client:
+- Their preferences (communication style, preferred platforms, likes/dislikes)
+- Tasks you promised to do or follow up on
+- Brand knowledge learned through conversation (not just onboarding)
+- Calendar items (content schedules, campaign launch dates, deadlines)
+- Key history (milestones, completed projects, wins)
+When you learn something noteworthy, save it immediately — don't wait. This memory persists across all conversations.
+Your SOFIA'S MEMORY section above shows everything you've previously saved about this client. Reference it naturally.
+
+PLAN & MODULES:
+The client's plan and active modules are shown in their profile. Only offer services within their active modules.
+If they ask about a service outside their modules, explain it's not included in their current plan and suggest upgrading.
+You can check their full plan details with the get_client_plan tool.
+
 PLATFORM ACCESS FOLLOW-UP:
 If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
 - On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
 - Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Use the check_leadsie_access tool to get current status, and send_leadsie_invite to send a fresh link if needed.
 - Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
 - Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
 - If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
@@ -4340,7 +4517,7 @@ When delivering ANY content for the client's website (blog posts, meta tags, pag
 
 NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
-    // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
+    // Client-facing tools — creative generation + research/analysis + memory + access (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
       'generate_text_ads', 'analyze_visual_reference',
@@ -4354,6 +4531,10 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
       'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
       'generate_performance_pdf', 'generate_competitor_pdf',
+      // Access verification & memory management
+      'check_leadsie_access', 'send_leadsie_invite',
+      'save_memory', 'get_memories', 'delete_memory',
+      'get_client_plan',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
@@ -4865,6 +5046,14 @@ async function handleClientMessage(from, message) {
     if (clientContext.channelsNeed) contextParts.push(`*Channels Interested In:* ${clientContext.channelsNeed}`);
     if (clientContext.brandVoice) contextParts.push(`*Brand Voice:* ${clientContext.brandVoice}`);
 
+    // Plan & module information
+    if (clientContext.planLabel) contextParts.push(`*Plan:* ${clientContext.planLabel}`);
+    if (clientContext.moduleLabels?.length > 0) contextParts.push(`*Active Modules:* ${clientContext.moduleLabels.join(', ')}`);
+    if (clientContext.monthlyPriceCents > 0) contextParts.push(`*Monthly Subscription:* $${(clientContext.monthlyPriceCents / 100).toFixed(0)}/mo`);
+    if (clientContext.dailyMessageLimit) contextParts.push(`*Daily Message Limit:* ${clientContext.dailyMessageLimit}`);
+    if (clientContext.contactEmail) contextParts.push(`*Email:* ${clientContext.contactEmail}`);
+    if (clientContext.lovableUserId) contextParts.push(`*Client ID:* ${clientContext.lovableUserId}`);
+
     // Build platform access status section
     let platformAccessNote = '';
     const pa = clientContext.platformAccess;
@@ -4893,8 +5082,11 @@ async function handleClientMessage(from, message) {
       ? `\nCLIENT PROFILE:\n${contextParts.join('\n')}`
       : '';
 
+    // Sofia's long-lasting memory about this client
+    const sofiaMemory = clientContext.memorySummary || '';
+
     const systemPrompt = `You are Sofia, a warm and professional Customer Success Agent for a PPC/digital marketing agency. You're chatting with a client via WhatsApp.
-${memoryContext}${platformAccessNote}${crossChannelNote}
+${memoryContext}${sofiaMemory}${platformAccessNote}${crossChannelNote}
 
 Your role:
 - You REMEMBER this client — greet them by name (${contactName}) naturally, like a real human.
@@ -4916,10 +5108,26 @@ CRITICAL RULES — FOLLOW THESE ABOVE ALL ELSE:
 - If a tool fails, explain the issue simply and try an alternative approach. Never give up.
 - TEXT ON IMAGES: You CAN add text, headlines, CTAs, and offer badges directly onto generated images. The system composites text overlays AFTER AI image generation using a programmatic overlay engine. NEVER say "AI can't render text on images" — that is FALSE in this system. When the client wants text on images, use the headline, cta, offer, and subtext parameters in generate_ad_images. This is a SOLVED capability — use it confidently.
 
+LONG-LASTING MEMORY:
+You have a persistent memory system. Use the save_memory tool to remember important things about this client:
+- Their preferences (communication style, preferred platforms, likes/dislikes)
+- Tasks you promised to do or follow up on
+- Brand knowledge learned through conversation (not just onboarding)
+- Calendar items (content schedules, campaign launch dates, deadlines)
+- Key history (milestones, completed projects, wins)
+When you learn something noteworthy, save it immediately — don't wait. This memory persists across all conversations.
+Your SOFIA'S MEMORY section above shows everything you've previously saved about this client. Reference it naturally.
+
+PLAN & MODULES:
+The client's plan and active modules are shown in their profile. Only offer services within their active modules.
+If they ask about a service outside their modules, explain it's not included in their current plan and suggest upgrading.
+You can check their full plan details with the get_client_plan tool.
+
 PLATFORM ACCESS FOLLOW-UP:
 If PLATFORM ACCESS STATUS shows platforms still needed (⏳):
 - On the client's FIRST message, proactively and warmly let them know which platform accesses are still pending.
 - Explain briefly why you need each one (e.g., "Meta Ads access lets me manage and optimize your campaigns, Google Ads access lets me pull performance data").
+- Use the check_leadsie_access tool to get current status, and send_leadsie_invite to send a fresh link if needed.
 - Ask them to complete the access grant — they should have received a Leadsie link during signup, or you can offer to send a new one.
 - Do NOT block the conversation on this — still help them with whatever they need. Just mention it once.
 - If all platforms are granted (✅), do NOT mention access at all — just proceed normally.
@@ -4946,7 +5154,7 @@ When delivering ANY content for the client's website (blog posts, meta tags, pag
 
 NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR property — always ask permission first.`;
 
-    // Client-facing tools — creative generation + research/analysis (no campaign management or cost reports)
+    // Client-facing tools — creative generation + research/analysis + memory + access (no campaign management or cost reports)
     const CLIENT_TOOLS = CSA_TOOLS.filter(t => [
       'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
       'generate_text_ads', 'analyze_visual_reference',
@@ -4960,6 +5168,10 @@ NEVER skip the approval step. NEVER auto-publish. The client's website is THEIR 
       'full_seo_audit', 'generate_blog_post', 'fix_meta_tags',
       'plan_content_calendar', 'list_wp_content', 'generate_schema_markup',
       'generate_performance_pdf', 'generate_competitor_pdf',
+      // Access verification & memory management
+      'check_leadsie_access', 'send_leadsie_invite',
+      'save_memory', 'get_memories', 'delete_memory',
+      'get_client_plan',
     ].includes(t.name));
 
     // Load conversation history (cross-channel if available, otherwise single-channel)
