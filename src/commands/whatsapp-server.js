@@ -1514,57 +1514,16 @@ const CSA_TOOLS = [
     description: 'Get historical search volume data from Google Keyword Planner for specific keywords. Returns monthly trends, competition index, and bid estimates. Best for Google Ads campaign planning.',
     input_schema: { type: 'object', properties: { keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to get volume for' } }, required: ['keywords'] },
   },
-  // --- Presentation Builders ---
-  {
-    name: 'build_media_plan_deck',
-    description: 'Build a professional Google Slides media plan presentation with REAL CHARTS (pie charts for budget allocation, bar charts for projections). Includes executive summary, objectives, target audiences, channel strategy, budget allocation chart, projections chart, creative mockups, and timeline. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, campaignName: { type: 'string' }, mediaPlan: { type: 'object', description: 'Media plan data: { summary, objective, budget, timeline, kpis[], audiences[], channels[{platform, budget, projectedClicks, projectedConversions}], budgetBreakdown[{channel, amount, percentage, objective}], projections: {impressions, clicks, conversions, cpa, roas, reach, notes}, nextSteps }' }, creatives: { type: 'array', description: 'Creative mockup refs: [{ label, url, concept }]' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName', 'mediaPlan'] },
-  },
-  {
-    name: 'build_competitor_deck',
-    description: 'Build a professional Google Slides competitor research presentation with REAL CHARTS (bar charts for traffic comparison, keyword counts). Includes competitor landscape, domain overview, keyword gap analysis, SERP analysis, and competitor ad examples. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array', description: 'Competitor data: [{ name, domain, traffic, keywords, avgPosition, strengths, weaknesses }]' }, keywordGap: { type: 'array', description: 'Keyword gap data: [{ keyword, volume, competition, competitorPosition, yourPosition }]' }, competitorAds: { type: 'array', description: 'Competitor ads: [{ pageName, headline, body, cta, platforms }]' }, serpAnalysis: { type: 'object', description: '{ keyword, organicResults, paidResults }' }, domainOverview: { type: 'object', description: '{ organicTraffic, paidTraffic, organicKeywords, backlinks }' }, summary: { type: 'string' }, recommendations: { type: 'string' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName'] },
-  },
-  {
-    name: 'build_performance_deck',
-    description: 'Build a professional Google Slides performance report presentation with REAL CHARTS (spend pie chart, traffic sources pie, daily trend line, device breakdown pie). Includes KPI metrics, campaign breakdown, website analytics, traffic sources, top pages, keyword performance, audience insights, and recommendations. Returns a shareable link.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string', description: 'Date range label (e.g. "Feb 1-7, 2026")' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas, cpc }' }, analytics: { type: 'object', description: 'GA4 data: { sessions, totalUsers, pageViews, bounceRate, engagementRate, conversions, trafficSources[], topPages[] }' }, campaigns: { type: 'array', description: 'Campaign data: [{ name, spend, clicks, conversions, cpa, roas }]' }, topKeywords: { type: 'array', description: '[{ keyword, impressions, clicks, ctr, conversions, cpa }]' }, audienceData: { type: 'object', description: '{ devices[], countries[], gender[] }' }, dailyTrend: { type: 'array', description: 'Daily data: [{ date, sessions, conversions }] — for line chart' }, analysis: { type: 'string' }, recommendations: { type: 'string' }, charts: { type: 'array', description: 'Additional custom charts: [{ title, chartType, labels[], series[{name, values[]}] }]' } }, required: ['clientName'] },
-  },
-  // --- PDF Reports ---
+  // --- PDF Reports (primary document generation — no Google dependency) ---
   {
     name: 'generate_performance_pdf',
-    description: 'Generate a branded performance report PDF and send it via WhatsApp. Includes metrics, campaign data, analytics, keywords, and AI-generated analysis. The PDF is sent directly as a document message.',
+    description: 'Generate a professional branded performance report PDF and send it via WhatsApp. Use this for ANY document request — reports, presentations, slides, decks, analyses. Includes metrics, campaign data, analytics, keywords, and AI-generated analysis. Works locally via pdfmake — does NOT require Google Drive, Slides, or Sheets.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string' }, reportType: { type: 'string', enum: ['weekly', 'monthly'] }, dateRange: { type: 'string' }, metrics: { type: 'object', description: 'Ad metrics: { spend, impressions, clicks, conversions, ctr, cpa, roas }' }, analytics: { type: 'object', description: 'GA4 data' }, campaigns: { type: 'array' }, topKeywords: { type: 'array' }, audienceData: { type: 'object' }, analysis: { type: 'string' }, recommendations: { type: 'string' }, sendTo: { type: 'string', description: 'WhatsApp number to send the PDF to (defaults to owner)' } }, required: ['clientName'] },
   },
   {
     name: 'generate_competitor_pdf',
-    description: 'Generate a branded competitor analysis PDF and send it via WhatsApp. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations. The PDF is sent directly as a document message.',
+    description: 'Generate a professional branded competitor analysis PDF and send it via WhatsApp. Use this for ANY competitive research document — presentations, slides, decks, reports, analyses. Includes competitor landscape, keyword gap, ad analysis, and strategic recommendations. Works locally via pdfmake — does NOT require Google Drive, Slides, or Sheets.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string' }, competitors: { type: 'array' }, keywordGap: { type: 'array' }, competitorAds: { type: 'array' }, summary: { type: 'string' }, recommendations: { type: 'string' }, sendTo: { type: 'string', description: 'WhatsApp number to send the PDF to (defaults to owner)' } }, required: ['clientName'] },
-  },
-  // --- Charts ---
-  {
-    name: 'create_chart_presentation',
-    description: 'Create a Google Slides presentation with one or more data charts (pie, bar, column, line, area, stacked). Each chart is a real embedded Google Sheets chart — not text, not an image, but an actual interactive chart. Use this whenever the user wants to visualize data like budget allocation, performance projections, competitor comparisons, traffic sources, trends, etc.',
-    input_schema: { type: 'object', properties: {
-      clientName: { type: 'string', description: 'Client name' },
-      title: { type: 'string', description: 'Presentation title (e.g. "Budget & Performance Projections")' },
-      charts: { type: 'array', description: 'Array of chart configs. Each: { title: "Chart Title", chartType: "pie|bar|column|line|area|stacked_bar|stacked_column", labels: ["Label1", "Label2", ...], series: [{ name: "Series Name", values: [100, 200, ...] }] }', items: { type: 'object', properties: {
-        title: { type: 'string' },
-        chartType: { type: 'string', enum: ['pie', 'bar', 'column', 'line', 'area', 'stacked_bar', 'stacked_column'] },
-        labels: { type: 'array', items: { type: 'string' } },
-        series: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
-      }, required: ['title', 'chartType', 'labels', 'series'] } },
-    }, required: ['clientName', 'charts'] },
-  },
-  {
-    name: 'create_single_chart',
-    description: 'Create a single chart in Google Sheets and return a link. Use this for quick one-off charts without a full presentation. Returns a Google Sheets link where the chart can be viewed and downloaded.',
-    input_schema: { type: 'object', properties: {
-      title: { type: 'string', description: 'Chart title' },
-      chartType: { type: 'string', enum: ['pie', 'bar', 'column', 'line', 'area', 'stacked_bar', 'stacked_column'], description: 'Chart type' },
-      labels: { type: 'array', items: { type: 'string' }, description: 'Category labels' },
-      series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
-    }, required: ['title', 'chartType', 'labels', 'series'] },
   },
   // --- Kimi K2.5 AI Generation ---
   {
