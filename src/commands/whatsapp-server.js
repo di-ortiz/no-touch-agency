@@ -11,6 +11,7 @@ import {
   getContactsByClientId, getCrossChannelHistory,
   saveMemory, getMemories, deleteMemory, buildMemorySummary,
   getClientModules, clientHasModule, getClientPlanDetails,
+  isTeamLeader, addTeamLeader, removeTeamLeader, getAllTeamLeaders,
 } from '../services/knowledge-base.js';
 import { handleOnboardingMessage, initiateOnboarding, hasActiveOnboarding, getClientContextByPhone, buildPersonalizedWelcome } from '../services/client-onboarding-flow.js';
 import { getMe as getTelegramMe } from '../api/telegram.js';
@@ -1563,6 +1564,17 @@ const CSA_TOOLS = [
       maxTokens: { type: 'number', description: 'Max output tokens (default: 2048, max: 65535)' },
       temperature: { type: 'number', description: 'Creativity 0-1 (default: 0.7)' },
     }, required: ['prompt'] },
+  },
+  // --- Team Leader Management ---
+  {
+    name: 'manage_team_leaders',
+    description: 'Add, remove, or list team leaders. Leaders\' WhatsApp messages are forwarded to Chili Pulse and NOT processed by Sofia. Use when the owner wants to register a team member as a leader.',
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['add', 'remove', 'list'], description: 'Action to perform' },
+      phone: { type: 'string', description: 'Phone number (required for add/remove)' },
+      name: { type: 'string', description: 'Leader name (optional, for add)' },
+      client_id: { type: 'string', description: 'Associated client ID (optional, for add)' },
+    }, required: ['action'] },
   },
   // --- Diagnostics ---
   {
@@ -3601,6 +3613,24 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
+    // --- Team Leader Management ---
+    case 'manage_team_leaders': {
+      const { action, phone, name: leaderName, client_id: leadClientId } = toolInput;
+      if (action === 'add') {
+        if (!phone) return { error: 'Phone number is required to add a leader' };
+        const id = addTeamLeader(phone, leaderName || null, leadClientId || null);
+        return { success: true, message: `Leader added: ${phone}${leaderName ? ` (${leaderName})` : ''}`, id };
+      } else if (action === 'remove') {
+        if (!phone) return { error: 'Phone number is required to remove a leader' };
+        removeTeamLeader(phone);
+        return { success: true, message: `Leader removed: ${phone}` };
+      } else if (action === 'list') {
+        const leaders = getAllTeamLeaders();
+        return { leaders, total: leaders.length };
+      }
+      return { error: `Unknown action: ${action}` };
+    }
+
     // --- Diagnostics ---
     case 'check_credentials': {
       const fs = (await import('fs')).default;
@@ -3821,6 +3851,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
     if (!message) return;
 
     const from = message.from; // e.g. "1234567890"
+
+    // Skip processing if the sender is a registered team leader —
+    // their messages are handled by Chili Pulse (forwarded above)
+    if (isTeamLeader(from)) {
+      log.info('Leader message — forwarded to Chili Pulse, skipping local handling', { from });
+      return;
+    }
 
     // Handle file uploads (images, documents, video, audio)
     if (['image', 'document', 'video', 'audio'].includes(message.type)) {

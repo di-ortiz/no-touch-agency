@@ -343,8 +343,46 @@ function getDb() {
       CREATE INDEX IF NOT EXISTS idx_memory_client_cat ON client_memory(client_id, category);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_client_key ON client_memory(client_id, category, key);
     `);
+
+    // Team leaders — phones that are handled by Chili Pulse, not Sofia
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS team_leaders (
+        id TEXT PRIMARY KEY,
+        phone TEXT NOT NULL UNIQUE,
+        name TEXT,
+        client_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+    `);
   }
   return db;
+}
+
+// --- Team Leaders ---
+
+export function isTeamLeader(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  return !!d.prepare(`SELECT 1 FROM team_leaders WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).get(normalized);
+}
+
+export function addTeamLeader(phone, name, clientId) {
+  const d = getDb();
+  const id = uuid();
+  d.prepare(`INSERT OR IGNORE INTO team_leaders (id, phone, name, client_id) VALUES (?, ?, ?, ?)`).run(id, phone, name, clientId);
+  return id;
+}
+
+export function removeTeamLeader(phone) {
+  const d = getDb();
+  const normalized = phone?.replace(/[^0-9]/g, '');
+  return d.prepare(`DELETE FROM team_leaders WHERE REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?`).run(normalized);
+}
+
+export function getAllTeamLeaders() {
+  const d = getDb();
+  return d.prepare(`SELECT * FROM team_leaders ORDER BY created_at DESC`).all();
 }
 
 // --- Client Contacts ---
