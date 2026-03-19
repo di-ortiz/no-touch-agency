@@ -3798,6 +3798,18 @@ app.post('/webhook/whatsapp', async (req, res) => {
   // Respond immediately to Meta
   res.sendStatus(200);
 
+  // Forward to Chili Pulse for team/leaders handling (fire-and-forget)
+  try {
+    fetch('https://web-production-ee121.up.railway.app/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hub-Signature-256': req.headers['x-hub-signature-256'] || '',
+      },
+      body: JSON.stringify(req.body),
+    }).catch(() => {});
+  } catch {}
+
   try {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
