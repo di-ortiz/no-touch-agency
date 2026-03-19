@@ -102,6 +102,99 @@ export async function getTasksDueSoon(spaceId, daysAhead = 3) {
   });
 }
 
+// --- Team / Members ---
+
+export async function getTeamMembers() {
+  const data = await request('get', `/team/${config.CLICKUP_TEAM_ID}`);
+  return (data.team?.members || []).map(m => ({
+    id: m.user.id,
+    username: m.user.username,
+    email: m.user.email,
+    name: m.user.username, // ClickUp uses username as display name
+    role: m.user.role,
+  }));
+}
+
+/**
+ * Search tasks across the workspace with flexible filters.
+ * @param {object} opts
+ * @param {string[]} [opts.assigneeIds] - Filter by assignee user IDs
+ * @param {string}   [opts.assigneeName] - Filter by assignee name (fuzzy match — resolves to IDs)
+ * @param {string[]} [opts.statuses]     - Filter by status names (e.g. ['open','in progress'])
+ * @param {string[]} [opts.spaceIds]     - Limit to specific spaces
+ * @param {string[]} [opts.listIds]      - Limit to specific lists
+ * @param {string}   [opts.projectName]  - Filter tasks whose list/folder/space name contains this string
+ * @param {boolean}  [opts.includeClosed] - Include closed tasks (default false)
+ * @param {boolean}  [opts.subtasks]      - Include subtasks (default true)
+ * @param {number}   [opts.page]          - Page number (0-indexed, default 0)
+ */
+export async function searchTeamTasks(opts = {}) {
+  const params = {
+    subtasks: opts.subtasks !== false,
+    include_closed: opts.includeClosed || false,
+    page: opts.page || 0,
+  };
+
+  // Resolve assignee name to IDs if needed
+  if (opts.assigneeName && !opts.assigneeIds?.length) {
+    try {
+      const members = await getTeamMembers();
+      const needle = opts.assigneeName.toLowerCase();
+      const matched = members.filter(m =>
+        m.username?.toLowerCase().includes(needle) ||
+        m.email?.toLowerCase().includes(needle)
+      );
+      if (matched.length) {
+        params['assignees[]'] = matched.map(m => m.id);
+      } else {
+        log.warn('No team member matched assignee name', { assigneeName: opts.assigneeName });
+      }
+    } catch (err) {
+      log.warn('Failed to resolve assignee name', { error: err.message });
+    }
+  } else if (opts.assigneeIds?.length) {
+    params['assignees[]'] = opts.assigneeIds;
+  }
+
+  if (opts.statuses?.length) {
+    params['statuses[]'] = opts.statuses;
+  }
+  if (opts.spaceIds?.length) {
+    params['space_ids[]'] = opts.spaceIds;
+  }
+  if (opts.listIds?.length) {
+    params['list_ids[]'] = opts.listIds;
+  }
+
+  const data = await request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
+  let tasks = data.tasks || [];
+
+  // Client-side filter by project/list/folder name if requested
+  if (opts.projectName) {
+    const needle = opts.projectName.toLowerCase();
+    tasks = tasks.filter(t =>
+      t.list?.name?.toLowerCase().includes(needle) ||
+      t.folder?.name?.toLowerCase().includes(needle) ||
+      t.space?.name?.toLowerCase().includes(needle) ||
+      t.name?.toLowerCase().includes(needle)
+    );
+  }
+
+  return tasks.map(t => ({
+    id: t.id,
+    name: t.name,
+    status: t.status?.status,
+    assignees: (t.assignees || []).map(a => a.username),
+    dueDate: t.due_date ? new Date(Number(t.due_date)).toISOString().split('T')[0] : null,
+    priority: t.priority?.priority,
+    list: t.list?.name,
+    folder: t.folder?.name,
+    space: t.space?.name,
+    tags: (t.tags || []).map(tag => tag.name),
+    url: t.url,
+  }));
+}
+
 // --- Templates ---
 
 export async function createOnboardingProject(clientName, listId) {
@@ -130,5 +223,6 @@ export default {
   getTasks, getTask, createTask, updateTask, addComment,
   getSpaces, getFolders, getLists,
   getOverdueTasks, getTasksDueToday, getTasksDueSoon,
+  getTeamMembers, searchTeamTasks,
   createOnboardingProject,
 };

@@ -20,6 +20,7 @@ import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from '../workflows/clickup-monitor.js';
+import * as clickup from '../api/clickup.js';
 import { onboardNewClient } from '../workflows/client-onboarding.js';
 import { generateCampaignBrief } from '../workflows/campaign-brief.js';
 import { generateCreatives } from '../workflows/creative-generation.js';
@@ -1178,6 +1179,79 @@ const CSA_TOOLS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'clickup_get_tasks',
+    description: 'Search and list ClickUp tasks. Filter by assignee name, project/client name, status, etc. Use this when asked about tasks, task updates, what someone is working on, or project status.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        assigneeName: { type: 'string', description: 'Filter by team member name (e.g. "Gabriel", "Diego")' },
+        projectName: { type: 'string', description: 'Filter by project, client, or space name (e.g. "Chili", "SEO")' },
+        statuses: { type: 'array', items: { type: 'string' }, description: 'Filter by status (e.g. ["open", "in progress", "review"])' },
+        includeClosed: { type: 'boolean', description: 'Include completed/closed tasks (default false)' },
+      },
+    },
+  },
+  {
+    name: 'clickup_get_task_detail',
+    description: 'Get full details of a specific ClickUp task by its ID.',
+    input_schema: { type: 'object', properties: { taskId: { type: 'string', description: 'The ClickUp task ID' } }, required: ['taskId'] },
+  },
+  {
+    name: 'clickup_list_team_members',
+    description: 'List all team members in the ClickUp workspace with their names and IDs.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'clickup_list_spaces',
+    description: 'List all spaces (projects/departments) in the ClickUp workspace.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'clickup_create_task',
+    description: 'Create a new task in ClickUp. Requires a list ID and task name.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        listId: { type: 'string', description: 'The ClickUp list ID to create the task in' },
+        name: { type: 'string', description: 'Task name/title' },
+        description: { type: 'string', description: 'Task description (markdown supported)' },
+        assigneeNames: { type: 'array', items: { type: 'string' }, description: 'Names of team members to assign' },
+        priority: { type: 'number', description: 'Priority: 1=Urgent, 2=High, 3=Normal, 4=Low' },
+        dueDate: { type: 'string', description: 'Due date in ISO format (YYYY-MM-DD)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags to add to the task' },
+      },
+      required: ['listId', 'name'],
+    },
+  },
+  {
+    name: 'clickup_update_task',
+    description: 'Update an existing ClickUp task (change status, assignee, priority, due date, etc.).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The ClickUp task ID to update' },
+        name: { type: 'string', description: 'New task name' },
+        description: { type: 'string', description: 'New description' },
+        status: { type: 'string', description: 'New status (e.g. "open", "in progress", "complete")' },
+        priority: { type: 'number', description: 'Priority: 1=Urgent, 2=High, 3=Normal, 4=Low' },
+        dueDate: { type: 'string', description: 'New due date in ISO format (YYYY-MM-DD)' },
+      },
+      required: ['taskId'],
+    },
+  },
+  {
+    name: 'clickup_add_comment',
+    description: 'Add a comment to a ClickUp task.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The ClickUp task ID' },
+        comment: { type: 'string', description: 'The comment text' },
+      },
+      required: ['taskId', 'comment'],
+    },
+  },
+  {
     name: 'get_ai_cost_report',
     description: 'Get AI API usage costs for the agency (how much we\'re spending on Claude, GPT, etc.).',
     input_schema: { type: 'object', properties: { period: { type: 'string', enum: ['today', 'week', 'month'] } } },
@@ -1790,6 +1864,83 @@ async function executeCSATool(toolName, toolInput) {
     case 'get_daily_standup': {
       await generateDailyStandup();
       return { status: 'standup_generated' };
+    }
+    case 'clickup_get_tasks': {
+      const tasks = await clickup.searchTeamTasks({
+        assigneeName: toolInput.assigneeName,
+        projectName: toolInput.projectName,
+        statuses: toolInput.statuses,
+        includeClosed: toolInput.includeClosed || false,
+      });
+      return { count: tasks.length, tasks: tasks.slice(0, 50) };
+    }
+    case 'clickup_get_task_detail': {
+      const task = await clickup.getTask(toolInput.taskId);
+      return {
+        id: task.id,
+        name: task.name,
+        description: task.description,
+        status: task.status?.status,
+        assignees: (task.assignees || []).map(a => a.username),
+        dueDate: task.due_date ? new Date(Number(task.due_date)).toISOString().split('T')[0] : null,
+        priority: task.priority?.priority,
+        list: task.list?.name,
+        folder: task.folder?.name,
+        space: task.space?.name,
+        tags: (task.tags || []).map(tag => tag.name),
+        url: task.url,
+        comments_count: task.comments_count,
+        date_created: task.date_created ? new Date(Number(task.date_created)).toISOString() : null,
+        date_updated: task.date_updated ? new Date(Number(task.date_updated)).toISOString() : null,
+      };
+    }
+    case 'clickup_list_team_members': {
+      const members = await clickup.getTeamMembers();
+      return { count: members.length, members };
+    }
+    case 'clickup_list_spaces': {
+      const data = await clickup.getSpaces();
+      const spaces = (data.spaces || []).map(s => ({ id: s.id, name: s.name, status: s.statuses }));
+      return { count: spaces.length, spaces };
+    }
+    case 'clickup_create_task': {
+      const taskData = {
+        name: toolInput.name,
+        description: toolInput.description || '',
+        priority: toolInput.priority || 3,
+        tags: toolInput.tags || [],
+      };
+      if (toolInput.dueDate) {
+        taskData.due_date = new Date(toolInput.dueDate).getTime();
+      }
+      if (toolInput.assigneeNames?.length) {
+        try {
+          const members = await clickup.getTeamMembers();
+          const assigneeIds = [];
+          for (const name of toolInput.assigneeNames) {
+            const needle = name.toLowerCase();
+            const match = members.find(m => m.username?.toLowerCase().includes(needle) || m.email?.toLowerCase().includes(needle));
+            if (match) assigneeIds.push(match.id);
+          }
+          if (assigneeIds.length) taskData.assignees = assigneeIds;
+        } catch (err) { /* ignore — create without assignees */ }
+      }
+      const result = await clickup.createTask(toolInput.listId, taskData);
+      return { id: result.id, name: result.name, url: result.url, status: 'created' };
+    }
+    case 'clickup_update_task': {
+      const updates = {};
+      if (toolInput.name) updates.name = toolInput.name;
+      if (toolInput.description) updates.description = toolInput.description;
+      if (toolInput.status) updates.status = toolInput.status;
+      if (toolInput.priority) updates.priority = toolInput.priority;
+      if (toolInput.dueDate) updates.due_date = new Date(toolInput.dueDate).getTime();
+      const result = await clickup.updateTask(toolInput.taskId, updates);
+      return { id: result.id, name: result.name, status: result.status?.status, updated: true };
+    }
+    case 'clickup_add_comment': {
+      await clickup.addComment(toolInput.taskId, toolInput.comment);
+      return { taskId: toolInput.taskId, status: 'comment_added' };
     }
     case 'get_ai_cost_report': {
       const summary = getCostSummary(toolInput.period || 'month');
