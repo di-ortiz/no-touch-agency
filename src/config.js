@@ -33,8 +33,8 @@ const envSchema = z.object({
   TELEGRAM_WEBHOOK_SECRET: z.string().optional().default(''), // For X-Telegram-Bot-Api-Secret-Token verification
 
   // ClickUp
-  CLICKUP_API_TOKEN: z.string().min(1),
-  CLICKUP_TEAM_ID: z.string().min(1),
+  CLICKUP_API_TOKEN: z.string().optional().default(''),
+  CLICKUP_TEAM_ID: z.string().optional().default(''),
   CLICKUP_PPC_SPACE_ID: z.string().optional().default(''),
 
   // Google
@@ -152,9 +152,10 @@ try {
       ...process.env,
     });
   } else {
-    console.error('Configuration validation failed:');
+    console.error('=== CONFIGURATION VALIDATION FAILED ===');
     console.error(error.errors?.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n'));
-    console.error('\nCopy .env.example to .env and fill in required values.');
+    console.error('\nRequired env vars: ANTHROPIC_API_KEY, WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_OWNER_PHONE');
+    console.error('Copy .env.example to .env and fill in required values.');
     process.exit(1);
   }
 }
