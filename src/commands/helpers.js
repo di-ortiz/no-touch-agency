@@ -73,6 +73,13 @@ export const TOOL_PROGRESS_MESSAGES = {
   generate_campaign_brief: 'Creating the campaign brief...',
   run_competitor_analysis: 'Analyzing competitors...',
   preview_landing_page: 'Publishing your landing page and generating a visual preview...',
+  get_clickup_tasks: 'Pulling up ClickUp tasks...',
+  get_clickup_task: 'Getting task details from ClickUp...',
+  get_clickup_workspace: 'Loading ClickUp workspace...',
+  create_clickup_task: 'Creating task in ClickUp...',
+  update_clickup_task: 'Updating task in ClickUp...',
+  check_overdue_tasks: 'Checking for overdue tasks...',
+  get_daily_standup: 'Generating standup report...',
 };
 
 // --- Token Regex ---
