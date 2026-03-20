@@ -241,4 +241,5 @@ export async function search(query, opts = {}) {
   });
 }
 
+export { isConfigured };
 export default { scrape, crawl, map, search, isConfigured };

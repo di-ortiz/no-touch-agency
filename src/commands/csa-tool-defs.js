@@ -72,6 +72,31 @@ const CSA_TOOLS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'get_clickup_tasks',
+    description: 'Get tasks from ClickUp with optional filters — by assignee name, status, tags, or list. Use this when someone asks about a team member\'s tasks, workload, what\'s assigned to someone, or project progress. Can filter by person name (e.g. "Gabriel\'s tasks"), status (e.g. "in progress"), or tags.',
+    input_schema: { type: 'object', properties: { assigneeName: { type: 'string', description: 'Filter by assignee name (e.g. "Gabriel", "Maria"). Matches partial names.' }, statuses: { type: 'array', items: { type: 'string' }, description: 'Filter by status(es): open, in progress, review, complete, closed' }, tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tag(s)' }, listId: { type: 'string', description: 'Filter by specific ClickUp list ID' }, includeClosed: { type: 'boolean', description: 'Include closed/completed tasks (default: false)' } } },
+  },
+  {
+    name: 'get_clickup_task',
+    description: 'Get detailed info about a specific ClickUp task by its ID. Shows description, comments, assignees, dates, status, subtasks, and custom fields.',
+    input_schema: { type: 'object', properties: { taskId: { type: 'string', description: 'ClickUp task ID' } }, required: ['taskId'] },
+  },
+  {
+    name: 'get_clickup_workspace',
+    description: 'Browse the ClickUp workspace structure — spaces, folders, and lists. Use this to understand the project hierarchy or find the right list to query.',
+    input_schema: { type: 'object', properties: { spaceId: { type: 'string', description: 'Get folders/lists for a specific space (optional — omit to list all spaces)' }, folderId: { type: 'string', description: 'Get lists within a specific folder (optional)' } } },
+  },
+  {
+    name: 'create_clickup_task',
+    description: 'Create a new task in ClickUp. Requires a list ID (use get_clickup_workspace to find the right list).',
+    input_schema: { type: 'object', properties: { listId: { type: 'string', description: 'ClickUp list ID to create the task in' }, name: { type: 'string', description: 'Task name/title' }, description: { type: 'string', description: 'Task description (supports markdown)' }, assigneeName: { type: 'string', description: 'Name of person to assign (e.g. "Gabriel")' }, priority: { type: 'number', description: 'Priority: 1=urgent, 2=high, 3=normal, 4=low' }, dueDate: { type: 'string', description: 'Due date (ISO 8601 format)' }, tags: { type: 'array', items: { type: 'string' }, description: 'Tags to add' } }, required: ['listId', 'name'] },
+  },
+  {
+    name: 'update_clickup_task',
+    description: 'Update an existing ClickUp task — change status, assignee, priority, due date, or add a comment.',
+    input_schema: { type: 'object', properties: { taskId: { type: 'string', description: 'ClickUp task ID to update' }, name: { type: 'string', description: 'New task name' }, status: { type: 'string', description: 'New status (e.g. "in progress", "review", "complete")' }, assigneeName: { type: 'string', description: 'New assignee name' }, priority: { type: 'number', description: 'New priority: 1=urgent, 2=high, 3=normal, 4=low' }, dueDate: { type: 'string', description: 'New due date (ISO 8601)' }, comment: { type: 'string', description: 'Add a comment to the task' } }, required: ['taskId'] },
+  },
+  {
     name: 'run_morning_briefing',
     description: 'Generate the morning briefing with overnight performance, alerts, and today\'s priorities.',
     input_schema: { type: 'object', properties: {} },

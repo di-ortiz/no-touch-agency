@@ -8,6 +8,7 @@ import { getCostSummary, getAuditLog } from '../services/cost-tracker.js';
 import { runMorningBriefing } from '../workflows/morning-briefing.js';
 import { runDailyMonitor } from '../workflows/daily-monitor.js';
 import { runTaskMonitor, generateDailyStandup } from '../workflows/clickup-monitor.js';
+import * as clickup from '../api/clickup.js';
 import { generateCampaignBrief } from '../workflows/campaign-brief.js';
 import { generateCreatives } from '../workflows/creative-generation.js';
 import { generateWeeklyReport } from '../workflows/weekly-report.js';
@@ -201,6 +202,126 @@ async function executeCSATool(toolName, toolInput) {
     case 'check_overdue_tasks': {
       const result = await runTaskMonitor();
       return { overdue: result.overdue, total: result.total };
+    }
+    case 'get_clickup_tasks': {
+      // Resolve assignee name to user ID if provided
+      const queryOpts = {
+        includeClosed: toolInput.includeClosed || false,
+      };
+      if (toolInput.statuses) queryOpts.statuses = toolInput.statuses;
+      if (toolInput.tags) queryOpts.tags = toolInput.tags;
+      if (toolInput.listId) queryOpts.listIds = [toolInput.listId];
+
+      if (toolInput.assigneeName) {
+        const members = await clickup.getMembers();
+        const needle = toolInput.assigneeName.toLowerCase();
+        const match = members.find(m =>
+          (m.username || '').toLowerCase().includes(needle) ||
+          (m.email || '').toLowerCase().includes(needle) ||
+          (m.initials || '').toLowerCase().includes(needle)
+        );
+        if (match) {
+          queryOpts.assignees = [match.id];
+        } else {
+          return { error: `No team member found matching "${toolInput.assigneeName}". Available members: ${members.map(m => m.username || m.email).join(', ')}` };
+        }
+      }
+
+      const result = await clickup.getTeamTasks(queryOpts);
+      const tasks = (result.tasks || []).map(t => ({
+        id: t.id,
+        name: t.name,
+        status: t.status?.status,
+        priority: t.priority?.priority,
+        assignees: (t.assignees || []).map(a => a.username || a.email),
+        dueDate: t.due_date ? new Date(parseInt(t.due_date)).toISOString().split('T')[0] : null,
+        tags: (t.tags || []).map(tag => tag.name),
+        list: t.list?.name,
+        folder: t.folder?.name,
+        url: t.url,
+      }));
+      return { totalTasks: tasks.length, tasks, ...(toolInput.assigneeName && { filteredBy: toolInput.assigneeName }) };
+    }
+    case 'get_clickup_task': {
+      const task = await clickup.getTask(toolInput.taskId);
+      return {
+        id: task.id,
+        name: task.name,
+        description: task.description ? task.description.slice(0, 3000) : null,
+        status: task.status?.status,
+        priority: task.priority?.priority,
+        assignees: (task.assignees || []).map(a => ({ name: a.username, email: a.email })),
+        creator: task.creator?.username,
+        dueDate: task.due_date ? new Date(parseInt(task.due_date)).toISOString().split('T')[0] : null,
+        startDate: task.start_date ? new Date(parseInt(task.start_date)).toISOString().split('T')[0] : null,
+        timeEstimate: task.time_estimate,
+        tags: (task.tags || []).map(tag => tag.name),
+        list: task.list?.name,
+        folder: task.folder?.name,
+        space: task.space?.id,
+        url: task.url,
+        subtasks: (task.subtasks || []).map(s => ({ id: s.id, name: s.name, status: s.status?.status })),
+        customFields: (task.custom_fields || []).filter(f => f.value).map(f => ({ name: f.name, value: f.value })),
+      };
+    }
+    case 'get_clickup_workspace': {
+      if (toolInput.folderId) {
+        const result = await clickup.getLists(toolInput.folderId);
+        return { folderId: toolInput.folderId, lists: (result.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) };
+      }
+      if (toolInput.spaceId) {
+        const result = await clickup.getFolders(toolInput.spaceId);
+        return { spaceId: toolInput.spaceId, folders: (result.folders || []).map(f => ({ id: f.id, name: f.name, lists: (f.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) })) };
+      }
+      const result = await clickup.getSpaces();
+      return { spaces: (result.spaces || []).map(s => ({ id: s.id, name: s.name, memberCount: s.members?.length || 0 })) };
+    }
+    case 'create_clickup_task': {
+      const taskData = { name: toolInput.name };
+      if (toolInput.description) taskData.markdown_description = toolInput.description;
+      if (toolInput.priority) taskData.priority = toolInput.priority;
+      if (toolInput.tags) taskData.tags = toolInput.tags;
+      if (toolInput.dueDate) taskData.due_date = new Date(toolInput.dueDate).getTime();
+
+      if (toolInput.assigneeName) {
+        const members = await clickup.getMembers();
+        const needle = toolInput.assigneeName.toLowerCase();
+        const match = members.find(m =>
+          (m.username || '').toLowerCase().includes(needle) ||
+          (m.email || '').toLowerCase().includes(needle)
+        );
+        if (match) taskData.assignees = [match.id];
+      }
+
+      const created = await clickup.createTask(toolInput.listId, taskData);
+      return { id: created.id, name: created.name, url: created.url, status: 'created', message: `Task "${created.name}" created in ClickUp.` };
+    }
+    case 'update_clickup_task': {
+      const updates = {};
+      if (toolInput.name) updates.name = toolInput.name;
+      if (toolInput.status) updates.status = toolInput.status;
+      if (toolInput.priority) updates.priority = toolInput.priority;
+      if (toolInput.dueDate) updates.due_date = new Date(toolInput.dueDate).getTime();
+
+      if (toolInput.assigneeName) {
+        const members = await clickup.getMembers();
+        const needle = toolInput.assigneeName.toLowerCase();
+        const match = members.find(m =>
+          (m.username || '').toLowerCase().includes(needle) ||
+          (m.email || '').toLowerCase().includes(needle)
+        );
+        if (match) updates.assignees = { add: [match.id] };
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await clickup.updateTask(toolInput.taskId, updates);
+      }
+
+      if (toolInput.comment) {
+        await clickup.addComment(toolInput.taskId, toolInput.comment);
+      }
+
+      return { taskId: toolInput.taskId, updated: Object.keys(updates), commentAdded: !!toolInput.comment, message: `Task ${toolInput.taskId} updated.` };
     }
     case 'run_morning_briefing': {
       await runMorningBriefing();
