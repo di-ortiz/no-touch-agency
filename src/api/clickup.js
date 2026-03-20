@@ -123,14 +123,13 @@ export async function getTeamTasks(opts = {}) {
 }
 
 export async function getMembers() {
-  const spaces = await getSpaces();
+  // Use the team endpoint to get ALL workspace members (not just space-level)
+  const team = await request('get', `/team/${config.CLICKUP_TEAM_ID}`);
   const members = new Map();
-  for (const space of (spaces.spaces || [])) {
-    for (const member of (space.members || [])) {
-      const u = member.user || member;
-      if (u.id && !members.has(u.id)) {
-        members.set(u.id, { id: u.id, username: u.username, email: u.email, initials: u.initials });
-      }
+  for (const member of (team.team?.members || [])) {
+    const u = member.user || member;
+    if (u.id && !members.has(u.id)) {
+      members.set(u.id, { id: u.id, username: u.username, email: u.email, initials: u.initials });
     }
   }
   return [...members.values()];
