@@ -200,16 +200,20 @@ async function executeCSATool(toolName, toolInput) {
       return { client: client.name, status: 'media_plan_generated' };
     }
     case 'check_overdue_tasks': {
-      // Use ClickUp API directly to return overdue tasks with details,
-      // instead of runTaskMonitor() which sends WhatsApp alerts as a side effect.
-      const spaceId = config.CLICKUP_PPC_SPACE_ID;
-      if (!spaceId) {
-        // Fall back to team-level query (all spaces) when no space ID configured
-        const result = await clickup.getTeamTasks({ includeClosed: false });
+      try {
+        const spaceId = config.CLICKUP_PPC_SPACE_ID;
+        let tasksData;
+        if (spaceId) {
+          tasksData = await clickup.getOverdueTasks(spaceId);
+        } else {
+          // Fall back to team-level query (all spaces) when no space ID configured
+          const result = await clickup.getTeamTasks({ includeClosed: false });
+          const now = Date.now();
+          const filtered = (result.tasks || []).filter(t => t.due_date && parseInt(t.due_date) < now);
+          tasksData = { tasks: filtered };
+        }
+        const overdueTasks = tasksData.tasks || [];
         const now = Date.now();
-        const overdueTasks = (result.tasks || []).filter(t =>
-          t.due_date && parseInt(t.due_date) < now
-        );
         return {
           overdue: overdueTasks.length,
           tasks: overdueTasks.map(t => ({
@@ -222,150 +226,181 @@ async function executeCSATool(toolName, toolInput) {
             url: t.url,
           })),
         };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
       }
-      const result = await clickup.getOverdueTasks(spaceId);
-      const overdueTasks = result.tasks || [];
-      const now = Date.now();
-      return {
-        overdue: overdueTasks.length,
-        tasks: overdueTasks.map(t => ({
+    }
+    case 'get_clickup_tasks': {
+      try {
+        const queryOpts = {
+          includeClosed: toolInput.includeClosed || false,
+        };
+        if (toolInput.statuses) queryOpts.statuses = toolInput.statuses;
+        if (toolInput.tags) queryOpts.tags = toolInput.tags;
+        if (toolInput.listId) queryOpts.listIds = [toolInput.listId];
+
+        if (toolInput.assigneeName) {
+          const members = await clickup.getMembers();
+          const needle = toolInput.assigneeName.toLowerCase();
+          const match = members.find(m =>
+            (m.username || '').toLowerCase().includes(needle) ||
+            (m.email || '').toLowerCase().includes(needle) ||
+            (m.initials || '').toLowerCase().includes(needle)
+          );
+          if (match) {
+            queryOpts.assignees = [match.id];
+          } else {
+            return { error: `No team member found matching "${toolInput.assigneeName}". Available members: ${members.map(m => m.username || m.email).join(', ')}` };
+          }
+        }
+
+        const result = await clickup.getTeamTasks(queryOpts);
+        const tasks = (result.tasks || []).map(t => ({
           id: t.id,
           name: t.name,
           status: t.status?.status,
+          priority: t.priority?.priority,
           assignees: (t.assignees || []).map(a => a.username || a.email),
           dueDate: t.due_date ? new Date(parseInt(t.due_date)).toISOString().split('T')[0] : null,
-          daysOverdue: t.due_date ? Math.floor((now - parseInt(t.due_date)) / (1000 * 60 * 60 * 24)) : 0,
+          tags: (t.tags || []).map(tag => tag.name),
+          list: t.list?.name,
+          folder: t.folder?.name,
           url: t.url,
-        })),
-      };
-    }
-    case 'get_clickup_tasks': {
-      // Resolve assignee name to user ID if provided
-      const queryOpts = {
-        includeClosed: toolInput.includeClosed || false,
-      };
-      if (toolInput.statuses) queryOpts.statuses = toolInput.statuses;
-      if (toolInput.tags) queryOpts.tags = toolInput.tags;
-      if (toolInput.listId) queryOpts.listIds = [toolInput.listId];
-
-      if (toolInput.assigneeName) {
-        const members = await clickup.getMembers();
-        const needle = toolInput.assigneeName.toLowerCase();
-        const match = members.find(m =>
-          (m.username || '').toLowerCase().includes(needle) ||
-          (m.email || '').toLowerCase().includes(needle) ||
-          (m.initials || '').toLowerCase().includes(needle)
-        );
-        if (match) {
-          queryOpts.assignees = [match.id];
-        } else {
-          return { error: `No team member found matching "${toolInput.assigneeName}". Available members: ${members.map(m => m.username || m.email).join(', ')}` };
-        }
+        }));
+        return { totalTasks: tasks.length, tasks, ...(toolInput.assigneeName && { filteredBy: toolInput.assigneeName }) };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
       }
-
-      const result = await clickup.getTeamTasks(queryOpts);
-      const tasks = (result.tasks || []).map(t => ({
-        id: t.id,
-        name: t.name,
-        status: t.status?.status,
-        priority: t.priority?.priority,
-        assignees: (t.assignees || []).map(a => a.username || a.email),
-        dueDate: t.due_date ? new Date(parseInt(t.due_date)).toISOString().split('T')[0] : null,
-        tags: (t.tags || []).map(tag => tag.name),
-        list: t.list?.name,
-        folder: t.folder?.name,
-        url: t.url,
-      }));
-      return { totalTasks: tasks.length, tasks, ...(toolInput.assigneeName && { filteredBy: toolInput.assigneeName }) };
     }
     case 'get_clickup_task': {
-      const task = await clickup.getTask(toolInput.taskId);
-      return {
-        id: task.id,
-        name: task.name,
-        description: task.description ? task.description.slice(0, 3000) : null,
-        status: task.status?.status,
-        priority: task.priority?.priority,
-        assignees: (task.assignees || []).map(a => ({ name: a.username, email: a.email })),
-        creator: task.creator?.username,
-        dueDate: task.due_date ? new Date(parseInt(task.due_date)).toISOString().split('T')[0] : null,
-        startDate: task.start_date ? new Date(parseInt(task.start_date)).toISOString().split('T')[0] : null,
-        timeEstimate: task.time_estimate,
-        tags: (task.tags || []).map(tag => tag.name),
-        list: task.list?.name,
-        folder: task.folder?.name,
-        space: task.space?.id,
-        url: task.url,
-        subtasks: (task.subtasks || []).map(s => ({ id: s.id, name: s.name, status: s.status?.status })),
-        customFields: (task.custom_fields || []).filter(f => f.value).map(f => ({ name: f.name, value: f.value })),
-      };
+      try {
+        const task = await clickup.getTask(toolInput.taskId);
+        return {
+          id: task.id,
+          name: task.name,
+          description: task.description ? task.description.slice(0, 3000) : null,
+          status: task.status?.status,
+          priority: task.priority?.priority,
+          assignees: (task.assignees || []).map(a => ({ name: a.username, email: a.email })),
+          creator: task.creator?.username,
+          dueDate: task.due_date ? new Date(parseInt(task.due_date)).toISOString().split('T')[0] : null,
+          startDate: task.start_date ? new Date(parseInt(task.start_date)).toISOString().split('T')[0] : null,
+          timeEstimate: task.time_estimate,
+          tags: (task.tags || []).map(tag => tag.name),
+          list: task.list?.name,
+          folder: task.folder?.name,
+          space: task.space?.id,
+          url: task.url,
+          subtasks: (task.subtasks || []).map(s => ({ id: s.id, name: s.name, status: s.status?.status })),
+          customFields: (task.custom_fields || []).filter(f => f.value).map(f => ({ name: f.name, value: f.value })),
+        };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
+      }
     }
     case 'get_clickup_workspace': {
-      if (toolInput.folderId) {
-        const result = await clickup.getLists(toolInput.folderId);
-        return { folderId: toolInput.folderId, lists: (result.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) };
+      try {
+        if (toolInput.folderId) {
+          const result = await clickup.getLists(toolInput.folderId);
+          return { folderId: toolInput.folderId, lists: (result.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) };
+        }
+        if (toolInput.spaceId) {
+          const result = await clickup.getFolders(toolInput.spaceId);
+          return { spaceId: toolInput.spaceId, folders: (result.folders || []).map(f => ({ id: f.id, name: f.name, lists: (f.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) })) };
+        }
+        const result = await clickup.getSpaces();
+        return { spaces: (result.spaces || []).map(s => ({ id: s.id, name: s.name, memberCount: s.members?.length || 0 })) };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
       }
-      if (toolInput.spaceId) {
-        const result = await clickup.getFolders(toolInput.spaceId);
-        return { spaceId: toolInput.spaceId, folders: (result.folders || []).map(f => ({ id: f.id, name: f.name, lists: (f.lists || []).map(l => ({ id: l.id, name: l.name, taskCount: l.task_count })) })) };
-      }
-      const result = await clickup.getSpaces();
-      return { spaces: (result.spaces || []).map(s => ({ id: s.id, name: s.name, memberCount: s.members?.length || 0 })) };
     }
     case 'create_clickup_task': {
-      const taskData = { name: toolInput.name };
-      if (toolInput.description) taskData.markdown_description = toolInput.description;
-      if (toolInput.priority) taskData.priority = toolInput.priority;
-      if (toolInput.tags) taskData.tags = toolInput.tags;
-      if (toolInput.dueDate) taskData.due_date = new Date(toolInput.dueDate).getTime();
+      try {
+        const taskData = { name: toolInput.name };
+        if (toolInput.description) taskData.markdown_description = toolInput.description;
+        if (toolInput.priority) taskData.priority = toolInput.priority;
+        if (toolInput.tags) taskData.tags = toolInput.tags;
+        if (toolInput.dueDate) taskData.due_date = new Date(toolInput.dueDate).getTime();
 
-      if (toolInput.assigneeName) {
-        const members = await clickup.getMembers();
-        const needle = toolInput.assigneeName.toLowerCase();
-        const match = members.find(m =>
-          (m.username || '').toLowerCase().includes(needle) ||
-          (m.email || '').toLowerCase().includes(needle)
-        );
-        if (match) taskData.assignees = [match.id];
+        if (toolInput.assigneeName) {
+          const members = await clickup.getMembers();
+          const needle = toolInput.assigneeName.toLowerCase();
+          const match = members.find(m =>
+            (m.username || '').toLowerCase().includes(needle) ||
+            (m.email || '').toLowerCase().includes(needle)
+          );
+          if (match) taskData.assignees = [match.id];
+        }
+
+        const created = await clickup.createTask(toolInput.listId, taskData);
+        return { id: created.id, name: created.name, url: created.url, status: 'created', message: `Task "${created.name}" created in ClickUp.` };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
       }
-
-      const created = await clickup.createTask(toolInput.listId, taskData);
-      return { id: created.id, name: created.name, url: created.url, status: 'created', message: `Task "${created.name}" created in ClickUp.` };
     }
     case 'update_clickup_task': {
-      const updates = {};
-      if (toolInput.name) updates.name = toolInput.name;
-      if (toolInput.status) updates.status = toolInput.status;
-      if (toolInput.priority) updates.priority = toolInput.priority;
-      if (toolInput.dueDate) updates.due_date = new Date(toolInput.dueDate).getTime();
+      try {
+        const updates = {};
+        if (toolInput.name) updates.name = toolInput.name;
+        if (toolInput.status) updates.status = toolInput.status;
+        if (toolInput.priority) updates.priority = toolInput.priority;
+        if (toolInput.dueDate) updates.due_date = new Date(toolInput.dueDate).getTime();
 
-      if (toolInput.assigneeName) {
-        const members = await clickup.getMembers();
-        const needle = toolInput.assigneeName.toLowerCase();
-        const match = members.find(m =>
-          (m.username || '').toLowerCase().includes(needle) ||
-          (m.email || '').toLowerCase().includes(needle)
-        );
-        if (match) updates.assignees = { add: [match.id] };
+        if (toolInput.assigneeName) {
+          const members = await clickup.getMembers();
+          const needle = toolInput.assigneeName.toLowerCase();
+          const match = members.find(m =>
+            (m.username || '').toLowerCase().includes(needle) ||
+            (m.email || '').toLowerCase().includes(needle)
+          );
+          if (match) updates.assignees = { add: [match.id] };
+        }
+
+        if (Object.keys(updates).length > 0) {
+          await clickup.updateTask(toolInput.taskId, updates);
+        }
+
+        if (toolInput.comment) {
+          await clickup.addComment(toolInput.taskId, toolInput.comment);
+        }
+
+        return { taskId: toolInput.taskId, updated: Object.keys(updates), commentAdded: !!toolInput.comment, message: `Task ${toolInput.taskId} updated.` };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp API error: ${e.message}` };
       }
-
-      if (Object.keys(updates).length > 0) {
-        await clickup.updateTask(toolInput.taskId, updates);
-      }
-
-      if (toolInput.comment) {
-        await clickup.addComment(toolInput.taskId, toolInput.comment);
-      }
-
-      return { taskId: toolInput.taskId, updated: Object.keys(updates), commentAdded: !!toolInput.comment, message: `Task ${toolInput.taskId} updated.` };
     }
     case 'run_morning_briefing': {
       await runMorningBriefing();
       return { status: 'briefing_generated' };
     }
     case 'get_daily_standup': {
-      await generateDailyStandup();
-      return { status: 'standup_generated' };
+      try {
+        const standup = await generateDailyStandup();
+        return standup || { status: 'standup_generated' };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.response?.status === 401;
+        return { error: is401
+          ? 'ClickUp API authentication failed (401). The API token may be expired or invalid. Tell the owner to update the CLICKUP_API_TOKEN in Railway environment variables.'
+          : `ClickUp standup error: ${e.message}` };
+      }
     }
     case 'get_ai_cost_report': {
       const summary = getCostSummary(toolInput.period || 'month');

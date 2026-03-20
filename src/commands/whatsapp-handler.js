@@ -44,8 +44,8 @@ export async function handleCommand(message) {
     return handleApproval(approvalMatch[1].toUpperCase(), approvalMatch[2]);
   }
 
-  // Handle "clear" / "reset" to wipe memory
-  if (/^(clear|reset|new chat|forget)$/i.test(message.trim())) {
+  // Handle "clear" / "reset" / "restart" to wipe memory
+  if (/^(clear|reset|restart|new chat|forget)$/i.test(message.trim())) {
     clearHistory(ownerChatId);
     return sendWhatsApp('Memory cleared! Starting fresh.');
   }

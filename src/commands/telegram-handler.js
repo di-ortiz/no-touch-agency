@@ -41,8 +41,8 @@ export async function handleTelegramCommand(message, chatId) {
     return handleTelegramApproval(approvalMatch[1].toUpperCase(), approvalMatch[2], chatId);
   }
 
-  // Handle "clear" / "reset"
-  if (/^(clear|reset|new chat|forget)$/i.test(message.trim())) {
+  // Handle "clear" / "reset" / "restart"
+  if (/^(clear|reset|restart|new chat|forget)$/i.test(message.trim())) {
     clearHistory(chatId);
     return reply('Memory cleared! Starting fresh.');
   }

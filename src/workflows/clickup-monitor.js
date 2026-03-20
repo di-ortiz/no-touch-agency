@@ -78,13 +78,26 @@ export async function generateDailyStandup() {
   log.info('Generating daily standup');
 
   const spaceId = config.CLICKUP_PPC_SPACE_ID;
-  if (!spaceId) return;
 
-  const [overdue, dueToday, dueSoon] = await Promise.all([
-    clickup.getOverdueTasks(spaceId).catch(() => ({ tasks: [] })),
-    clickup.getTasksDueToday(spaceId).catch(() => ({ tasks: [] })),
-    clickup.getTasksDueSoon(spaceId, 7).catch(() => ({ tasks: [] })),
-  ]);
+  let overdue, dueToday, dueSoon;
+  if (spaceId) {
+    [overdue, dueToday, dueSoon] = await Promise.all([
+      clickup.getOverdueTasks(spaceId).catch(() => ({ tasks: [] })),
+      clickup.getTasksDueToday(spaceId).catch(() => ({ tasks: [] })),
+      clickup.getTasksDueSoon(spaceId, 7).catch(() => ({ tasks: [] })),
+    ]);
+  } else {
+    // Fall back to team-level query when no space ID configured
+    const now = Date.now();
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+    const allTasks = await clickup.getTeamTasks({ includeClosed: false }).catch(() => ({ tasks: [] }));
+    const tasks = allTasks.tasks || [];
+    overdue = { tasks: tasks.filter(t => t.due_date && parseInt(t.due_date) < now) };
+    dueToday = { tasks: tasks.filter(t => t.due_date && parseInt(t.due_date) >= todayStart.getTime() && parseInt(t.due_date) <= todayEnd.getTime()) };
+    dueSoon = { tasks: tasks.filter(t => t.due_date && parseInt(t.due_date) > todayEnd.getTime() && parseInt(t.due_date) <= weekAhead) };
+  }
 
   const overdueTasks = overdue.tasks || [];
   const todayTasks = dueToday.tasks || [];
