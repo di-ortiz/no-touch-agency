@@ -102,6 +102,40 @@ export async function getTasksDueSoon(spaceId, daysAhead = 3) {
   });
 }
 
+// --- Team-level task queries (supports assignee filtering) ---
+
+export async function getTeamTasks(opts = {}) {
+  const params = {
+    subtasks: true,
+    include_closed: opts.includeClosed || false,
+  };
+  if (opts.spaceIds) params.space_ids = Array.isArray(opts.spaceIds) ? opts.spaceIds : [opts.spaceIds];
+  if (opts.listIds) params.list_ids = Array.isArray(opts.listIds) ? opts.listIds : [opts.listIds];
+  if (opts.assignees) params['assignees[]'] = Array.isArray(opts.assignees) ? opts.assignees : [opts.assignees];
+  if (opts.statuses) params['statuses[]'] = Array.isArray(opts.statuses) ? opts.statuses : [opts.statuses];
+  if (opts.tags) params['tags[]'] = Array.isArray(opts.tags) ? opts.tags : [opts.tags];
+  if (opts.dueDateGt) params.due_date_gt = opts.dueDateGt;
+  if (opts.dueDateLt) params.due_date_lt = opts.dueDateLt;
+  if (opts.orderBy) params.order_by = opts.orderBy;
+  if (opts.page !== undefined) params.page = opts.page;
+
+  return request('get', `/team/${config.CLICKUP_TEAM_ID}/task`, null, params);
+}
+
+export async function getMembers() {
+  const spaces = await getSpaces();
+  const members = new Map();
+  for (const space of (spaces.spaces || [])) {
+    for (const member of (space.members || [])) {
+      const u = member.user || member;
+      if (u.id && !members.has(u.id)) {
+        members.set(u.id, { id: u.id, username: u.username, email: u.email, initials: u.initials });
+      }
+    }
+  }
+  return [...members.values()];
+}
+
 // --- Templates ---
 
 export async function createOnboardingProject(clientName, listId) {
@@ -130,5 +164,6 @@ export default {
   getTasks, getTask, createTask, updateTask, addComment,
   getSpaces, getFolders, getLists,
   getOverdueTasks, getTasksDueToday, getTasksDueSoon,
+  getTeamTasks, getMembers,
   createOnboardingProject,
 };
