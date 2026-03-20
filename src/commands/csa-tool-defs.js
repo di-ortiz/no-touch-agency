@@ -454,6 +454,27 @@ const CSA_TOOLS = [
       series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
     }, required: ['title', 'chartType', 'labels', 'series'] },
   },
+  // --- AgencyAnalytics ---
+  {
+    name: 'get_aa_campaigns',
+    description: 'List all campaigns (client accounts) on AgencyAnalytics. Shows campaign names, IDs, status, and connected integrations. Use this to see which clients have dashboards set up, or to get a campaign ID for deeper queries.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_aa_campaign',
+    description: 'Get detailed info about a specific AgencyAnalytics campaign (client account) by ID. Shows campaign name, status, integrations, and configuration.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
+  {
+    name: 'get_aa_integrations',
+    description: 'Get the list of connected integrations (data sources) for an AgencyAnalytics campaign. Shows which platforms are connected (Google Ads, Meta Ads, GA4, Search Console, etc.) and their sync status. Use this to verify dashboards are properly set up with the right data sources.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
+  {
+    name: 'get_aa_reports',
+    description: 'Get all reports configured for an AgencyAnalytics campaign. Shows report names, types, schedules, and recipients. Use this to check if reporting is properly set up for a client.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
   // --- Diagnostics ---
   {
     name: 'check_credentials',

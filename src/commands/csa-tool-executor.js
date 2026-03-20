@@ -38,6 +38,7 @@ import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
+import * as agencyAnalytics from '../api/agency-analytics.js';
 import { pendingApprovals, landingPageStore, getPublicUrl, SLOW_TOOLS, SLOW_TOOL_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_MS } from './helpers.js';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -1956,6 +1957,79 @@ Return ONLY the JSON array, no other text.`;
     }
 
     // --- Diagnostics ---
+    // --- AgencyAnalytics ---
+    case 'get_aa_campaigns': {
+      try {
+        const data = await agencyAnalytics.getCampaigns();
+        const campaigns = (data.data || data.campaigns || data || []);
+        return {
+          totalCampaigns: Array.isArray(campaigns) ? campaigns.length : 0,
+          campaigns: Array.isArray(campaigns) ? campaigns.map(c => ({
+            id: c.id,
+            name: c.name,
+            status: c.status,
+            website: c.website || c.url,
+            createdAt: c.created_at,
+          })) : campaigns,
+        };
+      } catch (e) {
+        const is401 = e.message?.includes('401') || e.message?.includes('Unauthorized');
+        return { error: is401
+          ? 'AgencyAnalytics API authentication failed. Check that AGENCY_ANALYTICS_API_KEY is set correctly.'
+          : `AgencyAnalytics API error: ${e.message}` };
+      }
+    }
+
+    case 'get_aa_campaign': {
+      try {
+        const data = await agencyAnalytics.getCampaign(toolInput.campaignId);
+        return { campaign: data.data || data };
+      } catch (e) {
+        return { error: `AgencyAnalytics API error: ${e.message}` };
+      }
+    }
+
+    case 'get_aa_integrations': {
+      try {
+        const data = await agencyAnalytics.getIntegrations(toolInput.campaignId);
+        const integrations = (data.data || data.integrations || data || []);
+        return {
+          campaignId: toolInput.campaignId,
+          totalIntegrations: Array.isArray(integrations) ? integrations.length : 0,
+          integrations: Array.isArray(integrations) ? integrations.map(i => ({
+            id: i.id,
+            type: i.type || i.integration_type || i.provider,
+            name: i.name,
+            status: i.status,
+            lastSync: i.last_sync || i.last_synced_at,
+          })) : integrations,
+        };
+      } catch (e) {
+        return { error: `AgencyAnalytics API error: ${e.message}` };
+      }
+    }
+
+    case 'get_aa_reports': {
+      try {
+        const data = await agencyAnalytics.getReports(toolInput.campaignId);
+        const reports = (data.data || data.reports || data || []);
+        return {
+          campaignId: toolInput.campaignId,
+          totalReports: Array.isArray(reports) ? reports.length : 0,
+          reports: Array.isArray(reports) ? reports.map(r => ({
+            id: r.id,
+            name: r.name,
+            type: r.type,
+            schedule: r.schedule,
+            recipients: r.recipients,
+            lastSent: r.last_sent || r.last_sent_at,
+          })) : reports,
+        };
+      } catch (e) {
+        return { error: `AgencyAnalytics API error: ${e.message}` };
+      }
+    }
+
     case 'check_credentials': {
       const fs = (await import('fs')).default;
       // Use the same fallback path as getAuth() in google-slides/sheets/drive — config/google-service-account.json
@@ -2003,6 +2077,10 @@ Return ONLY the JSON array, no other text.`;
           status: config.GA4_PROPERTY_ID ? 'CONFIGURED' : 'NOT SET',
           affects: ['Google Analytics metrics, pages, traffic, audience'],
         },
+        agency_analytics: {
+          status: config.AGENCY_ANALYTICS_API_KEY ? 'CONFIGURED' : 'NOT SET',
+          affects: ['AgencyAnalytics campaigns, reports, integrations, dashboards'],
+        },
       };
 
       const issues = [];
@@ -2012,6 +2090,7 @@ Return ONLY the JSON array, no other text.`;
       if (!config.GOOGLE_ADS_DEVELOPER_TOKEN) issues.push('Google Ads not configured — campaigns and Keyword Planner unavailable');
       if (!config.META_USER_ACCESS_TOKEN) issues.push('Meta user access token not set — Ad Library unavailable');
       if (!config.GA4_PROPERTY_ID) issues.push('GA4 property ID not set — Analytics unavailable');
+      if (!config.AGENCY_ANALYTICS_API_KEY) issues.push('AgencyAnalytics API key not set — dashboard and report queries unavailable');
 
       return {
         checks,
