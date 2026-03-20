@@ -200,8 +200,44 @@ async function executeCSATool(toolName, toolInput) {
       return { client: client.name, status: 'media_plan_generated' };
     }
     case 'check_overdue_tasks': {
-      const result = await runTaskMonitor();
-      return { overdue: result.overdue, total: result.total };
+      // Use ClickUp API directly to return overdue tasks with details,
+      // instead of runTaskMonitor() which sends WhatsApp alerts as a side effect.
+      const spaceId = config.CLICKUP_PPC_SPACE_ID;
+      if (!spaceId) {
+        // Fall back to team-level query (all spaces) when no space ID configured
+        const result = await clickup.getTeamTasks({ includeClosed: false });
+        const now = Date.now();
+        const overdueTasks = (result.tasks || []).filter(t =>
+          t.due_date && parseInt(t.due_date) < now
+        );
+        return {
+          overdue: overdueTasks.length,
+          tasks: overdueTasks.map(t => ({
+            id: t.id,
+            name: t.name,
+            status: t.status?.status,
+            assignees: (t.assignees || []).map(a => a.username || a.email),
+            dueDate: t.due_date ? new Date(parseInt(t.due_date)).toISOString().split('T')[0] : null,
+            daysOverdue: t.due_date ? Math.floor((now - parseInt(t.due_date)) / (1000 * 60 * 60 * 24)) : 0,
+            url: t.url,
+          })),
+        };
+      }
+      const result = await clickup.getOverdueTasks(spaceId);
+      const overdueTasks = result.tasks || [];
+      const now = Date.now();
+      return {
+        overdue: overdueTasks.length,
+        tasks: overdueTasks.map(t => ({
+          id: t.id,
+          name: t.name,
+          status: t.status?.status,
+          assignees: (t.assignees || []).map(a => a.username || a.email),
+          dueDate: t.due_date ? new Date(parseInt(t.due_date)).toISOString().split('T')[0] : null,
+          daysOverdue: t.due_date ? Math.floor((now - parseInt(t.due_date)) / (1000 * 60 * 60 * 24)) : 0,
+          url: t.url,
+        })),
+      };
     }
     case 'get_clickup_tasks': {
       // Resolve assignee name to user ID if provided

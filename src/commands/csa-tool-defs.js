@@ -68,7 +68,7 @@ const CSA_TOOLS = [
   },
   {
     name: 'check_overdue_tasks',
-    description: 'Check for overdue tasks across all clients in the project management system.',
+    description: 'Check for overdue tasks in ClickUp across all spaces. Returns tasks that are past their due date with assignee info and days overdue. Use this for "what\'s overdue?" or "late tasks" queries.',
     input_schema: { type: 'object', properties: {} },
   },
   {
