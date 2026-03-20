@@ -543,28 +543,31 @@ app.get('/debug/whatsapp', async (req, res) => {
 // ============================================================
 export function startServer(port) {
   const p = port || config.PORT || 3000;
-  app.listen(p, async () => {
-    log.info(`WhatsApp server listening on port ${p}`);
-    console.log(`Webhook server running on port ${p}`);
-    console.log(`WhatsApp webhook: http://your-server:${p}/webhook/whatsapp`);
-    console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
-    console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
-    console.log(`Client init API: http://your-server:${p}/api/client-init`);
-    console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
-    console.log(`Health check: http://your-server:${p}/health`);
+  return new Promise((resolve) => {
+    app.listen(p, async () => {
+      log.info(`WhatsApp server listening on port ${p}`);
+      console.log(`Webhook server running on port ${p}`);
+      console.log(`WhatsApp webhook: http://your-server:${p}/webhook/whatsapp`);
+      console.log(`Telegram webhook: http://your-server:${p}/webhook/telegram`);
+      console.log(`Leadsie webhook: http://your-server:${p}/webhook/leadsie`);
+      console.log(`Client init API: http://your-server:${p}/api/client-init`);
+      console.log(`Leadsie connect: http://your-server:${p}/api/leadsie-connect?token=<TOKEN>`);
+      console.log(`Health check: http://your-server:${p}/health`);
 
-    if (!telegramBotUsername && config.TELEGRAM_BOT_TOKEN) {
-      try {
-        const me = await getTelegramMe();
-        telegramBotUsername = me.username;
-        log.info('Telegram bot username fetched', { username: telegramBotUsername });
-        console.log(`Telegram bot: @${telegramBotUsername}`);
-      } catch (e) {
-        log.warn('Could not fetch Telegram bot username', { error: e.message });
+      resolve(app);
+
+      if (!telegramBotUsername && config.TELEGRAM_BOT_TOKEN) {
+        try {
+          const me = await getTelegramMe();
+          telegramBotUsername = me.username;
+          log.info('Telegram bot username fetched', { username: telegramBotUsername });
+          console.log(`Telegram bot: @${telegramBotUsername}`);
+        } catch (e) {
+          log.warn('Could not fetch Telegram bot username', { error: e.message });
+        }
       }
-    }
+    });
   });
-  return app;
 }
 
 // CLI entry point

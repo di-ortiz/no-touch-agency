@@ -46,8 +46,10 @@ async function main() {
     }
   }
 
-  // 1. Start WhatsApp webhook server
-  startServer();
+  // 1. Start WhatsApp webhook server — must be ready BEFORE any other work
+  //    so Railway's healthcheck passes within the 15s retry window
+  await startServer();
+  log.info('HTTP server ready — healthcheck will pass');
 
   // 2. Initialize all scheduled workflows
   initializeSchedule({
@@ -68,17 +70,22 @@ async function main() {
     monthlyContentAnalysis: runMonthlyContentAnalysis,
   });
 
-  // 3. Run ClickUp monitor at startup and schedule it
+  // 3. Run background startup tasks (API validation, ClickUp sync, notifications)
+  //    These run after the server is listening so they don't block healthcheck
+  runStartupChecks().catch(e => log.error('Startup checks failed', { error: e.message }));
+}
+
+async function runStartupChecks() {
+  // 3a. Run ClickUp monitor
   try {
     await runTaskMonitor();
   } catch (e) {
     log.warn('Initial task monitor run failed (expected if ClickUp not configured)', { error: e.message });
   }
 
-  // 4. Validate API tokens on startup — catch bad tokens before user sends a message
+  // 3b. Validate API tokens — catch bad tokens before user sends a message
   const startupIssues = [];
 
-  // 4a. Validate WhatsApp token by hitting Meta API
   try {
     const metaRes = await axios.get(
       `https://graph.facebook.com/v22.0/${config.WHATSAPP_PHONE_NUMBER_ID}`,
@@ -98,7 +105,6 @@ async function main() {
     startupIssues.push(`WhatsApp token invalid: ${detail}`);
   }
 
-  // 4b. Validate Anthropic API key with a minimal call
   try {
     const { askClaude } = await import('./api/anthropic.js');
     await askClaude({ systemPrompt: 'Reply OK', userMessage: 'ping', maxTokens: 5, workflow: 'startup-check' });
@@ -108,7 +114,7 @@ async function main() {
     startupIssues.push(`Anthropic API error: ${e.message?.substring(0, 100)}`);
   }
 
-  // 4c. Send startup notification (WhatsApp, fallback Telegram)
+  // 3c. Send startup notification
   const statusMsg = startupIssues.length > 0
     ? `System Online — BUT ${startupIssues.length} issue(s):\n${startupIssues.map(i => `• ${i}`).join('\n')}`
     : 'PPC Agency Automation is running.\nType *help* for available commands.';
@@ -117,7 +123,6 @@ async function main() {
     await sendAlert(startupIssues.length > 0 ? 'warning' : 'success', 'System Online', statusMsg);
   } catch (e) {
     log.error('CANNOT send startup notification via WhatsApp', { error: e.message });
-    // Fallback: try Telegram
     if (config.TELEGRAM_OWNER_CHAT_ID) {
       try {
         await sendTelegramAlert(startupIssues.length > 0 ? 'error' : 'success', 'System Online', statusMsg);
