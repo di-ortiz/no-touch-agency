@@ -53,7 +53,6 @@ const FORMAT_LABELS = {
 const MODEL_COSTS = {
   'fal-ai/flux/schnell':    0.3,   // ~$0.003
   'fal-ai/flux-pro/v1.1':   4.0,   // ~$0.04
-  'fal-ai/nanobanana-v2':    2.0,   // ~$0.02 (estimated)
 };
 
 /**
@@ -63,17 +62,13 @@ async function callFalModel(model, prompt, imageSize, format, opts) {
   return rateLimited('fal', async () => {
     log.info('Generating fal.ai image', { model, format, prompt: prompt?.slice(0, 100) });
 
-    // NanoBanana v2 may use different payload shape
-    const isNanoBanana = model.includes('nanobanana');
     const payload = {
       prompt,
       image_size: imageSize,
       num_images: 1,
       enable_safety_checker: true,
       output_format: 'jpeg',
-      ...(isNanoBanana
-        ? { guidance_scale: 5.0, num_inference_steps: 30 }
-        : { guidance_scale: model.includes('schnell') ? undefined : 3.5 }),
+      ...(model.includes('schnell') ? {} : { guidance_scale: 3.5 }),
     };
 
     const response = await axios.post(
@@ -130,9 +125,9 @@ export async function generateImage(opts = {}) {
     return callFalModel(opts.model, opts.prompt, imageSize, format, opts);
   }
 
-  // Race Flux Schnell (fast, ~5s) vs Flux Pro (quality, ~15-30s) vs NanoBanana v2
+  // Race Flux Schnell (fast, ~5s) vs Flux Pro (quality, ~15-30s)
   // Promise.any returns the FIRST to resolve — true racing
-  const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1', 'fal-ai/nanobanana-v2'];
+  const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1'];
   try {
     return await Promise.any(
       models.map(model => callFalModel(model, opts.prompt, imageSize, format, opts))
@@ -195,7 +190,6 @@ export async function generateImageWithModel(model, opts = {}) {
 export const FAL_MODELS = {
   fluxSchnell:  'fal-ai/flux/schnell',
   fluxPro:      'fal-ai/flux-pro/v1.1',
-  nanoBananaV2: 'fal-ai/nanobanana-v2',
 };
 
 // ============================================================
