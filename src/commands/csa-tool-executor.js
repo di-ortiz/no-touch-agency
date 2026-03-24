@@ -2166,6 +2166,9 @@ Return ONLY the JSON array, no other text.`;
     // --- Kling AI Video ---
     case 'generate_video_from_image': {
       if (!klingApi.isConfigured()) return { error: 'Kling AI not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway environment variables to enable video generation.' };
+      if (!toolInput.imageUrl) return { error: 'imageUrl is required. When the user uploads a photo, the image URL is provided in a [SYSTEM: ...] tag in the message. Look for it and pass it as imageUrl.' };
+
+      log.info('Kling video generation starting', { imageUrl: (toolInput.imageUrl || '').slice(0, 80), clientName: toolInput.clientName });
 
       const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
       const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
@@ -2179,6 +2182,8 @@ Return ONLY the JSON array, no other text.`;
           clientId: client?.id,
         });
 
+        log.info('Kling video generation completed', { videoUrl: result.videoUrl?.slice(0, 80), taskId: result.id });
+
         return {
           clientName: client?.name || null,
           videoUrl: result.videoUrl,
@@ -2188,6 +2193,7 @@ Return ONLY the JSON array, no other text.`;
           taskId: result.id,
         };
       } catch (e) {
+        log.error('Kling video generation failed', { error: e.message, imageUrl: (toolInput.imageUrl || '').slice(0, 80) });
         return { error: `Video generation failed: ${e.message}` };
       }
     }
