@@ -203,9 +203,22 @@ export function sanitizeMessages(messages) {
 
     if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === role) {
       const prev = cleaned[cleaned.length - 1];
-      prev.content = typeof prev.content === 'string' && typeof content === 'string'
-        ? `${prev.content}\n${content}`
-        : content;
+      // Only merge if BOTH are plain strings — never merge multimodal content arrays
+      if (typeof prev.content === 'string' && typeof content === 'string') {
+        prev.content = `${prev.content}\n${content}`;
+      } else {
+        // Can't merge multimodal content — keep as separate message
+        // (Claude requires alternating roles, so wrap in a combined array)
+        if (Array.isArray(prev.content) && Array.isArray(content)) {
+          prev.content = [...prev.content, ...content];
+        } else if (Array.isArray(prev.content) && typeof content === 'string') {
+          prev.content = [...prev.content, { type: 'text', text: content }];
+        } else if (typeof prev.content === 'string' && Array.isArray(content)) {
+          prev.content = [{ type: 'text', text: prev.content }, ...content];
+        } else {
+          prev.content = content;
+        }
+      }
     } else {
       cleaned.push({ role, content });
     }

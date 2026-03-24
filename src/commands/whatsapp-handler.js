@@ -171,7 +171,16 @@ export async function handleApproval(action, approvalId) {
 }
 
 // --- Client Message Handler (non-owner contacts) ---
-export async function handleClientMessage(from, message) {
+/**
+ * Handle a client message (text or multimodal with image).
+ * @param {string} from - Phone number
+ * @param {string} message - Text message or caption
+ * @param {object} [mediaAttachment] - Optional image attachment for Claude Vision
+ * @param {string} mediaAttachment.type - 'image'
+ * @param {string} mediaAttachment.base64 - Base64-encoded image data
+ * @param {string} mediaAttachment.mimeType - MIME type (e.g. 'image/jpeg')
+ */
+export async function handleClientMessage(from, message, mediaAttachment = null) {
   try {
     // Pre-check for signup token — cancel stale sessions so fresh signups aren't blocked
     const preTokenMatch = message.match(TOKEN_RE_INLINE);
@@ -298,8 +307,29 @@ export async function handleClientMessage(from, message) {
     } else {
       history = getHistory(from);
     }
+    // Store text part in history (images are ephemeral — too large for SQLite)
     addToHistory(from, 'user', message, 'whatsapp');
-    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
+
+    // Build the current user message — multimodal if image attached
+    let currentUserContent;
+    if (mediaAttachment?.base64 && mediaAttachment.type === 'image') {
+      // Claude Vision multimodal format: image + text content blocks
+      currentUserContent = [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaAttachment.mimeType || 'image/jpeg',
+            data: mediaAttachment.base64,
+          },
+        },
+        { type: 'text', text: message },
+      ];
+    } else {
+      currentUserContent = message;
+    }
+
+    const messages = sanitizeMessages([...history, { role: 'user', content: currentUserContent }]);
 
     await sendThinkingIndicator('whatsapp', from, 'Give me a moment...');
 

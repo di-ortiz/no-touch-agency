@@ -30,6 +30,7 @@ import rateLimit from 'express-rate-limit';
 // Handlers
 import {
   handleCommand, handleClientMessage, handleMediaUpload, handleApproval,
+  getWhatsAppMediaUrl, downloadWhatsAppMedia,
 } from './whatsapp-handler.js';
 import {
   handleTelegramCommand, handleTelegramClientMessage,
@@ -167,7 +168,30 @@ app.post('/webhook/whatsapp', async (req, res) => {
       if (isOwner) {
         await handleMediaUpload(from, message.type, media, caption);
       } else {
-        if (caption) {
+        // For images: download and pass to Claude as vision input so Sofia can SEE the image
+        if (message.type === 'image') {
+          let imageBase64 = null;
+          let mimeType = media?.mime_type || 'image/jpeg';
+          try {
+            const mediaUrl = await getWhatsAppMediaUrl(media.id);
+            if (mediaUrl) {
+              const mediaData = await downloadWhatsAppMedia(mediaUrl);
+              if (mediaData) {
+                imageBase64 = Buffer.from(mediaData).toString('base64');
+              }
+            }
+          } catch (e) {
+            log.warn('Failed to download client image for vision', { error: e.message });
+          }
+
+          const textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+          await handleClientMessage(from, textPart, {
+            type: 'image',
+            base64: imageBase64,
+            mimeType,
+          });
+        } else if (caption) {
+          // Non-image media with caption — treat as text message
           await handleClientMessage(from, caption);
         } else {
           await sendWhatsApp('Thanks for sharing that! If you have any questions or need help, just send me a text message.', from);
@@ -228,11 +252,44 @@ app.post('/webhook/telegram', async (req, res) => {
 
     // Handle file uploads (photos, documents, video, audio)
     const fileObj = message.document || message.photo?.slice(-1)?.[0] || message.video || message.audio;
-    if (fileObj && isOwner) {
+    if (fileObj) {
       const caption = message.caption || '';
       const mediaType = message.document ? 'document' : message.photo ? 'image' : message.video ? 'video' : 'audio';
       log.info('Telegram file received', { chatId, mediaType, fileId: fileObj.file_id });
-      await handleTelegramMediaUpload(chatId, mediaType, fileObj, caption);
+
+      if (isOwner) {
+        await handleTelegramMediaUpload(chatId, mediaType, fileObj, caption);
+        return;
+      }
+
+      // For client images: download and pass to Claude Vision
+      if (message.photo) {
+        let imageBase64 = null;
+        try {
+          const { default: telegramApi } = await import('../api/telegram.js');
+          const fileUrl = await telegramApi.getFileUrl(fileObj.file_id);
+          if (fileUrl) {
+            const { default: axios } = await import('axios');
+            const resp = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
+            imageBase64 = Buffer.from(resp.data).toString('base64');
+          }
+        } catch (e) {
+          log.warn('Failed to download Telegram image for vision', { error: e.message });
+        }
+
+        const textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+        await handleTelegramClientMessage(chatId, textPart, {
+          type: 'image',
+          base64: imageBase64,
+          mimeType: 'image/jpeg',
+        });
+        return;
+      }
+
+      // Non-image media — handle caption as text or ignore
+      if (caption) {
+        await handleTelegramClientMessage(chatId, caption);
+      }
       return;
     }
 
