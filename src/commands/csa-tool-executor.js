@@ -2112,56 +2112,72 @@ Return ONLY the JSON array, no other text.`;
 
       const clientBrandDNA = brandDNA.loadBrandDNA(client.id);
       const platform = toolInput.platform || 'meta';
+      const imgFolderId = client.drive_creatives_folder_id || client.drive_root_folder_id;
+
+      // Determine rendering mode: template-first (default) or photo-forward (AI image)
+      const usePhotoForward = toolInput.style === 'photo-forward' || toolInput.style === 'photorealistic';
 
       try {
-        // Step 1: Generate image prompt (background only, no text)
-        const imgPrompt = await creativeEngine.generateImagePrompt({
-          clientName: toolInput.clientName,
-          platform,
-          product: toolInput.product,
-          concept: toolInput.concept,
-          mood: toolInput.mood,
-          style: toolInput.style,
-          brandColors: clientBrandDNA?.primary_colors?.join(', ') || client.brand_colors,
-          audience: clientBrandDNA?.target_audience || client.target_audience,
-        });
+        let result;
 
-        // Step 2 & 3: Generate background + ad copy in parallel, then render overlay
-        const imgFolderId = client.drive_creatives_folder_id || client.drive_root_folder_id;
+        if (usePhotoForward) {
+          // Legacy path: AI-generated background + text overlay
+          const imgPrompt = await creativeEngine.generateImagePrompt({
+            clientName: toolInput.clientName,
+            platform,
+            product: toolInput.product,
+            concept: toolInput.concept,
+            mood: toolInput.mood,
+            style: toolInput.style,
+            brandColors: clientBrandDNA?.primary_colors?.join(', ') || client.brand_colors,
+            audience: clientBrandDNA?.target_audience || client.target_audience,
+          });
 
-        const result = await creativeRenderer.generateFullCreative({
-          brandDNA: clientBrandDNA,
-          product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
-          goal: toolInput.goal || 'conversion',
-          generateImage: (opts) => imageRouter.generateImage({ ...opts, prompt: imgPrompt }),
-          imagePrompt: imgPrompt,
-          driveFolderId: imgFolderId,
-          clientId: client.id,
-        });
+          result = await creativeRenderer.generateFullCreative({
+            brandDNA: clientBrandDNA,
+            product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
+            goal: toolInput.goal || 'conversion',
+            generateImage: (opts) => imageRouter.generateImage({ ...opts, prompt: imgPrompt }),
+            imagePrompt: imgPrompt,
+            driveFolderId: imgFolderId,
+            clientId: client.id,
+          });
+        } else {
+          // Template-first path: professional HTML/CSS design (no AI image needed)
+          result = await creativeRenderer.generateTemplateCreative({
+            brandDNA: clientBrandDNA,
+            product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
+            goal: toolInput.goal || 'conversion',
+            templateStyle: toolInput.templateStyle || null,
+            driveFolderId: imgFolderId,
+            clientId: client.id,
+          });
+        }
 
         // Build response with image buffers for delivery
         const images = [];
         const _imageBuffers = [];
 
         if (result.feed && !result.feed.error) {
-          images.push({ format: 'feed', label: 'Feed (1080x1080)', url: result.feed.url || '', driveId: result.feed.driveId });
+          images.push({ format: 'feed', label: 'Feed (1080x1080)', url: result.feed.url || '', driveId: result.feed.driveId, templateName: result.feed.templateName });
           _imageBuffers.push(result.feed._buffer ? { buffer: result.feed._buffer, mimeType: 'image/png' } : null);
         }
         if (result.story && !result.story.error) {
-          images.push({ format: 'story', label: 'Stories (1080x1920)', url: result.story.url || '', driveId: result.story.driveId });
+          images.push({ format: 'story', label: 'Stories (1080x1920)', url: result.story.url || '', driveId: result.story.driveId, templateName: result.story.templateName });
           _imageBuffers.push(result.story._buffer ? { buffer: result.story._buffer, mimeType: 'image/png' } : null);
         }
 
         const response = {
           clientName: client.name,
           adCopy: result.adCopy,
-          backgroundUrl: result.backgroundUrl,
+          templateBased: !!result.templateBased,
+          templateName: result.templateName || null,
+          backgroundUrl: result.backgroundUrl || null,
           images,
           totalGenerated: images.length,
           fallback: result.fallback,
         };
 
-        // If Puppeteer failed, include the raw background + text as fallback
         if (result.fallback) {
           response.fallbackNote = 'Puppeteer render failed. Background image and ad copy delivered separately.';
         }

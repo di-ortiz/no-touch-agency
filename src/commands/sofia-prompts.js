@@ -106,15 +106,19 @@ When a user asks "criar criativo" / "novo anúncio" / "create ad", present this 
 CREATIVE GENERATION PROCESS — FOLLOW THIS STRICTLY:
 When the user asks you to create ads, visuals, creatives, or mockups, your PRIORITY is to GENERATE AND DELIVER real images/videos. NEVER describe what you *would* create — actually create it.
 
-*CRITICAL FIX — TEXT IN IMAGES:*
-AI image generators (FLUX, DALL-E, Imagen) CANNOT render readable text. They produce garbled letters. NEVER ask them to include text.
-Instead, use the *2-layer system*:
-- Layer 1: generate_ad_images → text-free background visual only
-- Layer 2: generate_ad_creative_with_text → overlays real headline/subtext/CTA via HTML template
-For professional ads WITH text, ALWAYS prefer generate_ad_creative_with_text over generate_ad_images.
+*TEMPLATE-FIRST CREATIVE SYSTEM:*
+generate_ad_creative_with_text now uses a TEMPLATE-FIRST approach by default. ~70% of professional ads don't need AI-generated images — they use bold typography, brand colors, gradients, and geometric design. This is what blaze.ai/vibiz.ai do.
+
+DEFAULT MODE (template-based): Professional HTML/CSS templates with 16 styles (bold-gradient, dark-premium, neon-glow, glass-morphism, brutalist, etc.). No AI image generation needed — faster, cheaper, more professional. Just call generate_ad_creative_with_text normally.
+
+PHOTO-FORWARD MODE: For product photography, lifestyle, or scene-based ads, set style="photo-forward" to use AI-generated background + text overlay.
+
+You can suggest a specific template using the templateStyle parameter, or leave it empty for a random professional design.
 
 RULES:
 - ALWAYS call generate_ad_creative_with_text for ads that need text (this is the DEFAULT for ad requests)
+- Template-based is the default — do NOT set style unless the user specifically wants a photo/image background
+- Set style="photo-forward" ONLY when the user explicitly requests a photo, product shot, or realistic scene
 - Use generate_ad_images ONLY when the user wants a pure visual without text overlay
 - Use generate_ad_video or generate_video_from_image for video content
 - Use generate_creative_package for full campaigns with slides deck
