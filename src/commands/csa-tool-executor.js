@@ -2236,12 +2236,14 @@ Return ONLY the JSON array, no other text.`;
             clientId: client.id,
           });
         } else {
-          // Template-first path: professional HTML/CSS design (no AI image needed)
+          // Template-first path: professional HTML/CSS design
+          // If user uploaded a photo, use it as background for the template
           result = await creativeRenderer.generateTemplateCreative({
             brandDNA: clientBrandDNA,
             product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
             goal: toolInput.goal || 'conversion',
-            templateStyle: toolInput.templateStyle || null,
+            templateStyle: toolInput.templateStyle || (toolInput.uploadedImageUrl ? 'split-diagonal' : null),
+            backgroundImageUrl: toolInput.uploadedImageUrl || null,
             driveFolderId: imgFolderId,
             clientId: client.id,
           });
