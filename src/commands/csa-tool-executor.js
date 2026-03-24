@@ -695,7 +695,7 @@ Return ONLY the JSON array, no other text.`;
         const qualityResults = await Promise.allSettled(
           targetFormats.map(format =>
             generateAndValidate({
-              prompt: `${imagePrompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third of the image.`,
+              prompt: `${imagePrompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. CRITICAL: No text, no words, no letters, no numbers, no typography, no captions, no screens, no monitors, no dashboards, no charts, no UI elements. Pure visual scene only — clean background with space for text overlay.`,
               format,
               clientId: client?.id,
               brandGuidelines,
@@ -1044,6 +1044,10 @@ Return ONLY the JSON array, no other text.`;
           tagline: analysis.brand.tagline,
           heroImage: analysis.brand.heroImage,
           brandColors: analysis.brand.colors,
+          logoUrl: analysis.brand.logoUrl,
+          faviconUrl: analysis.brand.faviconUrl,
+          brandFonts: analysis.brand.fonts,
+          googleFontsUrl: analysis.brand.googleFontsUrl,
           headline: analysis.messaging.headline,
           subheadings: analysis.messaging.subheadings?.slice(0, 5),
           keyPhrases: analysis.messaging.keyPhrases?.slice(0, 5),
@@ -1067,6 +1071,10 @@ Return ONLY the JSON array, no other text.`;
         images: page.images?.slice(0, 10),
         links: page.links?.slice(0, 15),
         brandColors: page.brandColors,
+        logoUrl: page.logoUrl || null,
+        faviconUrl: page.faviconUrl || null,
+        brandFonts: page.fonts || [],
+        googleFontsUrl: page.googleFontsUrl || null,
         wordCount: page.wordCount,
       };
     }
@@ -2271,20 +2279,36 @@ Return ONLY the JSON array, no other text.`;
     // --- Template Overlay Creative ---
     case 'generate_ad_creative_with_text': {
       const client = getClient(toolInput.clientName);
-      // Allow unregistered users when they uploaded a photo — use ad-hoc brand DNA
-      if (!client && !toolInput.uploadedImageUrl) return { error: `Client "${toolInput.clientName}" not found. If the user uploaded a photo, pass the image URL as uploadedImageUrl to create an ad with their photo.` };
+      // Allow unregistered users — build brand DNA from tool input or defaults
+      if (!client && !toolInput.uploadedImageUrl && !toolInput.brandColors && !toolInput.concept && !toolInput.product) {
+        return { error: `Client "${toolInput.clientName}" not found. Pass brandColors, product, or uploadedImageUrl to create an ad without a registered client.` };
+      }
 
       const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
       const platform = toolInput.platform || 'meta';
       const imgFolderId = client ? (client.drive_creatives_folder_id || client.drive_root_folder_id) : null;
 
-      // Build fallback brand DNA for unregistered users
+      // Build effective brand DNA: client DB > tool input > defaults
+      // This lets Claude pass brand info from browse_website/extract_brand_dna directly
+      const toolBrandColors = toolInput.brandColors
+        ? toolInput.brandColors.split(',').map(c => c.trim()).filter(c => c.startsWith('#'))
+        : [];
+      const toolFonts = toolInput.brandFonts
+        ? toolInput.brandFonts.split(',').map(f => f.trim()).filter(Boolean)
+        : [];
+
       const effectiveBrandDNA = clientBrandDNA || {
         business_name: toolInput.clientName || 'Ad Creative',
-        primary_colors: ['#2563EB', '#1E40AF'],
-        secondary_colors: ['#F59E0B'],
+        primary_colors: toolBrandColors.length > 0 ? toolBrandColors.slice(0, 3) : ['#2563EB', '#1E40AF'],
+        secondary_colors: toolBrandColors.length > 3 ? toolBrandColors.slice(3, 5) : [],
         cta_style: 'direct',
         main_products_or_services: [toolInput.product || 'Professional Services'],
+        logo_url: toolInput.logoUrl || null,
+        favicon_url: toolInput.faviconUrl || null,
+        fonts: toolFonts.length > 0 ? toolFonts : [],
+        google_fonts_url: toolInput.googleFontsUrl || null,
+        tone_of_voice: toolInput.mood || null,
+        industry: toolInput.industry || null,
       };
 
       // Determine rendering mode: template-first (default) or photo-forward (AI image)

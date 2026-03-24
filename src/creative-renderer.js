@@ -35,6 +35,21 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
   const cta = escapeHtml(adCopy?.cta || '');
   const ctaColor = brandDNA?.primary_colors?.[0] || '#FF4500';
 
+  // Use brand font if available, fallback to safe system fonts
+  const brandFont = brandDNA?.fonts?.[0] || 'Inter';
+  const fontFamily = `'${brandFont}', Arial, Helvetica, sans-serif`;
+
+  // Build Google Fonts link for brand font
+  const googleFontsLink = brandDNA?.google_fonts_url
+    ? `<link href="${brandDNA.google_fonts_url}" rel="stylesheet">`
+    : `<link href="https://fonts.googleapis.com/css2?family=${encodeURIComponent(brandFont)}:wght@400;600;700;800;900&display=swap" rel="stylesheet">`;
+
+  // Logo overlay
+  const logoUrl = brandDNA?.logo_url || brandDNA?.favicon_url;
+  const logoHtml = logoUrl
+    ? `<img src="${escapeHtml(logoUrl)}" style="position:absolute;top:40px;left:50px;max-height:50px;max-width:160px;object-fit:contain;z-index:10;" onerror="this.style.display='none'" />`
+    : '';
+
   // Adjust text positioning for story format (vertical center-bottom)
   const textBottom = isStory ? '200px' : '60px';
   const headlineSize = isStory ? '54px' : '48px';
@@ -43,8 +58,14 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
   const html = `<!DOCTYPE html>
 <html>
+<head>
+  <meta charset="utf-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  ${googleFontsLink}
+</head>
 <body style="margin:0; width:${width}px; height:${height}px; position:relative;
-             font-family: Arial, Helvetica, sans-serif; overflow:hidden;">
+             font-family: ${fontFamily}; overflow:hidden;">
   <!-- Background image -->
   <img src="${backgroundImageUrl}"
        style="width:100%; height:100%; object-fit:cover;
@@ -52,6 +73,7 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
   <!-- Dark gradient for text readability -->
   <div style="position:absolute; bottom:0; left:0; right:0; height:${gradientHeight};
               background: linear-gradient(transparent, rgba(0,0,0,0.75));"></div>
+  ${logoHtml}
   <!-- Text block -->
   <div style="position:absolute; bottom:${textBottom}; left:50px; right:50px;">
     <p style="color:white; font-size:${headlineSize}; font-weight:900;

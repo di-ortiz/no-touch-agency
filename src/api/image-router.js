@@ -379,7 +379,7 @@ export async function generateAdImages(opts = {}) {
 
   const settled = await Promise.allSettled(
     formats.map((format, idx) => {
-      const formatPrompt = `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third of the image.`;
+      const formatPrompt = `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. CRITICAL: No text, no words, no letters, no numbers, no typography, no captions, no screens, no monitors, no dashboards, no charts, no UI elements. Pure visual scene only — clean background with space for text overlay.`;
 
       log.info(`Starting image generation for format: ${format}`, {
         platform: opts.platform,

@@ -86,6 +86,10 @@ async function fetchWithFirecrawl(url, opts = {}) {
     bodyText = bodyText.slice(0, maxLength) + '... [truncated]';
   }
 
+  // Extract brand visual assets from HTML if available
+  const html = result.html || '';
+  const brandAssets = html ? extractBrandAssets(html, url) : {};
+
   return {
     url: result.url || url,
     statusCode: 200,
@@ -98,9 +102,10 @@ async function fetchWithFirecrawl(url, opts = {}) {
     markdown: md,
     images,
     links,
-    brandColors: result.html ? extractColors(result.html) : [],
+    brandColors: html ? extractColors(html) : [],
     wordCount: bodyText.split(/\s+/).length,
     source: 'firecrawl',
+    ...brandAssets,
   };
 }
 
@@ -193,6 +198,7 @@ async function fetchWithAxios(url, opts = {}) {
     }
 
     const colors = extractColors(html);
+    const brandAssets = extractBrandAssets(html, url);
 
     const result = {
       url,
@@ -212,6 +218,7 @@ async function fetchWithAxios(url, opts = {}) {
       brandColors: colors.slice(0, 10),
       wordCount: bodyText.split(/\s+/).length,
       source: 'direct',
+      ...brandAssets,
     };
 
     log.info('Webpage fetched', { url, wordCount: result.wordCount, images: images.length });
@@ -237,6 +244,10 @@ export async function analyzeForCreativeInspiration(url) {
       tagline: page.description,
       heroImage: page.ogImage,
       colors: page.brandColors,
+      logoUrl: page.logoUrl || null,
+      faviconUrl: page.faviconUrl || null,
+      fonts: page.fonts || [],
+      googleFontsUrl: page.googleFontsUrl || null,
     },
     messaging: {
       headline: page.headings.h1?.[0] || page.title,
@@ -289,6 +300,88 @@ function extractMeta(html, name, attr = 'name') {
 function stripTags(text) {
   if (!text) return '';
   return text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Extract brand visual assets from raw HTML: logo URL, favicon, Google Fonts, CSS colors.
+ * Returns an object that gets spread into the page result.
+ */
+function extractBrandAssets(html, pageUrl) {
+  const assets = {};
+  const baseUrl = pageUrl ? new URL(pageUrl).origin : '';
+
+  // --- Favicon ---
+  const faviconPatterns = [
+    /<link[^>]+rel=["'](?:shortcut )?icon["'][^>]+href=["']([^"']+)["']/i,
+    /<link[^>]+href=["']([^"']+)["'][^>]+rel=["'](?:shortcut )?icon["']/i,
+    /<link[^>]+rel=["']apple-touch-icon["'][^>]+href=["']([^"']+)["']/i,
+  ];
+  for (const pat of faviconPatterns) {
+    const m = html.match(pat);
+    if (m?.[1]) {
+      assets.faviconUrl = m[1].startsWith('http') ? m[1] : `${baseUrl}${m[1].startsWith('/') ? '' : '/'}${m[1]}`;
+      break;
+    }
+  }
+  // Fallback: try /favicon.ico
+  if (!assets.faviconUrl && baseUrl) {
+    assets.faviconUrl = `${baseUrl}/favicon.ico`;
+  }
+
+  // --- Logo detection ---
+  // Look for <img> or <a> with logo-related attributes (class, id, alt, src containing "logo")
+  const logoPatterns = [
+    /<img[^>]+(?:class|id)=["'][^"']*logo[^"']*["'][^>]*src=["']([^"']+)["']/gi,
+    /<img[^>]+src=["']([^"']+)["'][^>]*(?:class|id)=["'][^"']*logo[^"']*["']/gi,
+    /<img[^>]+alt=["'][^"']*logo[^"']*["'][^>]*src=["']([^"']+)["']/gi,
+    /<img[^>]+src=["']([^"']+logo[^"']*\.(?:png|svg|jpg|jpeg|webp))["']/gi,
+    /<a[^>]*class=["'][^"']*(?:logo|brand|navbar-brand)[^"']*["'][^>]*>\s*<img[^>]+src=["']([^"']+)["']/gi,
+  ];
+  for (const pat of logoPatterns) {
+    const m = pat.exec(html);
+    if (m?.[1] && !m[1].startsWith('data:')) {
+      assets.logoUrl = m[1].startsWith('http') ? m[1] : `${baseUrl}${m[1].startsWith('/') ? '' : '/'}${m[1]}`;
+      break;
+    }
+  }
+  // Fallback: check for SVG logo in a header/nav element
+  if (!assets.logoUrl) {
+    const headerSvg = html.match(/<(?:header|nav)[^>]*>[\s\S]{0,2000}?<svg[^>]*>[\s\S]*?<\/svg>/i);
+    if (headerSvg) {
+      // Can't easily get a URL for inline SVGs, but note it exists
+      assets.logoType = 'inline-svg';
+    }
+  }
+
+  // --- Google Fonts ---
+  const fontLinks = html.match(/fonts\.googleapis\.com\/css2?\?[^"'\s)]+/g) || [];
+  const fonts = new Set();
+  for (const link of fontLinks) {
+    // Parse family= parameters: family=Inter:wght@400;700&family=Poppins
+    const familyMatches = link.matchAll(/family=([^:&]+)/g);
+    for (const fm of familyMatches) {
+      fonts.add(decodeURIComponent(fm[1]).replace(/\+/g, ' '));
+    }
+  }
+  // Also check CSS font-family in inline styles for common web fonts
+  const inlineFontFamilies = html.match(/font-family\s*:\s*['"]?([^;'"}{]+)/gi) || [];
+  for (const ff of inlineFontFamilies) {
+    const val = ff.replace(/font-family\s*:\s*/i, '').replace(/['"`]/g, '').trim();
+    const firstFont = val.split(',')[0].trim();
+    if (firstFont && !['arial', 'helvetica', 'sans-serif', 'serif', 'monospace', 'inherit', 'system-ui'].includes(firstFont.toLowerCase())) {
+      fonts.add(firstFont);
+    }
+  }
+  if (fonts.size > 0) {
+    assets.fonts = [...fonts].slice(0, 5);
+  }
+
+  // --- Google Fonts CSS URL (for direct use in templates) ---
+  if (fontLinks.length > 0) {
+    assets.googleFontsUrl = `https://${fontLinks[0]}`;
+  }
+
+  return assets;
 }
 
 function extractColors(html) {
