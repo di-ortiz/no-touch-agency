@@ -14,6 +14,7 @@ import {
 import { getClientContextByPhone } from '../services/client-onboarding-flow.js';
 import * as supabase from '../api/supabase.js';
 import axios from 'axios';
+import crypto from 'crypto';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
@@ -45,6 +46,45 @@ export function getPublicUrl() {
   if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
   return detectedPublicUrl;
 }
+
+// --- Temporary Media Store (for passing WhatsApp images to video tools) ---
+const tempMediaStore = new Map();
+
+/**
+ * Store a media buffer temporarily and return a unique ID.
+ * Entries expire after 15 minutes.
+ */
+export function storeTempMedia(buffer, mimeType = 'image/jpeg') {
+  const id = crypto.randomUUID();
+  tempMediaStore.set(id, { buffer, mimeType, createdAt: Date.now() });
+  // Auto-cleanup after 15 minutes
+  setTimeout(() => tempMediaStore.delete(id), 15 * 60 * 1000);
+  return id;
+}
+
+/**
+ * Get a stored media buffer by ID.
+ */
+export function getTempMedia(id) {
+  return tempMediaStore.get(id) || null;
+}
+
+/**
+ * Get a public URL for a stored temp media item.
+ */
+export function getTempMediaUrl(id) {
+  const base = getPublicUrl();
+  if (!base) return null;
+  return `${base}/media/temp/${id}`;
+}
+
+// Clean up expired temp media every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [id, data] of tempMediaStore) {
+    if (data.createdAt < cutoff) tempMediaStore.delete(id);
+  }
+}, 5 * 60 * 1000);
 
 // --- Tool Execution Config ---
 export const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000;

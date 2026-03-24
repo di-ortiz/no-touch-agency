@@ -40,6 +40,7 @@ import {
   isMessageAlreadyProcessed, enqueueOwnerMessage, setHandleCommandFn,
   landingPageStore, setDetectedPublicUrl, addToHistory,
   getPendingClientWithFallback,
+  storeTempMedia, getTempMedia, getTempMediaUrl,
 } from './helpers.js';
 
 const log = logger.child({ workflow: 'whatsapp-command' });
@@ -167,20 +168,36 @@ app.post('/webhook/whatsapp', async (req, res) => {
       // so Sofia can actually SEE the image and act on it (create ads, analyze, etc.)
       if (message.type === 'image') {
         let imageBase64 = null;
+        let imageBuffer = null;
         let mimeType = media?.mime_type || 'image/jpeg';
         try {
           const mediaUrl = await getWhatsAppMediaUrl(media.id);
           if (mediaUrl) {
             const mediaData = await downloadWhatsAppMedia(mediaUrl);
             if (mediaData) {
-              imageBase64 = Buffer.from(mediaData).toString('base64');
+              imageBuffer = Buffer.from(mediaData);
+              imageBase64 = imageBuffer.toString('base64');
             }
           }
         } catch (e) {
           log.warn('Failed to download image for vision', { error: e.message });
         }
 
-        const textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+        // Store image temporarily so video generation tools can access it via URL
+        let tempImageUrl = null;
+        if (imageBuffer) {
+          const mediaId = storeTempMedia(imageBuffer, mimeType);
+          tempImageUrl = getTempMediaUrl(mediaId);
+          if (tempImageUrl) {
+            log.info('Stored temp image for tool access', { tempImageUrl: tempImageUrl.slice(0, 80) });
+          }
+        }
+
+        // Append image URL context so Sofia can pass it to generate_video_from_image
+        let textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+        if (tempImageUrl) {
+          textPart += `\n\n[SYSTEM: The uploaded image is available at this URL for tool use: ${tempImageUrl} — use this URL with generate_video_from_image imageUrl parameter if the user wants a video from this image]`;
+        }
 
         const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
         const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
@@ -573,6 +590,15 @@ app.get('/lp/:id', (req, res) => {
 // ============================================================
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
+
+// Serve temporary media (uploaded WhatsApp images for video generation tools)
+app.get('/media/temp/:id', (req, res) => {
+  const media = getTempMedia(req.params.id);
+  if (!media) return res.status(404).json({ error: 'Media not found or expired' });
+  res.set('Content-Type', media.mimeType);
+  res.set('Cache-Control', 'private, max-age=900');
+  res.send(media.buffer);
 });
 
 // ============================================================

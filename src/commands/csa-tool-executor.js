@@ -877,13 +877,44 @@ Return ONLY the JSON array, no other text.`;
           status: video.status,
         };
       } catch (videoError) {
-        log.error('Video generation failed', { error: videoError.message, stack: videoError.stack, client: toolInput.clientName });
+        log.error('Sora video generation failed', { error: videoError.message, stack: videoError.stack, client: toolInput.clientName });
         const errMsg = videoError.message || 'Unknown error';
         const isRateLimit = errMsg.includes('429') || errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota');
         const isContentPolicy = errMsg.includes('policy') || errMsg.includes('safety') || errMsg.includes('content');
+
+        // Auto-fallback to Kling AI when Sora fails (rate limit, quota, or other transient errors)
+        if (!isContentPolicy && klingApi.isConfigured()) {
+          log.info('Falling back to Kling AI for video generation', { reason: errMsg.slice(0, 100), client: toolInput.clientName });
+          try {
+            const klingPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting.`;
+            const klingResult = await klingApi.generateVideoFromImage({
+              imageUrl: toolInput.referenceImageUrl || toolInput.imageUrl,
+              prompt: klingPrompt,
+              duration: Math.min(toolInput.duration || 5, 10),
+              aspectRatio: toolInput.platform === 'meta_stories' || toolInput.platform === 'tiktok' ? '9:16' : '16:9',
+              workflow: 'ad-video-generation-kling-fallback',
+              clientId: client?.id,
+            });
+
+            return {
+              clientName: toolInput.clientName,
+              concept: toolInput.concept,
+              videoUrl: klingResult.videoUrl,
+              duration: klingResult.duration,
+              aspectRatio: klingResult.aspectRatio,
+              status: klingResult.status,
+              provider: 'kling',
+              note: 'Generated via Kling AI (Sora was unavailable)',
+            };
+          } catch (klingError) {
+            log.error('Kling AI fallback also failed', { error: klingError.message });
+            // Fall through to return the original error with both providers mentioned
+          }
+        }
+
         let userMessage;
         if (isRateLimit) {
-          userMessage = `Video generation hit OpenAI's rate limit. Sora 2 has strict usage limits. Please wait a few minutes and try again, or check your OpenAI plan tier. Error: ${errMsg}`;
+          userMessage = `Video generation failed — both Sora 2 and Kling AI were unavailable. Error: ${errMsg}`;
         } else if (isContentPolicy) {
           userMessage = `Video generation was blocked by content policy. Try a different concept. Error: ${errMsg}`;
         } else {
@@ -891,7 +922,7 @@ Return ONLY the JSON array, no other text.`;
         }
         return {
           error: userMessage,
-          suggestion: 'Try generate_ad_images as an alternative',
+          suggestion: 'Try generate_ad_images as an alternative, or generate_video_from_image with a reference image and Kling AI',
         };
       }
     }
@@ -2135,6 +2166,9 @@ Return ONLY the JSON array, no other text.`;
     // --- Kling AI Video ---
     case 'generate_video_from_image': {
       if (!klingApi.isConfigured()) return { error: 'Kling AI not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway environment variables to enable video generation.' };
+      if (!toolInput.imageUrl) return { error: 'imageUrl is required. When the user uploads a photo, the image URL is provided in a [SYSTEM: ...] tag in the message. Look for it and pass it as imageUrl.' };
+
+      log.info('Kling video generation starting', { imageUrl: (toolInput.imageUrl || '').slice(0, 80), clientName: toolInput.clientName });
 
       const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
       const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
@@ -2148,6 +2182,8 @@ Return ONLY the JSON array, no other text.`;
           clientId: client?.id,
         });
 
+        log.info('Kling video generation completed', { videoUrl: result.videoUrl?.slice(0, 80), taskId: result.id });
+
         return {
           clientName: client?.name || null,
           videoUrl: result.videoUrl,
@@ -2157,6 +2193,7 @@ Return ONLY the JSON array, no other text.`;
           taskId: result.id,
         };
       } catch (e) {
+        log.error('Kling video generation failed', { error: e.message, imageUrl: (toolInput.imageUrl || '').slice(0, 80) });
         return { error: `Video generation failed: ${e.message}` };
       }
     }
