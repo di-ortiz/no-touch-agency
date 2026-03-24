@@ -143,7 +143,16 @@ export async function handleTelegramApproval(action, approvalId, chatId) {
   } catch (error) { return reply(`❌ Action failed: ${error.message}`); }
 }
 
-export async function handleTelegramClientMessage(chatId, message) {
+/**
+ * Handle a Telegram client message (text or multimodal with image).
+ * @param {string} chatId - Telegram chat ID
+ * @param {string} message - Text message or caption
+ * @param {object} [mediaAttachment] - Optional image attachment for Claude Vision
+ * @param {string} mediaAttachment.type - 'image'
+ * @param {string} mediaAttachment.base64 - Base64-encoded image data
+ * @param {string} mediaAttachment.mimeType - MIME type
+ */
+export async function handleTelegramClientMessage(chatId, message, mediaAttachment = null) {
   try {
     let actualMessage = message;
     let pendingData = null;
@@ -301,8 +310,28 @@ export async function handleTelegramClientMessage(chatId, message) {
     } else {
       history = getHistory(chatId);
     }
+    // Store text part in history (images are ephemeral — too large for SQLite)
     addToHistory(chatId, 'user', message, 'telegram');
-    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
+
+    // Build the current user message — multimodal if image attached
+    let currentUserContent;
+    if (mediaAttachment?.base64 && mediaAttachment.type === 'image') {
+      currentUserContent = [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaAttachment.mimeType || 'image/jpeg',
+            data: mediaAttachment.base64,
+          },
+        },
+        { type: 'text', text: message },
+      ];
+    } else {
+      currentUserContent = message;
+    }
+
+    const messages = sanitizeMessages([...history, { role: 'user', content: currentUserContent }]);
 
     await sendThinkingIndicator('telegram', chatId, 'Give me a moment...');
 

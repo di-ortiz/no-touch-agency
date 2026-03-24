@@ -423,4 +423,26 @@ function splitMessage(text, maxLength) {
   return chunks;
 }
 
-export default { sendTelegram, sendTelegramPhoto, sendTelegramPhotoBuffer, sendTelegramVideo, sendTelegramVideoBuffer, sendTelegramDocument, sendTelegramDocumentBuffer, sendAlert, sendMorningBriefing, sendApprovalRequest, setWebhook, getMe, sendTypingAction, sendThinkingMessage };
+/**
+ * Get a download URL for a Telegram file by file_id.
+ * Uses the getFile API to resolve the file_path, then constructs the download URL.
+ * @param {string} fileId - Telegram file_id
+ * @returns {string|null} Download URL or null on failure
+ */
+export async function getFileUrl(fileId) {
+  if (!config.TELEGRAM_BOT_TOKEN) return null;
+  try {
+    const res = await axios.get(`${TELEGRAM_API_BASE}/getFile`, {
+      params: { file_id: fileId },
+      timeout: 10000,
+    });
+    const filePath = res.data?.result?.file_path;
+    if (!filePath) return null;
+    return `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${filePath}`;
+  } catch (e) {
+    log.error('Failed to get Telegram file URL', { error: e.message, fileId });
+    return null;
+  }
+}
+
+export default { sendTelegram, sendTelegramPhoto, sendTelegramPhotoBuffer, sendTelegramVideo, sendTelegramVideoBuffer, sendTelegramDocument, sendTelegramDocumentBuffer, sendAlert, sendMorningBriefing, sendApprovalRequest, setWebhook, getMe, sendTypingAction, sendThinkingMessage, getFileUrl };

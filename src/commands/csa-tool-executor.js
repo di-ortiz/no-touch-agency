@@ -651,8 +651,8 @@ Return ONLY the JSON array, no other text.`;
     }
     case 'generate_ad_images': {
       const providerStatus = imageRouter.getProviderStatus();
-      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured;
-      if (!anyConfigured) return { error: 'No image generation providers configured. Set at least one of OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY in .env.' };
+      const anyConfigured = providerStatus.dalle.configured || providerStatus.fal.configured || providerStatus.gemini.configured || providerStatus.kimi.configured;
+      if (!anyConfigured) return { error: 'No image generation providers configured. Set at least one of OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or KIMI_API_KEY in .env.' };
       const client = getClient(toolInput.clientName);
 
       // Generate the image prompt using AI with full context
@@ -673,17 +673,64 @@ Return ONLY the JSON array, no other text.`;
       // Parse custom formats if provided
       const formats = toolInput.formats ? toolInput.formats.split(',').map(f => f.trim()) : undefined;
 
-      // Use the image router with smart fallback across DALL-E 3, Flux Pro, Imagen 3
-      const images = await imageRouter.generateAdImages({
-        prompt: imagePrompt,
-        platform: toolInput.platform,
-        formats,
-        quality: 'hd',
-        style: 'natural',
-        preferred: toolInput.preferredProvider,
-        workflow: 'ad-image-generation',
-        clientId: client?.id,
-      });
+      // Quality mode: 'multi' fires all providers + Claude Vision scoring, 'single' uses sequential fallback
+      const qualityMode = toolInput.qualityMode || 'multi';
+      let images;
+
+      if (qualityMode === 'multi') {
+        // Multi-candidate: generate from all providers, score with Claude Vision, pick best
+        const { generateAndValidate } = await import('../services/creative-quality-validator.js');
+        const { loadBrandDNA } = await import('../brand-dna.js');
+        const brandDNA = client ? loadBrandDNA(client.id) : null;
+        const brandGuidelines = {
+          name: toolInput.clientName,
+          colors: toolInput.brandColors || client?.brand_colors || brandDNA?.primary_colors,
+          voice: client?.brand_voice || brandDNA?.brand_voice,
+          industry: client?.industry || brandDNA?.industry,
+        };
+
+        const targetFormats = formats || (creativeEngine.PLATFORM_SPECS[toolInput.platform]?.imageFormats) || ['general'];
+        const qualityResults = await Promise.allSettled(
+          targetFormats.map(format =>
+            generateAndValidate({
+              prompt: `${imagePrompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third of the image.`,
+              format,
+              clientId: client?.id,
+              brandGuidelines,
+              qualityThreshold: 60,
+              maxRetries: 1,
+              workflow: 'ad-image-generation',
+              quality: 'hd',
+              style: 'natural',
+            })
+          )
+        );
+
+        images = qualityResults.map((outcome, i) => {
+          if (outcome.status === 'fulfilled') {
+            const r = outcome.value;
+            return {
+              ...r,
+              format: targetFormats[i],
+              qualityScore: r.qualityScore,
+              allScores: r.allScores,
+            };
+          }
+          return { format: targetFormats[i], error: outcome.reason?.message, provider: 'none' };
+        });
+      } else {
+        // Standard sequential fallback mode
+        images = await imageRouter.generateAdImages({
+          prompt: imagePrompt,
+          platform: toolInput.platform,
+          formats,
+          quality: 'hd',
+          style: 'natural',
+          preferred: toolInput.preferredProvider,
+          workflow: 'ad-image-generation',
+          clientId: client?.id,
+        });
+      }
 
       // Download + persist images to Google Drive (permanent URLs) and keep buffers for WhatsApp direct upload
       // Run all uploads in PARALLEL to avoid sequential 10-30s per image adding up
@@ -779,7 +826,7 @@ Return ONLY the JSON array, no other text.`;
         }
       }
 
-      const providers = [...new Set(images.filter(i => i.provider).map(i => i.provider))];
+      const providers = [...new Set(images.filter(i => i.provider || i.providerName).map(i => i.providerName || i.provider))];
       const result = {
         clientName: toolInput.clientName,
         platform: toolInput.platform,
@@ -788,6 +835,15 @@ Return ONLY the JSON array, no other text.`;
         images: mappedImages,
         totalGenerated: images.filter(i => !i.error).length,
         providers,
+        qualityMode: qualityMode === 'multi' ? 'multi-candidate (all providers + Claude Vision scoring)' : 'sequential fallback',
+        ...(qualityMode === 'multi' && {
+          qualityScores: images.filter(i => i.qualityScore).map(i => ({
+            format: i.format,
+            score: i.qualityScore,
+            provider: i.providerName || i.provider,
+            allCandidateScores: i.allScores,
+          })),
+        }),
         sheetUrl,
         ...(sheetError && { sheetError }),
         ...(driveErrors.length > 0 && { driveErrors }),

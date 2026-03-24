@@ -6,6 +6,7 @@ import * as googleSlides from '../api/google-slides.js';
 import { getClient, buildClientContext, getTopCreatives } from './knowledge-base.js';
 import { auditLog } from './cost-tracker.js';
 import { loadBrandDNA, buildBrandContext } from '../brand-dna.js';
+import { generateAndValidate } from './creative-quality-validator.js';
 import config from '../config.js';
 
 const log = logger.child({ workflow: 'creative-engine' });
@@ -280,7 +281,7 @@ export async function generateCreativePackage(opts = {}) {
   });
 
   // --- Step 2: Generate images ---
-  const hasImageProvider = config.OPENAI_API_KEY || config.FAL_API_KEY || config.GEMINI_API_KEY;
+  const hasImageProvider = config.OPENAI_API_KEY || config.FAL_API_KEY || config.GEMINI_API_KEY || config.KIMI_API_KEY;
   if (opts.generateImages !== false && hasImageProvider) {
     log.info('Step 2: Generating ad images...');
     try {
@@ -299,15 +300,52 @@ export async function generateCreativePackage(opts = {}) {
         competitorInsights: opts.competitorInsights,
       });
 
-      // Generate images via router (DALL-E 3 → Flux Pro → Imagen 3 fallback)
-      const images = await imageRouter.generateAdImages({
-        prompt: imagePrompt,
-        platform,
-        quality: 'hd',
-        style: 'natural',
-        workflow: 'creative-package',
-        clientId: client?.id,
-      });
+      const brandGuidelines = {
+        name: opts.clientName,
+        colors: opts.brandColors || client?.brand_colors || brandDNA?.primary_colors,
+        voice: client?.brand_voice || brandDNA?.brand_voice,
+        industry: client?.industry || brandDNA?.industry,
+      };
+
+      // Use quality-gated multi-candidate generation when enabled
+      const useQualityGate = opts.qualityGate !== false;
+      let images;
+
+      if (useQualityGate) {
+        log.info('Using quality-gated multi-candidate generation');
+        const imageFormats = specs.imageFormats || ['general'];
+        const qualityResults = await Promise.allSettled(
+          imageFormats.map(format =>
+            generateAndValidate({
+              prompt: imagePrompt,
+              format,
+              clientId: client?.id,
+              brandGuidelines,
+              qualityThreshold: opts.qualityThreshold || 60,
+              maxRetries: 1,
+              workflow: 'creative-package',
+              quality: 'hd',
+              style: 'natural',
+            })
+          )
+        );
+
+        images = qualityResults.map((outcome, i) => {
+          if (outcome.status === 'fulfilled') return outcome.value;
+          log.error(`Quality-gated generation failed for format ${imageFormats[i]}`, { error: outcome.reason?.message });
+          return { format: imageFormats[i], error: outcome.reason?.message };
+        });
+      } else {
+        // Fallback: standard sequential generation
+        images = await imageRouter.generateAdImages({
+          prompt: imagePrompt,
+          platform,
+          quality: 'hd',
+          style: 'natural',
+          workflow: 'creative-package',
+          clientId: client?.id,
+        });
+      }
 
       result.images = images.map((img, i) => ({
         ...img,
