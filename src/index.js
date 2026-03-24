@@ -114,7 +114,23 @@ async function runStartupChecks() {
     startupIssues.push(`Anthropic API error: ${e.message?.substring(0, 100)}`);
   }
 
-  // 3c. Send startup notification
+  // 3c. Check Kling AI quota (for debugging 429s)
+  try {
+    const klingApi = await import('./api/kling.js');
+    if (klingApi.isConfigured()) {
+      const quota = await klingApi.checkQuota();
+      log.info('Kling AI status at startup', quota);
+      if (quota.status === 'error' && quota.httpStatus === 429) {
+        startupIssues.push('Kling AI: 429 rate limit — account may be out of credits');
+      }
+    } else {
+      log.warn('Kling AI not configured — video generation disabled');
+    }
+  } catch (e) {
+    log.warn('Kling AI check failed', { error: e.message });
+  }
+
+  // 3d. Send startup notification
   const statusMsg = startupIssues.length > 0
     ? `System Online — BUT ${startupIssues.length} issue(s):\n${startupIssues.map(i => `• ${i}`).join('\n')}`
     : 'PPC Agency Automation is running.\nType *help* for available commands.';
