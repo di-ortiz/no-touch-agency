@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import logger from './utils/logger.js';
 import * as googleDrive from './api/google-drive.js';
+import { renderTemplateHtml, selectTemplate, getTemplateNames } from './services/template-engine.js';
 
 const log = logger.child({ workflow: 'creative-renderer' });
 
@@ -282,8 +283,188 @@ export async function generateFullCreative(opts = {}) {
   };
 }
 
+/**
+ * Render a single ad creative from an HTML/CSS template (no AI image needed).
+ * Uses Puppeteer to screenshot the template HTML.
+ *
+ * @param {string} templateName - Template name (or null for random)
+ * @param {object} adCopy - { headline, subtext, cta }
+ * @param {object} brandDNA - Brand DNA JSON for styling
+ * @param {object} [opts] - Options
+ * @param {string} [opts.format] - 'feed' (1080x1080) or 'story' (1080x1920)
+ * @param {string} [opts.backgroundImageUrl] - Optional background image URL
+ * @param {string} [opts.driveFolderId] - Drive folder for upload
+ * @param {string} [opts.clientId] - Client ID
+ * @returns {object} { url, format, width, height, templateName, _buffer, _mimeType }
+ */
+export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = {}) {
+  const format = opts.format || 'feed';
+
+  log.info('Rendering from template', { templateName, format, headline: adCopy?.headline });
+
+  const { html, templateName: resolvedName, width, height } = renderTemplateHtml(
+    templateName, adCopy, brandDNA, { format, backgroundImageUrl: opts.backgroundImageUrl }
+  );
+
+  const timestamp = Date.now();
+  const tmpPath = `/tmp/template-${resolvedName}-${timestamp}-${format}.html`;
+  let browser = null;
+
+  try {
+    fs.writeFileSync(tmpPath, html, 'utf-8');
+
+    let puppeteer;
+    try {
+      puppeteer = await import('puppeteer');
+    } catch {
+      puppeteer = await import('puppeteer-core');
+    }
+
+    const chromePaths = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+    ].filter(Boolean);
+
+    const launchOpts = {
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      headless: 'new',
+    };
+
+    for (const chromePath of chromePaths) {
+      try {
+        if (fs.existsSync(chromePath)) {
+          launchOpts.executablePath = chromePath;
+          break;
+        }
+      } catch { /* continue */ }
+    }
+
+    browser = await puppeteer.default.launch(launchOpts);
+    const page = await browser.newPage();
+    await page.setViewport({ width, height });
+    await page.goto(`file://${tmpPath}`, { waitUntil: 'networkidle0', timeout: 30000 });
+
+    // Wait for Google Fonts to load
+    await page.waitForFunction(() => document.fonts.ready.then(() => true), { timeout: 10000 }).catch(() => {
+      log.warn('Font loading may not have completed');
+    });
+
+    const screenshotBuffer = await page.screenshot({
+      type: 'png',
+      fullPage: false,
+      clip: { x: 0, y: 0, width, height },
+    });
+
+    log.info('Template screenshot captured', { template: resolvedName, format, size: screenshotBuffer.length });
+
+    let result = { format, width, height, templateName: resolvedName };
+
+    if (opts.driveFolderId) {
+      try {
+        const fileName = `template-${resolvedName}-${format}-${timestamp}.png`;
+        const driveFile = await googleDrive.uploadFile({
+          name: fileName,
+          mimeType: 'image/png',
+          buffer: screenshotBuffer,
+          folderId: opts.driveFolderId,
+        });
+        if (driveFile?.webContentLink) {
+          result.url = driveFile.webContentLink;
+          result.driveId = driveFile.id;
+        }
+      } catch (e) {
+        log.warn('Drive upload failed for template creative', { error: e.message });
+      }
+    }
+
+    result._buffer = screenshotBuffer;
+    result._mimeType = 'image/png';
+
+    log.info('Template creative rendered successfully', { template: resolvedName, format, hasUrl: !!result.url });
+    return result;
+
+  } catch (error) {
+    log.error('Template render failed', { error: error.message, template: templateName, format });
+    throw error;
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch (e) { /* ignore */ }
+    }
+    try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * Full template-based creative generation pipeline (no AI image needed).
+ * 1. Generate ad copy (Claude Haiku)
+ * 2. Render template with Puppeteer (Feed + Story)
+ *
+ * @param {object} opts
+ * @param {object} opts.brandDNA - Brand DNA JSON
+ * @param {string} opts.product - Product/service
+ * @param {string} opts.goal - Campaign goal
+ * @param {string} [opts.templateStyle] - Template name (or null for random)
+ * @param {string} [opts.backgroundImageUrl] - Optional background image
+ * @param {string} [opts.driveFolderId] - Drive folder for uploads
+ * @param {string} [opts.clientId] - Client ID
+ * @returns {object} { adCopy, templateName, feed, story, fallback, templateBased }
+ */
+export async function generateTemplateCreative(opts = {}) {
+  const { brandDNA, product, goal, templateStyle, backgroundImageUrl, driveFolderId, clientId } = opts;
+  const { generateAdCopy } = await import('./brand-dna.js');
+
+  log.info('Starting template creative pipeline', { product, goal, templateStyle });
+
+  // Step 1: Generate ad copy
+  const adCopy = await generateAdCopy(brandDNA, { product, goal });
+
+  // Step 2: Pick template
+  const { name: resolvedTemplate } = selectTemplate(templateStyle);
+
+  // Step 3: Render both formats
+  const results = {};
+
+  try {
+    results.feed = await renderFromTemplate(resolvedTemplate, adCopy, brandDNA, {
+      format: 'feed',
+      backgroundImageUrl,
+      driveFolderId,
+      clientId,
+    });
+  } catch (e) {
+    log.error('Template feed render failed', { error: e.message });
+    results.feed = { error: e.message, format: 'feed' };
+  }
+
+  try {
+    results.story = await renderFromTemplate(resolvedTemplate, adCopy, brandDNA, {
+      format: 'story',
+      backgroundImageUrl,
+      driveFolderId,
+      clientId,
+    });
+  } catch (e) {
+    log.error('Template story render failed', { error: e.message });
+    results.story = { error: e.message, format: 'story' };
+  }
+
+  return {
+    adCopy,
+    templateName: resolvedTemplate,
+    feed: results.feed,
+    story: results.story,
+    fallback: false,
+    templateBased: true,
+  };
+}
+
 export default {
   renderAdCreative,
   renderAdCreativePair,
   generateFullCreative,
+  renderFromTemplate,
+  generateTemplateCreative,
 };
