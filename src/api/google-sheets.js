@@ -3,35 +3,20 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry } from '../utils/retry.js';
-import fs from 'fs';
+import { getGoogleAuth } from './google-auth.js';
 
 const log = logger.child({ platform: 'google-sheets' });
 
-let auth;
 let sheetsClient;
 let driveClient;
 
 function getAuth() {
+  const auth = getGoogleAuth([
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+  ]);
   if (!auth) {
-    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
-    if (fs.existsSync(credPath)) {
-      auth = new google.auth.GoogleAuth({
-        keyFile: credPath,
-        scopes: [
-          'https://www.googleapis.com/auth/spreadsheets',
-          'https://www.googleapis.com/auth/drive',
-        ],
-      });
-    } else {
-      log.error('Google credentials MISSING', { credPath });
-      throw new Error(
-        `Google service account credentials not found. ` +
-        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
-        `To fix: 1) Go to console.cloud.google.com → IAM → Service Accounts, ` +
-        `2) Create a service account with Sheets/Drive API access, ` +
-        `3) Download the JSON key and save it to ${credPath}`
-      );
-    }
+    throw new Error('Google Sheets not configured — no OAuth2 or service account credentials found');
   }
   return auth;
 }

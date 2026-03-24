@@ -15,32 +15,23 @@ import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry } from '../utils/retry.js';
 import * as supaStorage from './supabase-storage.js';
-import fs from 'fs';
+import { getGoogleAuth } from './google-auth.js';
 
 const log = logger.child({ platform: 'google-drive' });
 
 // ============================================================
 // Google Drive client (for read operations on existing docs)
 // ============================================================
-let auth;
 let driveClient;
 let docsClient;
 
 function getAuth() {
+  const auth = getGoogleAuth([
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/documents',
+  ]);
   if (!auth) {
-    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
-    if (fs.existsSync(credPath)) {
-      auth = new google.auth.GoogleAuth({
-        keyFile: credPath,
-        scopes: [
-          'https://www.googleapis.com/auth/drive',
-          'https://www.googleapis.com/auth/documents',
-        ],
-      });
-    } else {
-      log.warn('Google credentials not found, Drive read operations unavailable', { credPath });
-      return null;
-    }
+    log.warn('Google credentials not found, Drive read operations unavailable');
   }
   return auth;
 }

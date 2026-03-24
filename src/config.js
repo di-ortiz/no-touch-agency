@@ -26,6 +26,11 @@ const envSchema = z.object({
   GOOGLE_DRIVE_ROOT_FOLDER_ID: z.string().optional().default(''),
   GOOGLE_SHEETS_REPORTS_ID: z.string().optional().default(''),
 
+  // Google OAuth2 (for Analytics, Sheets, Drive, Slides — uses user credentials instead of service account)
+  GOOGLE_CLIENT_ID: z.string().optional().default(''),
+  GOOGLE_CLIENT_SECRET: z.string().optional().default(''),
+  GOOGLE_REFRESH_TOKEN: z.string().optional().default(''),
+
   // HubSpot
   HUBSPOT_ACCESS_TOKEN: z.string().optional().default(''),
 

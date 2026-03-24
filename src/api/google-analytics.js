@@ -3,38 +3,20 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
-import fs from 'fs';
+import { getGoogleAuth } from './google-auth.js';
 
 const log = logger.child({ platform: 'google-analytics' });
 
-let auth;
 let analyticsClient;
-
-function getAuth() {
-  if (!auth) {
-    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
-    if (fs.existsSync(credPath)) {
-      auth = new google.auth.GoogleAuth({
-        keyFile: credPath,
-        scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
-      });
-    } else {
-      log.error('Google credentials MISSING', { credPath });
-      throw new Error(
-        `Google service account credentials not found. ` +
-        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
-        `To fix: download the service account JSON key from console.cloud.google.com and save it to ${credPath}`
-      );
-    }
-  }
-  return auth;
-}
 
 function getAnalytics() {
   if (!analyticsClient) {
-    const a = getAuth();
-    if (!a) return null;
-    analyticsClient = google.analyticsdata({ version: 'v1beta', auth: a });
+    const auth = getGoogleAuth(['https://www.googleapis.com/auth/analytics.readonly']);
+    if (!auth) {
+      log.error('Google credentials MISSING — set GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN or GOOGLE_APPLICATION_CREDENTIALS');
+      throw new Error('Google Analytics not configured — no OAuth2 or service account credentials found');
+    }
+    analyticsClient = google.analyticsdata({ version: 'v1beta', auth });
   }
   return analyticsClient;
 }
