@@ -149,7 +149,7 @@ export async function generateAdImages(opts = {}) {
   for (const format of formats) {
     try {
       const dims = FORMAT_SIZE_MAP[format] || FORMAT_SIZE_MAP.general;
-      const formatPrompt = `${opts.prompt}. This is a ${FORMAT_LABELS[format] || format} ad creative. Professional advertising quality, clean composition, no text overlays.`;
+      const formatPrompt = `${opts.prompt}. This is a ${FORMAT_LABELS[format] || format} ad creative. Professional advertising quality, clean composition. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third.`;
 
       const image = await generateImage({
         ...opts,

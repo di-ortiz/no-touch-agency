@@ -454,6 +454,55 @@ const CSA_TOOLS = [
       series: { type: 'array', description: 'Data series: [{ name: "Name", values: [1,2,3] }]', items: { type: 'object', properties: { name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } } }, required: ['name', 'values'] } },
     }, required: ['title', 'chartType', 'labels', 'series'] },
   },
+  // --- AgencyAnalytics ---
+  {
+    name: 'get_aa_campaigns',
+    description: 'List all campaigns (client accounts) on AgencyAnalytics. Shows campaign names, IDs, status, and connected integrations. Use this to see which clients have dashboards set up, or to get a campaign ID for deeper queries.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_aa_campaign',
+    description: 'Get detailed info about a specific AgencyAnalytics campaign (client account) by ID. Shows campaign name, status, integrations, and configuration.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
+  {
+    name: 'get_aa_integrations',
+    description: 'Get the list of connected integrations (data sources) for an AgencyAnalytics campaign. Shows which platforms are connected (Google Ads, Meta Ads, GA4, Search Console, etc.) and their sync status. Use this to verify dashboards are properly set up with the right data sources.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
+  {
+    name: 'get_aa_reports',
+    description: 'Get all reports configured for an AgencyAnalytics campaign. Shows report names, types, schedules, and recipients. Use this to check if reporting is properly set up for a client.',
+    input_schema: { type: 'object', properties: { campaignId: { type: 'string', description: 'AgencyAnalytics campaign ID' } }, required: ['campaignId'] },
+  },
+  // --- Brand DNA ---
+  {
+    name: 'extract_brand_dna',
+    description: 'Extract Brand DNA from a client\'s website using Firecrawl + AI analysis. Returns a structured brand profile (colors, tone, audience, differentiators) that is automatically saved and used for all future creative generation. Also works for non-clients — just provide a URL.',
+    input_schema: { type: 'object', properties: { websiteUrl: { type: 'string', description: 'Website URL to analyze (e.g. "https://example.com")' }, clientName: { type: 'string', description: 'Client name (optional — saves Brand DNA to their profile if provided)' } }, required: ['websiteUrl'] },
+  },
+  {
+    name: 'update_brand_dna',
+    description: 'Re-extract Brand DNA for an existing client by re-crawling their website. Use when the client says "atualizar marca", "update brand", or wants to refresh their brand profile.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name to update' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_brand_dna',
+    description: 'Get the stored Brand DNA for a client. Shows their brand colors, tone of voice, target audience, differentiators, and all brand identity data extracted from their website.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' } }, required: ['clientName'] },
+  },
+  // --- Kling AI Video Generation ---
+  {
+    name: 'generate_video_from_image',
+    description: 'Generate a short animated video from a static image using Kling AI. Transforms product photos or ad visuals into eye-catching video ads. Takes 30-60 seconds. Default format is Stories/Reels (9:16). Use when the user sends a photo and asks to "fazer vídeo", "animar foto", "criar vídeo do produto", or "transforma em vídeo".',
+    input_schema: { type: 'object', properties: { imageUrl: { type: 'string', description: 'URL of the source image to animate' }, prompt: { type: 'string', description: 'Motion prompt describing desired animation (e.g. "Camera slowly zooms in, product rotates gently")' }, clientName: { type: 'string', description: 'Client name (for brand-aware motion prompt)' }, aspectRatio: { type: 'string', enum: ['9:16', '16:9', '1:1'], description: 'Aspect ratio: 9:16 (Stories/Reels), 16:9 (Feed/Landscape), 1:1 (Square). Default: 9:16' }, duration: { type: 'number', description: 'Duration in seconds (5 or 10). Default: 5' } }, required: ['imageUrl'] },
+  },
+  // --- Template Overlay Creative ---
+  {
+    name: 'generate_ad_creative_with_text',
+    description: 'Generate a professional ad creative with REAL readable text overlaid on an AI-generated background. Uses the 2-layer system: FLUX generates a text-free background visual, then Puppeteer overlays headline, subtext, and CTA using HTML/CSS. Returns both Feed (1080x1080) and Stories (1080x1920) formats. This is the CORRECT way to create ads with text — never ask FLUX to render text directly.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Target platform' }, product: { type: 'string', description: 'Product or service being advertised' }, goal: { type: 'string', description: 'Campaign goal: awareness, conversion, promotion, leads' }, concept: { type: 'string', description: 'Visual concept for the background image' }, mood: { type: 'string', description: 'Mood/emotion (optional)' }, style: { type: 'string', description: 'Creative style (optional)' } }, required: ['clientName', 'platform'] },
+  },
   // --- Diagnostics ---
   {
     name: 'check_credentials',
@@ -466,6 +515,7 @@ const CSA_TOOLS = [
 export const CLIENT_TOOL_NAMES = [
   'generate_ad_images', 'generate_ad_video', 'generate_creative_package',
   'generate_text_ads', 'analyze_visual_reference', 'preview_landing_page',
+  'generate_video_from_image', 'generate_ad_creative_with_text',
   'browse_website', 'crawl_website', 'search_web', 'map_website',
   'search_ad_library', 'search_facebook_pages', 'get_page_ads',
   'get_search_volume', 'get_keyword_ideas',

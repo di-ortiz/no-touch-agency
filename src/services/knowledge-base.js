@@ -266,6 +266,9 @@ function getDb() {
     try { db.exec("ALTER TABLE clients ADD COLUMN hubspot_access_token TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN ga4_property_id TEXT"); } catch (e) { /* already exists */ }
     try { db.exec("ALTER TABLE clients ADD COLUMN cms_platform TEXT"); } catch (e) { /* already exists */ }
+
+    // Safe migration: Brand DNA JSON storage per client
+    try { db.exec("ALTER TABLE clients ADD COLUMN brand_dna TEXT"); } catch (e) { /* already exists */ }
   }
   return db;
 }

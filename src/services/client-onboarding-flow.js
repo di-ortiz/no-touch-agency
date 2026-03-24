@@ -14,6 +14,7 @@ import { sendWhatsApp } from '../api/whatsapp.js';
 import { sendTelegram } from '../api/telegram.js';
 import { notifyOwnerMessage } from '../utils/notify-owner.js';
 import { auditLog } from '../services/cost-tracker.js';
+import { extractBrandDNA, buildBrandDNAFromInterview } from '../brand-dna.js';
 import config from '../config.js';
 
 const log = logger.child({ workflow: 'onboarding-flow' });
@@ -515,6 +516,28 @@ async function finalizeOnboarding(phone, sessionId, answers, channel = 'whatsapp
   } catch (e) {
     log.warn('Client profile sheet creation failed', { error: e.message });
     errors.push(`Profile sheet: ${e.message}`);
+  }
+
+  // Step 3.7: Extract Brand DNA from website (if available)
+  try {
+    if (clientId && answers.website && answers.website !== 'skipped') {
+      log.info('Extracting Brand DNA during onboarding', { website: answers.website, clientId });
+      await extractBrandDNA(answers.website, clientId);
+      steps.push('Brand DNA extracted from website');
+    } else if (clientId && answers.business_name && answers.product_service) {
+      // No website — build Brand DNA from onboarding answers
+      log.info('Building Brand DNA from interview answers', { clientId });
+      await buildBrandDNAFromInterview({
+        businessName: answers.business_name,
+        productService: answers.product_service || answers.business_description,
+        targetAudience: answers.target_audience || '',
+        tonePreference: 'semi-formal',
+      }, clientId);
+      steps.push('Brand DNA built from interview');
+    }
+  } catch (e) {
+    log.warn('Brand DNA extraction during onboarding failed', { error: e.message });
+    errors.push(`Brand DNA: ${e.message}`);
   }
 
   // Step 4: Create live conversation log document on Drive
