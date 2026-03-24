@@ -33,6 +33,7 @@ import * as firecrawlApi from '../api/firecrawl.js';
 import * as seoEngine from '../services/seo-engine.js';
 import * as googleDrive from '../api/google-drive.js';
 import * as googleAnalytics from '../api/google-analytics.js';
+import * as googleSearchConsole from '../api/google-search-console.js';
 import * as googleTransparency from '../api/google-transparency.js';
 import * as presentationBuilder from '../services/presentation-builder.js';
 import * as reportBuilder from '../services/report-builder.js';
@@ -1773,6 +1774,43 @@ Return ONLY the JSON array, no other text.`;
       if (!propertyId) return { error: 'No GA4 property ID configured.' };
       const trend = await googleAnalytics.getDailyTrend(propertyId, { startDate: toolInput.startDate, endDate: toolInput.endDate });
       return { clientName: toolInput.clientName, dailyTrend: trend };
+    }
+
+    // --- Google Search Console ---
+    case 'get_gsc_top_queries': {
+      const client = getClient(toolInput.clientName);
+      const siteUrl = client?.website;
+      if (!siteUrl) return { error: 'No website configured for this client. Set the website field in client config.' };
+      const queries = await googleSearchConsole.getTopQueries(siteUrl, { startDate: toolInput.startDate, endDate: toolInput.endDate, limit: toolInput.limit });
+      return { clientName: toolInput.clientName, siteUrl, topQueries: queries };
+    }
+    case 'get_gsc_top_pages': {
+      const client = getClient(toolInput.clientName);
+      const siteUrl = client?.website;
+      if (!siteUrl) return { error: 'No website configured for this client.' };
+      const pages = await googleSearchConsole.getTopPages(siteUrl, { startDate: toolInput.startDate, endDate: toolInput.endDate, limit: toolInput.limit });
+      return { clientName: toolInput.clientName, siteUrl, topPages: pages };
+    }
+    case 'get_gsc_page_queries': {
+      const client = getClient(toolInput.clientName);
+      const siteUrl = client?.website;
+      if (!siteUrl) return { error: 'No website configured for this client.' };
+      const queries = await googleSearchConsole.getPageQueries(siteUrl, toolInput.pageUrl, { startDate: toolInput.startDate, endDate: toolInput.endDate, limit: toolInput.limit });
+      return { clientName: toolInput.clientName, siteUrl, pageUrl: toolInput.pageUrl, queries };
+    }
+    case 'get_gsc_daily_trend': {
+      const client = getClient(toolInput.clientName);
+      const siteUrl = client?.website;
+      if (!siteUrl) return { error: 'No website configured for this client.' };
+      const trend = await googleSearchConsole.getDailyTrend(siteUrl, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, siteUrl, dailyTrend: trend };
+    }
+    case 'get_gsc_device_breakdown': {
+      const client = getClient(toolInput.clientName);
+      const siteUrl = client?.website;
+      if (!siteUrl) return { error: 'No website configured for this client.' };
+      const devices = await googleSearchConsole.getDeviceBreakdown(siteUrl, { startDate: toolInput.startDate, endDate: toolInput.endDate });
+      return { clientName: toolInput.clientName, siteUrl, devices };
     }
 
     // --- Google Ads Transparency Center ---

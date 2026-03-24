@@ -385,6 +385,32 @@ const CSA_TOOLS = [
     description: 'Get daily metrics trend from Google Analytics (GA4). Returns sessions, users, conversions, and page views per day. Great for spotting trends and building projections.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
   },
+  // --- Google Search Console ---
+  {
+    name: 'get_gsc_top_queries',
+    description: 'Get top search queries from Google Search Console. Shows what people search on Google to find the client\'s website — with clicks, impressions, CTR, and average position.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (must have website configured)' }, startDate: { type: 'string', description: 'Start date (YYYY-MM-DD or "30daysAgo")' }, endDate: { type: 'string', description: 'End date (YYYY-MM-DD or "today")' }, limit: { type: 'number', description: 'Max results (default: 25)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_top_pages',
+    description: 'Get top pages from Google Search Console by organic clicks. Shows which pages get the most search traffic, with impressions, CTR, and position.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' }, limit: { type: 'number', description: 'Max results (default: 25)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_page_queries',
+    description: 'Get search queries for a specific page from Google Search Console. Useful for understanding what keywords drive traffic to a particular landing page.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, pageUrl: { type: 'string', description: 'Full URL of the page to analyze' }, startDate: { type: 'string' }, endDate: { type: 'string' }, limit: { type: 'number' } }, required: ['clientName', 'pageUrl'] },
+  },
+  {
+    name: 'get_gsc_daily_trend',
+    description: 'Get daily organic search performance trend from Google Search Console. Shows clicks, impressions, CTR, and position over time.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_device_breakdown',
+    description: 'Get search performance by device (desktop, mobile, tablet) from Google Search Console.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
   // --- Google Ads Transparency Center ---
   {
     name: 'search_google_ads_transparency',
