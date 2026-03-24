@@ -163,35 +163,47 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const caption = media?.caption || message.caption || '';
       log.info('WhatsApp media received', { from, type: message.type, mimeType: media?.mime_type });
 
-      const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
-      const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
-      if (isOwner) {
-        await handleMediaUpload(from, message.type, media, caption);
-      } else {
-        // For images: download and pass to Claude as vision input so Sofia can SEE the image
-        if (message.type === 'image') {
-          let imageBase64 = null;
-          let mimeType = media?.mime_type || 'image/jpeg';
-          try {
-            const mediaUrl = await getWhatsAppMediaUrl(media.id);
-            if (mediaUrl) {
-              const mediaData = await downloadWhatsAppMedia(mediaUrl);
-              if (mediaData) {
-                imageBase64 = Buffer.from(mediaData).toString('base64');
-              }
+      // For ALL image messages (owner or client): download and pass to Claude Vision
+      // so Sofia can actually SEE the image and act on it (create ads, analyze, etc.)
+      if (message.type === 'image') {
+        let imageBase64 = null;
+        let mimeType = media?.mime_type || 'image/jpeg';
+        try {
+          const mediaUrl = await getWhatsAppMediaUrl(media.id);
+          if (mediaUrl) {
+            const mediaData = await downloadWhatsAppMedia(mediaUrl);
+            if (mediaData) {
+              imageBase64 = Buffer.from(mediaData).toString('base64');
             }
-          } catch (e) {
-            log.warn('Failed to download client image for vision', { error: e.message });
           }
+        } catch (e) {
+          log.warn('Failed to download image for vision', { error: e.message });
+        }
 
-          const textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+        const textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
+
+        const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
+        const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
+        if (isOwner) {
+          await handleCommand(textPart, {
+            type: 'image',
+            base64: imageBase64,
+            mimeType,
+          });
+        } else {
           await handleClientMessage(from, textPart, {
             type: 'image',
             base64: imageBase64,
             mimeType,
           });
+        }
+      } else {
+        // Non-image media (documents, video, audio)
+        const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
+        const isOwner = normalizePhone(from) === normalizePhone(config.WHATSAPP_OWNER_PHONE);
+        if (isOwner) {
+          await handleMediaUpload(from, message.type, media, caption);
         } else if (caption) {
-          // Non-image media with caption — treat as text message
           await handleClientMessage(from, caption);
         } else {
           await sendWhatsApp('Thanks for sharing that! If you have any questions or need help, just send me a text message.', from);
