@@ -88,7 +88,7 @@ export async function generateVideoFromImage(opts = {}) {
         return axios.post(
           `${KLING_BASE}/videos/image2video`,
           {
-            model_name: 'kling-v1',
+            model_name: 'kling-v1-6',
             image: imageUrl,
             prompt,
             cfg_scale: 0.5,
@@ -100,12 +100,20 @@ export async function generateVideoFromImage(opts = {}) {
       });
       break; // success
     } catch (e) {
-      const is429 = e.response?.status === 429 || e.message?.includes('429');
+      const status = e.response?.status;
+      const responseBody = e.response?.data ? JSON.stringify(e.response.data).slice(0, 500) : 'no body';
+      const is429 = status === 429 || e.message?.includes('429');
+      log.warn('Kling API error', { status, attempt, responseBody, message: e.message?.slice(0, 200) });
       if (is429 && attempt < MAX_RETRIES) {
         const backoffMs = attempt * 5000; // 5s, 10s
         log.warn(`Kling 429 rate limit, retrying in ${backoffMs / 1000}s`, { attempt, maxRetries: MAX_RETRIES });
         await new Promise(r => setTimeout(r, backoffMs));
         continue;
+      }
+      // Enhance error message with Kling's response details
+      const klingMsg = e.response?.data?.message || e.response?.data?.error || '';
+      if (klingMsg) {
+        throw new Error(`Kling API ${status}: ${klingMsg}`);
       }
       throw e;
     }
@@ -229,4 +237,26 @@ export async function generateBrandedVideo(opts = {}) {
   });
 }
 
-export default { generateVideoFromImage, generateBrandedVideo, isConfigured };
+/**
+ * Check Kling AI account quota/balance. Logs the result for debugging 429 issues.
+ */
+export async function checkQuota() {
+  if (!isConfigured()) return { configured: false };
+  try {
+    // Try the account endpoint to see if credentials work at all
+    const response = await axios.get(`${KLING_BASE}/account/costs`, {
+      headers: getHeaders(),
+      timeout: 10000,
+    });
+    const result = { configured: true, status: 'ok', data: response.data };
+    log.info('Kling AI account status', result);
+    return result;
+  } catch (e) {
+    const status = e.response?.status;
+    const body = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    log.warn('Kling AI account check failed', { status, body });
+    return { configured: true, status: 'error', httpStatus: status, detail: body };
+  }
+}
+
+export default { generateVideoFromImage, generateBrandedVideo, isConfigured, checkQuota };
