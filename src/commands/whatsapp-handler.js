@@ -33,8 +33,16 @@ import { runChatLoop } from './chat-loop.js';
 const log = logger.child({ module: 'whatsapp-handler' });
 
 // --- Owner Command Handler ---
-export async function handleCommand(message) {
-  log.info('handleCommand entered', { message: message.substring(0, 80) });
+/**
+ * Handle an owner command (text or multimodal with image).
+ * @param {string} message - Text message or caption
+ * @param {object} [mediaAttachment] - Optional image attachment for Claude Vision
+ * @param {string} mediaAttachment.type - 'image'
+ * @param {string} mediaAttachment.base64 - Base64-encoded image data
+ * @param {string} mediaAttachment.mimeType - MIME type
+ */
+export async function handleCommand(message, mediaAttachment = null) {
+  log.info('handleCommand entered', { message: message.substring(0, 80), hasImage: !!mediaAttachment?.base64 });
   const ownerChatId = 'whatsapp-owner'; // history key — NOT a phone number
   const ownerPhone = config.WHATSAPP_OWNER_PHONE; // actual phone number for media delivery
 
@@ -57,8 +65,28 @@ export async function handleCommand(message) {
       : '\n\nNo clients onboarded yet. You can still do ad-hoc research using search_ad_library and search_facebook_pages tools.';
 
     const history = getHistory(ownerChatId);
+    // Store text part in history (images ephemeral)
     addToHistory(ownerChatId, 'user', message);
-    const messages = sanitizeMessages([...history, { role: 'user', content: message }]);
+
+    // Build the current user message — multimodal if image attached
+    let currentUserContent;
+    if (mediaAttachment?.base64 && mediaAttachment.type === 'image') {
+      currentUserContent = [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaAttachment.mimeType || 'image/jpeg',
+            data: mediaAttachment.base64,
+          },
+        },
+        { type: 'text', text: message },
+      ];
+    } else {
+      currentUserContent = message;
+    }
+
+    const messages = sanitizeMessages([...history, { role: 'user', content: currentUserContent }]);
 
     const finalText = await runChatLoop({
       systemPrompt: WHATSAPP_CSA_PROMPT + clientContext,
