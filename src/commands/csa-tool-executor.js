@@ -2110,11 +2110,89 @@ Return ONLY the JSON array, no other text.`;
       const client = getClient(toolInput.clientName);
       if (!client) return { error: `Client "${toolInput.clientName}" not found` };
 
-      const clientBrandDNA = brandDNA.loadBrandDNA(client.id);
+      let clientBrandDNA = brandDNA.loadBrandDNA(client.id);
       const platform = toolInput.platform || 'meta';
 
       try {
-        // Step 1: Generate image prompt (background only, no text)
+        // ============================================================
+        // STEP 0: Auto-research — website + competitors (parallel, non-blocking)
+        // ============================================================
+        let websiteInsights = '';
+        let competitorInsights = '';
+
+        const researchPromises = [];
+
+        // 0a: Auto-scrape client website for visual context (if website exists and no brand DNA)
+        const clientWebsite = client.website || clientBrandDNA?.extracted_from;
+        if (clientWebsite) {
+          researchPromises.push(
+            (async () => {
+              try {
+                // Extract brand DNA if not yet available
+                if (!clientBrandDNA) {
+                  clientBrandDNA = await brandDNA.extractBrandDNA(clientWebsite, client.id);
+                  log.info('Auto-extracted Brand DNA for creative generation', { clientId: client.id, website: clientWebsite });
+                }
+                // Scrape website for visual/creative inspiration
+                const siteAnalysis = await webScraper.analyzeForCreativeInspiration(clientWebsite);
+                websiteInsights = [
+                  siteAnalysis.brand?.name ? `Brand: ${siteAnalysis.brand.name}` : '',
+                  siteAnalysis.brand?.tagline ? `Tagline: "${siteAnalysis.brand.tagline}"` : '',
+                  siteAnalysis.brand?.colors?.length ? `Colors: ${siteAnalysis.brand.colors.join(', ')}` : '',
+                  siteAnalysis.messaging?.headline ? `Main headline: "${siteAnalysis.messaging.headline}"` : '',
+                  siteAnalysis.messaging?.keyPhrases?.length ? `Key phrases: ${siteAnalysis.messaging.keyPhrases.slice(0, 5).join(', ')}` : '',
+                  siteAnalysis.visuals?.images?.length ? `Site images: ${siteAnalysis.visuals.images.slice(0, 3).map(i => i.alt || i.src?.slice(0, 60)).join('; ')}` : '',
+                ].filter(Boolean).join('\n');
+                log.info('Website insights gathered for creative', { clientId: client.id, insightsLength: websiteInsights.length });
+              } catch (e) {
+                log.warn('Website auto-research failed (non-blocking)', { error: e.message });
+              }
+            })()
+          );
+        }
+
+        // 0b: Auto-search competitor ads from Meta Ad Library
+        const competitors = client.competitors;
+        if (competitors) {
+          researchPromises.push(
+            (async () => {
+              try {
+                const competitorList = Array.isArray(competitors) ? competitors : competitors.split(',').map(c => c.trim());
+                const topCompetitor = competitorList[0];
+                if (topCompetitor) {
+                  const rawResults = await metaAdLibrary.searchAds({
+                    searchTerms: topCompetitor,
+                    country: 'BR',
+                    adActiveStatus: 'ACTIVE',
+                    limit: 5,
+                  });
+                  const parsedAds = metaAdLibrary.parseAdLibraryResults(rawResults);
+                  if (parsedAds.length > 0) {
+                    competitorInsights = `Competitor "${topCompetitor}" active ads:\n` +
+                      parsedAds.slice(0, 3).map((ad, i) =>
+                        `${i + 1}. "${ad.headline || 'No headline'}" — ${ad.body?.slice(0, 100) || 'No body'}${ad.description ? ` | CTA: ${ad.description}` : ''}`
+                      ).join('\n');
+                    log.info('Competitor ad insights gathered', { competitor: topCompetitor, adsFound: parsedAds.length });
+                  }
+                }
+              } catch (e) {
+                log.warn('Competitor ad research failed (non-blocking)', { error: e.message });
+              }
+            })()
+          );
+        }
+
+        // Wait for all research (max 15s, don't block creative generation on slow research)
+        if (researchPromises.length > 0) {
+          await Promise.race([
+            Promise.allSettled(researchPromises),
+            new Promise(resolve => setTimeout(resolve, 15000)),
+          ]);
+        }
+
+        // ============================================================
+        // STEP 1: Generate image prompt with full context
+        // ============================================================
         const imgPrompt = await creativeEngine.generateImagePrompt({
           clientName: toolInput.clientName,
           platform,
@@ -2124,9 +2202,13 @@ Return ONLY the JSON array, no other text.`;
           style: toolInput.style,
           brandColors: clientBrandDNA?.primary_colors?.join(', ') || client.brand_colors,
           audience: clientBrandDNA?.target_audience || client.target_audience,
+          websiteInsights,
+          competitorInsights,
         });
 
-        // Step 2 & 3: Generate background + ad copy in parallel, then render overlay
+        // ============================================================
+        // STEP 2 & 3: Generate background + ad copy in parallel, then render
+        // ============================================================
         const imgFolderId = client.drive_creatives_folder_id || client.drive_root_folder_id;
 
         const result = await creativeRenderer.generateFullCreative({
@@ -2159,6 +2241,11 @@ Return ONLY the JSON array, no other text.`;
           images,
           totalGenerated: images.length,
           fallback: result.fallback,
+          researchUsed: {
+            websiteAnalyzed: !!websiteInsights,
+            competitorAdsAnalyzed: !!competitorInsights,
+            brandDNA: !!clientBrandDNA,
+          },
         };
 
         // If Puppeteer failed, include the raw background + text as fallback

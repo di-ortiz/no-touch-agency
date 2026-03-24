@@ -43,7 +43,23 @@ export async function extractBrandDNA(websiteUrl, clientId = null) {
 
   // Step 2: Use Claude Haiku to analyze and extract structured Brand DNA
   const response = await askClaude({
-    systemPrompt: 'You are a brand strategist. Analyze the following website content and extract a structured Brand DNA profile in JSON format only. No explanation, no markdown — pure JSON. Fields: business_name, tagline, primary_colors (extract from any color mentions or CSS references if available), tone_of_voice (1 sentence), target_audience (1 sentence), main_products_or_services (array of strings), key_differentiators (array of strings), cta_style (e.g. "urgent", "friendly", "professional"), language, emoji_usage (boolean), formality_level.',
+    systemPrompt: `You are a brand strategist and creative director. Analyze the following website content and extract a structured Brand DNA profile in JSON format only. No explanation, no markdown — pure JSON.
+
+Fields:
+- business_name (string)
+- tagline (string, the main tagline/slogan from the website)
+- primary_colors (array of hex color strings, extract from any color mentions, CSS, or infer from brand identity — provide at least 2-3)
+- tone_of_voice (1 sentence describing communication style)
+- target_audience (1 sentence)
+- main_products_or_services (array of strings)
+- key_differentiators (array of strings)
+- cta_style (e.g. "urgent", "friendly", "professional")
+- language (e.g. "pt-BR", "en-US")
+- emoji_usage (boolean)
+- formality_level (e.g. "formal", "semi-formal", "casual")
+- visual_style (1 sentence describing the overall visual aesthetic, e.g. "Clean minimalist with bold typography" or "Dark luxury with gold accents and dramatic lighting")
+- photography_style (1 sentence, e.g. "Product hero shots with dramatic studio lighting" or "Lifestyle photography with warm tones and natural settings")
+- ad_creative_direction (1-2 sentences suggesting how ad creatives should look — what backgrounds, compositions, moods, and visual approaches would match this brand. Be specific about colors, lighting, and style.)`,
     userMessage: `Analyze this website content and extract the Brand DNA profile:\n\nURL: ${websiteUrl}\n\nCONTENT:\n${pageContent}`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 2048,
@@ -177,6 +193,7 @@ export function buildBrandContext(brandDNA) {
 
   const parts = [];
   if (brandDNA.business_name) parts.push(`Brand: ${brandDNA.business_name}`);
+  if (brandDNA.tagline) parts.push(`Tagline: "${brandDNA.tagline}"`);
   if (brandDNA.tone_of_voice) parts.push(`Tone: ${brandDNA.tone_of_voice}`);
   if (brandDNA.target_audience) parts.push(`Target audience: ${brandDNA.target_audience}`);
   if (brandDNA.primary_colors?.length > 0) parts.push(`Brand colors: ${brandDNA.primary_colors.join(', ')}`);
@@ -184,6 +201,9 @@ export function buildBrandContext(brandDNA) {
   if (brandDNA.emoji_usage !== undefined) parts.push(brandDNA.emoji_usage ? 'Use emojis' : 'No emojis');
   if (brandDNA.cta_style) parts.push(`CTA style: ${brandDNA.cta_style}`);
   if (brandDNA.key_differentiators?.length > 0) parts.push(`Differentiators: ${brandDNA.key_differentiators.join(', ')}`);
+  if (brandDNA.visual_style) parts.push(`Visual style: ${brandDNA.visual_style}`);
+  if (brandDNA.photography_style) parts.push(`Photography style: ${brandDNA.photography_style}`);
+  if (brandDNA.ad_creative_direction) parts.push(`Ad creative direction: ${brandDNA.ad_creative_direction}`);
 
   return `Brand context: ${parts.join('. ')}.`;
 }
