@@ -12,7 +12,7 @@ import config from '../config.js';
 const log = logger.child({ workflow: 'creative-engine' });
 
 // Platform-specific ad spec constraints
-const PLATFORM_SPECS = {
+export const PLATFORM_SPECS = {
   meta: {
     headline: { max: 40, label: 'Headline' },
     body: { max: 125, label: 'Primary Text' },

@@ -690,7 +690,7 @@ Return ONLY the JSON array, no other text.`;
           industry: client?.industry || brandDNA?.industry,
         };
 
-        const platformSpecs = creativeEngine.default?.PLATFORM_SPECS || creativeEngine.PLATFORM_SPECS || {};
+        const platformSpecs = creativeEngine.PLATFORM_SPECS || creativeEngine.default?.PLATFORM_SPECS || {};
         const targetFormats = formats || (platformSpecs[toolInput.platform]?.imageFormats) || ['general'];
         const qualityResults = await Promise.allSettled(
           targetFormats.map(format =>
@@ -2437,7 +2437,7 @@ Return ONLY the JSON array, no other text.`;
       return { error: `Unknown tool: ${toolName}` };
   }
   } catch (err) {
-    log.error(`Tool ${toolName} failed`, { error: err.message });
+    log.error(`Tool ${toolName} failed`, { error: err.message, stack: err.stack });
     return { error: err.message };
   }
 }
