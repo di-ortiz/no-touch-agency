@@ -433,18 +433,43 @@ function escapeHtml(str) {
 function parseColors(brandDNA) {
   const colors = brandDNA?.primary_colors || [];
   const primary = colors[0] || '#6366f1';
-  const secondary = colors[1] || null;
+  // Use secondary_colors array first, fallback to second primary color
+  const secondary = brandDNA?.secondary_colors?.[0] || colors[1] || null;
   return { primary, secondary };
 }
 
 /**
- * Choose a font based on brand tone.
+ * Choose a font: prefer brand's actual font from DNA, fallback to tone-based selection.
  */
 function chooseFont(brandDNA) {
+  // If brand DNA has actual detected fonts from the website, use the first one
+  if (brandDNA?.fonts?.length > 0) {
+    return brandDNA.fonts[0];
+  }
   const tone = (brandDNA?.tone_of_voice || '').toLowerCase();
   if (tone.includes('premium') || tone.includes('luxury') || tone.includes('elegant')) return 'Montserrat';
   if (tone.includes('friendly') || tone.includes('casual') || tone.includes('warm')) return 'Poppins';
   return 'Inter';
+}
+
+/**
+ * Build the Google Fonts <link> tag, including brand-specific fonts if available.
+ */
+function buildFontsLink(brandDNA) {
+  // If brand DNA has a Google Fonts URL from the actual site, include it
+  const extraFontsLink = brandDNA?.google_fonts_url
+    ? `<link href="${brandDNA.google_fonts_url}" rel="stylesheet">`
+    : '';
+  // Also load brand fonts by name if they're known Google Fonts families
+  const brandFonts = brandDNA?.fonts || [];
+  const brandFontFamilies = brandFonts
+    .filter(f => !['Inter', 'Montserrat', 'Poppins'].includes(f)) // skip already loaded
+    .map(f => `family=${encodeURIComponent(f)}:wght@400;600;700;800;900`)
+    .join('&');
+  const brandFontsLink = brandFontFamilies
+    ? `<link href="https://fonts.googleapis.com/css2?${brandFontFamilies}&display=swap" rel="stylesheet">`
+    : '';
+  return `${GOOGLE_FONTS_LINK}\n${extraFontsLink}\n${brandFontsLink}`;
 }
 
 // --- Public API ---
@@ -513,23 +538,31 @@ export function renderTemplateHtml(templateName, adCopy, brandDNA, opts = {}) {
   };
 
   const body = template.render(props);
+  const fontsLink = buildFontsLink(brandDNA);
+
+  // Build logo overlay if brand DNA has a logo URL
+  const logoUrl = brandDNA?.logo_url || brandDNA?.favicon_url;
+  const logoHtml = logoUrl
+    ? `<img src="${escapeHtml(logoUrl)}" style="position:absolute;top:40px;left:40px;max-height:60px;max-width:180px;object-fit:contain;z-index:10;" onerror="this.style.display='none'" />`
+    : '';
 
   const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  ${GOOGLE_FONTS_LINK}
+  ${fontsLink}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { width: ${width}px; height: ${height}px; overflow: hidden; }
+    body { width: ${width}px; height: ${height}px; overflow: hidden; position: relative; }
   </style>
 </head>
 <body>
   ${body}
+  ${logoHtml}
 </body>
 </html>`;
 
-  log.info('Template HTML rendered', { template: name, format, width, height });
+  log.info('Template HTML rendered', { template: name, format, width, height, font, hasLogo: !!logoUrl });
   return { html, templateName: name, width, height };
 }
 

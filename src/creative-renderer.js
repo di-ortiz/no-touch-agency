@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import logger from './utils/logger.js';
-import * as googleDrive from './api/google-drive.js';
+import * as supaStorage from './api/supabase-storage.js';
 import { renderTemplateHtml, selectTemplate, getTemplateNames } from './services/template-engine.js';
 
 const log = logger.child({ workflow: 'creative-renderer' });
@@ -35,6 +35,21 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
   const cta = escapeHtml(adCopy?.cta || '');
   const ctaColor = brandDNA?.primary_colors?.[0] || '#FF4500';
 
+  // Use brand font if available, fallback to safe system fonts
+  const brandFont = brandDNA?.fonts?.[0] || 'Inter';
+  const fontFamily = `'${brandFont}', Arial, Helvetica, sans-serif`;
+
+  // Build Google Fonts link for brand font
+  const googleFontsLink = brandDNA?.google_fonts_url
+    ? `<link href="${brandDNA.google_fonts_url}" rel="stylesheet">`
+    : `<link href="https://fonts.googleapis.com/css2?family=${encodeURIComponent(brandFont)}:wght@400;600;700;800;900&display=swap" rel="stylesheet">`;
+
+  // Logo overlay
+  const logoUrl = brandDNA?.logo_url || brandDNA?.favicon_url;
+  const logoHtml = logoUrl
+    ? `<img src="${escapeHtml(logoUrl)}" style="position:absolute;top:40px;left:50px;max-height:50px;max-width:160px;object-fit:contain;z-index:10;" onerror="this.style.display='none'" />`
+    : '';
+
   // Adjust text positioning for story format (vertical center-bottom)
   const textBottom = isStory ? '200px' : '60px';
   const headlineSize = isStory ? '54px' : '48px';
@@ -43,8 +58,14 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
   const html = `<!DOCTYPE html>
 <html>
+<head>
+  <meta charset="utf-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  ${googleFontsLink}
+</head>
 <body style="margin:0; width:${width}px; height:${height}px; position:relative;
-             font-family: Arial, Helvetica, sans-serif; overflow:hidden;">
+             font-family: ${fontFamily}; overflow:hidden;">
   <!-- Background image -->
   <img src="${backgroundImageUrl}"
        style="width:100%; height:100%; object-fit:cover;
@@ -52,6 +73,7 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
   <!-- Dark gradient for text readability -->
   <div style="position:absolute; bottom:0; left:0; right:0; height:${gradientHeight};
               background: linear-gradient(transparent, rgba(0,0,0,0.75));"></div>
+  ${logoHtml}
   <!-- Text block -->
   <div style="position:absolute; bottom:${textBottom}; left:50px; right:50px;">
     <p style="color:white; font-size:${headlineSize}; font-weight:900;
@@ -84,13 +106,15 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
     // Try puppeteer (bundled browser) first, then puppeteer-core with system chromium
     let puppeteer;
+    let isPuppeteerCore = false;
     try {
       puppeteer = await import('puppeteer');
     } catch {
       puppeteer = await import('puppeteer-core');
+      isPuppeteerCore = true;
     }
 
-    // Find system chromium path for puppeteer-core
+    // Find system chromium path
     const chromePaths = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
       '/usr/bin/chromium-browser',
@@ -104,18 +128,22 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
       headless: 'new',
     };
 
-    // If using puppeteer-core, we need to specify executablePath
     for (const chromePath of chromePaths) {
-      try {
-        const { existsSync } = await import('fs');
-        if (existsSync(chromePath)) {
-          launchOpts.executablePath = chromePath;
-          break;
-        }
-      } catch { /* continue */ }
+      if (fs.existsSync(chromePath)) {
+        launchOpts.executablePath = chromePath;
+        break;
+      }
     }
 
-    browser = await puppeteer.default.launch(launchOpts);
+    // puppeteer-core requires an explicit executablePath — fail clearly if missing
+    if (isPuppeteerCore && !launchOpts.executablePath) {
+      throw new Error(
+        'No Chromium browser found. Set PUPPETEER_EXECUTABLE_PATH or install chromium in the container. ' +
+        'Template rendering requires a browser to capture screenshots.'
+      );
+    }
+
+    browser = await (puppeteer.default || puppeteer).launch(launchOpts);
 
     const page = await browser.newPage();
     await page.setViewport({ width, height });
@@ -137,25 +165,21 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
     log.info('Puppeteer screenshot captured', { format, size: screenshotBuffer.length });
 
-    // Upload to Google Drive
+    // Upload to Supabase Storage
     let result = { format, width, height };
 
-    if (opts.driveFolderId) {
+    if (opts.driveFolderId && supaStorage.isConfigured()) {
       try {
         const fileName = `ad-creative-${format}-${timestamp}.png`;
-        const driveFile = await googleDrive.uploadFile({
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: screenshotBuffer,
-          folderId: opts.driveFolderId,
-        });
+        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
 
-        if (driveFile?.webContentLink) {
-          result.url = driveFile.webContentLink;
-          result.driveId = driveFile.id;
+        if (uploaded?.url) {
+          result.url = uploaded.url;
+          result.driveId = uploaded.path;
         }
       } catch (e) {
-        log.warn('Drive upload failed for rendered creative', { error: e.message });
+        log.warn('Supabase upload failed for rendered creative', { error: e.message });
       }
     }
 
@@ -314,10 +338,12 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
     fs.writeFileSync(tmpPath, html, 'utf-8');
 
     let puppeteer;
+    let isPuppeteerCore = false;
     try {
       puppeteer = await import('puppeteer');
     } catch {
       puppeteer = await import('puppeteer-core');
+      isPuppeteerCore = true;
     }
 
     const chromePaths = [
@@ -334,15 +360,20 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
     };
 
     for (const chromePath of chromePaths) {
-      try {
-        if (fs.existsSync(chromePath)) {
-          launchOpts.executablePath = chromePath;
-          break;
-        }
-      } catch { /* continue */ }
+      if (fs.existsSync(chromePath)) {
+        launchOpts.executablePath = chromePath;
+        break;
+      }
     }
 
-    browser = await puppeteer.default.launch(launchOpts);
+    if (isPuppeteerCore && !launchOpts.executablePath) {
+      throw new Error(
+        'No Chromium browser found. Set PUPPETEER_EXECUTABLE_PATH or install chromium in the container. ' +
+        'Template rendering requires a browser to capture screenshots.'
+      );
+    }
+
+    browser = await (puppeteer.default || puppeteer).launch(launchOpts);
     const page = await browser.newPage();
     await page.setViewport({ width, height });
     await page.goto(`file://${tmpPath}`, { waitUntil: 'networkidle0', timeout: 30000 });
@@ -362,21 +393,17 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
 
     let result = { format, width, height, templateName: resolvedName };
 
-    if (opts.driveFolderId) {
+    if (opts.driveFolderId && supaStorage.isConfigured()) {
       try {
         const fileName = `template-${resolvedName}-${format}-${timestamp}.png`;
-        const driveFile = await googleDrive.uploadFile({
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: screenshotBuffer,
-          folderId: opts.driveFolderId,
-        });
-        if (driveFile?.webContentLink) {
-          result.url = driveFile.webContentLink;
-          result.driveId = driveFile.id;
+        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
+        if (uploaded?.url) {
+          result.url = uploaded.url;
+          result.driveId = uploaded.path;
         }
       } catch (e) {
-        log.warn('Drive upload failed for template creative', { error: e.message });
+        log.warn('Supabase upload failed for template creative', { error: e.message });
       }
     }
 

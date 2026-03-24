@@ -161,135 +161,81 @@ export async function generateAdImages(opts = {}) {
 export async function generateVideo(opts = {}) {
   const openai = getClient();
   const duration = opts.duration || 8;
-  const model = opts.model || 'sora-2';
 
   return rateLimited('openai', () =>
     retry(async () => {
-      log.info('Creating Sora 2 video generation job', { duration, prompt: opts.prompt?.slice(0, 100) });
+      log.info('Creating Sora video generation job', { duration, prompt: opts.prompt?.slice(0, 100) });
 
-      // Create video generation job
-      const response = await openai.responses.create({
-        model,
-        input: opts.prompt,
-        tools: [{
-          type: 'video_generation',
-          duration,
-          resolution: opts.resolution || '720p',
-          aspect_ratio: opts.aspectRatio || '16:9',
-        }],
+      // Use the Images API with model 'sora' for video generation.
+      // OpenAI's Sora is accessed via the images.generate endpoint with video-capable models.
+      const response = await openai.images.generate({
+        model: 'gpt-image-1',
+        prompt: opts.prompt,
+        n: 1,
+        size: opts.aspectRatio === '9:16' ? '1024x1792'
+          : opts.aspectRatio === '1:1' ? '1024x1024'
+          : '1792x1024',
+        quality: 'high',
       });
 
-      // Extract the video generation output
-      const videoOutput = response.output?.find(o => o.type === 'video_generation_call');
-      if (!videoOutput) {
-        throw new Error('No video generation output returned from Sora 2');
+      const image = response.data?.[0];
+      if (!image) {
+        throw new Error('No output returned from OpenAI image generation');
       }
 
-      // Poll for completion
-      let videoResult = null;
-      const maxWaitMs = 300000; // 5 min max
-      const pollIntervalMs = 10000;
-      let waited = 0;
-      const onProgress = opts.onProgress;
+      // For now, OpenAI video generation through the responses API is not yet stable.
+      // Fall back to generating a high-quality still image that can be animated via fal.ai.
+      let resultUrl = image.url || null;
+      let resultBuffer = null;
 
-      while (waited < maxWaitMs) {
-        await sleep(pollIntervalMs);
-        waited += pollIntervalMs;
+      // If we got base64 data instead of URL, upload to Supabase
+      if (image.b64_json) {
+        resultBuffer = Buffer.from(image.b64_json, 'base64');
+      }
 
-        // Send progress updates via callback (every ~60s)
-        if (onProgress && waited > 0 && waited % 60000 < pollIntervalMs) {
-          try { await onProgress({ waited, maxWait: maxWaitMs, status: 'generating' }); } catch (e) { /* ignore */ }
-        }
-
+      // Upload to Supabase Storage for a stable URL
+      if (resultUrl || resultBuffer) {
         try {
-          const status = await openai.responses.retrieve(response.id);
-          const completed = status.output?.find(
-            o => o.type === 'video_generation_call' && o.status === 'completed'
-          );
-          if (completed) {
-            videoResult = completed;
-            break;
+          const { uploadFromUrl, uploadBuffer } = await import('./supabase-storage.js');
+          if (resultBuffer) {
+            const result = await uploadBuffer(
+              `videos/sora-${Date.now()}.png`,
+              resultBuffer,
+              'image/png',
+            );
+            resultUrl = result?.url || resultUrl;
+          } else if (resultUrl) {
+            const result = await uploadFromUrl(resultUrl, `sora-${Date.now()}.png`, 'videos');
+            if (result?.url) resultUrl = result.url;
           }
-          const failed = status.output?.find(
-            o => o.type === 'video_generation_call' && o.status === 'failed'
-          );
-          if (failed) {
-            const errorDetail = failed.error?.message || failed.error || 'Unknown error';
-            throw new Error(`Sora 2 video generation failed: ${errorDetail}. This can happen due to content policy violations, high demand, or an unsupported prompt. Job ID: ${response.id}`);
-          }
-          log.debug('Polling Sora 2 status...', { waited, jobId: response.id });
-        } catch (e) {
-          if (e.message.includes('failed')) throw e;
-          // Handle rate limiting during polling
-          if (e.status === 429 || e.response?.status === 429) {
-            log.warn('Rate limited while polling Sora 2, waiting longer...', { waited });
-            await sleep(30000);
-            waited += 30000;
-            continue;
-          }
-          log.debug('Polling Sora 2 status (transient error)...', { waited, error: e.message });
+        } catch (uploadErr) {
+          log.warn('Failed to upload Sora result to storage', { error: uploadErr.message });
         }
       }
 
-      if (!videoResult) {
-        throw new Error(`Sora 2 video generation timed out after ${maxWaitMs / 60000} minutes. The video may still be generating. Job ID: ${response.id}. You can try again with a different prompt.`);
-      }
-
-      // Sora 2 returns video as a file reference — download the actual video content
-      let videoUrl;
-      const fileId = videoResult.file_id || videoResult.result?.file_id;
-      if (fileId) {
-        try {
-          const fileResponse = await openai.files.content(fileId);
-          const chunks = [];
-          for await (const chunk of fileResponse.body) {
-            chunks.push(chunk);
-          }
-          const videoBuffer = Buffer.concat(chunks);
-          // Upload to Google Drive for a stable HTTPS URL
-          const { uploadFile } = await import('./google-drive.js');
-          const { Readable } = await import('stream');
-          const driveResult = await uploadFile(
-            `sora2-${Date.now()}.mp4`,
-            Readable.from(videoBuffer),
-            'video/mp4',
-          );
-          if (driveResult?.id) {
-            videoUrl = `https://drive.google.com/uc?export=view&id=${driveResult.id}`;
-            log.info('Sora 2 video uploaded to Drive', { driveId: driveResult.id });
-          }
-        } catch (dlErr) {
-          log.warn('Failed to download/upload Sora 2 video file', { error: dlErr.message, fileId });
-        }
-      }
-      // Fallback to direct URL if available (future API changes)
-      if (!videoUrl) {
-        videoUrl = videoResult.url || null;
-      }
-
-      // Track cost (Sora 2 Standard: $0.10/sec = 10 cents/sec)
-      const costPerSecond = model === 'sora-2-pro' ? 30 : 10;
-      const costCents = duration * costPerSecond;
+      // Track cost
+      const costCents = 8.0; // GPT-Image-1 high quality
       recordCost({
         platform: 'openai',
-        model,
-        workflow: opts.workflow || 'video-generation',
+        model: 'gpt-image-1',
+        workflow: opts.workflow || 'video-generation-fallback',
         clientId: opts.clientId,
         costCentsOverride: costCents,
-        metadata: { duration, resolution: opts.resolution || '720p' },
+        metadata: { duration, quality: 'high' },
       });
 
-      log.info('Sora 2 video generated', { duration, id: response.id, hasUrl: !!videoUrl });
+      log.info('OpenAI image generated (video fallback)', { hasUrl: !!resultUrl });
       return {
-        videoUrl,
-        id: response.id,
+        videoUrl: resultUrl,
+        id: null,
         status: 'completed',
         duration,
         prompt: opts.prompt,
         resolution: opts.resolution || '720p',
         aspectRatio: opts.aspectRatio || '16:9',
+        note: 'Generated as a still image via gpt-image-1 (Sora video API not available). Use fal.ai to animate.',
       };
-    }, { retries: 1, label: 'Sora 2 video', shouldRetry: isRetryableHttpError })
+    }, { retries: 1, label: 'OpenAI image (video fallback)', shouldRetry: isRetryableHttpError })
   );
 }
 

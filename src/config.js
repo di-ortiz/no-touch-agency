@@ -26,6 +26,11 @@ const envSchema = z.object({
   GOOGLE_DRIVE_ROOT_FOLDER_ID: z.string().optional().default(''),
   GOOGLE_SHEETS_REPORTS_ID: z.string().optional().default(''),
 
+  // Google OAuth2 (for Analytics, Sheets, Drive, Slides — uses user credentials instead of service account)
+  GOOGLE_CLIENT_ID: z.string().optional().default(''),
+  GOOGLE_CLIENT_SECRET: z.string().optional().default(''),
+  GOOGLE_REFRESH_TOKEN: z.string().optional().default(''),
+
   // HubSpot
   HUBSPOT_ACCESS_TOKEN: z.string().optional().default(''),
 
@@ -77,9 +82,10 @@ const envSchema = z.object({
   TELEGRAM_BOT_USERNAME: z.string().optional().default(''), // For t.me deep links
   CLIENT_INIT_API_KEY: z.string().optional().default(''), // Optional API key to protect /api/client-init
 
-  // Supabase (Lovable onboarding submissions)
+  // Supabase (Lovable onboarding submissions + Storage for media assets)
   SUPABASE_URL: z.string().optional().default(''),
   SUPABASE_ANON_KEY: z.string().optional().default(''),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(''),
 
   // Firecrawl (web scraping / crawling)
   FIRECRAWL_API_KEY: z.string().optional().default(''),

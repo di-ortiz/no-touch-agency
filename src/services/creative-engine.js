@@ -12,7 +12,7 @@ import config from '../config.js';
 const log = logger.child({ workflow: 'creative-engine' });
 
 // Platform-specific ad spec constraints
-const PLATFORM_SPECS = {
+export const PLATFORM_SPECS = {
   meta: {
     headline: { max: 40, label: 'Headline' },
     body: { max: 125, label: 'Primary Text' },
@@ -205,21 +205,31 @@ export async function generateImagePrompt(opts = {}) {
 
   // Add platform-specific guidance
   const platformGuide = {
-    meta: 'Design a scroll-stopping Meta Feed ad visual — landscape/square with a powerful hero image, bold brand colors, and clean space for text overlay. Must look like a professional paid social ad, not a stock photo. NO text in the image.',
-    instagram: 'Design a visually stunning Instagram ad visual — square or vertical format with striking composition, strong brand colors, and intentional copy space. Should look like a polished brand visual from a top company. NO text in the image.',
-    google: 'Design a Google Display ad visual — bold, simple composition with high contrast and strong visual hierarchy. Needs to work at small sizes. Leave clean space for text overlay. NO text in the image.',
-    tiktok: 'Design a TikTok ad visual — vertical format, energetic, authentic feel with bold colors and dynamic composition. Leave space for text overlay. NO text in the image.',
+    meta: 'Design a scroll-stopping Meta Feed ad visual — landscape/square with a powerful hero image, bold brand colors, and clean space for text overlay. Must look like a professional paid social ad, not a stock photo.',
+    instagram: 'Design a visually stunning Instagram ad visual — square or vertical format with striking composition, strong brand colors, and intentional copy space. Should look like a polished brand visual from a top company.',
+    google: 'Design a Google Display ad visual — bold, simple composition with high contrast and strong visual hierarchy. Needs to work at small sizes. Leave clean space for text overlay.',
+    tiktok: 'Design a TikTok ad visual — vertical format, energetic, authentic feel with bold colors and dynamic composition. Leave space for text overlay.',
   };
   if (platformGuide[opts.platform]) briefSections.push(`PLATFORM GUIDANCE: ${platformGuide[opts.platform]}`);
 
   // Fallback defaults if minimal info provided
   if (!opts.concept && !opts.style && !opts.mood) {
-    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, professional ad visual with a compelling hero element and strong brand feel. This must look like a real paid social media ad — not a stock photo. Choose an appropriate style based on the industry and brand. Leave clean space for text overlay. Do NOT include any text.`);
+    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, professional ad visual with a compelling hero element and strong brand feel. This must look like a real paid social media ad — not a stock photo. Choose an appropriate style based on the industry and brand. Leave clean space for text overlay.`);
   }
 
   const response = await askClaude({
     systemPrompt: SYSTEM_PROMPTS.imagePromptEngineer,
-    userMessage: `Write an image generation prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words). CRITICAL: Do NOT include any text, words, letters, headlines, CTAs, buttons, logos, or typography in the image — AI image generators cannot render text and it comes out as gibberish. Focus entirely on the visual: composition, lighting, colors, mood, hero element, and intentional copy space where text can be overlaid later.`,
+    userMessage: `Write an image generation prompt for this ad creative brief:\n\n${briefSections.join('\n')}\n\nReturn ONLY the image prompt text, nothing else. Make it detailed (200-400 words).
+
+ABSOLUTE RESTRICTIONS — THE IMAGE MUST NOT CONTAIN:
+- ANY text, words, letters, numbers, headlines, CTAs, buttons, labels, or typography of ANY kind
+- ANY logos, brand marks, watermarks, or symbols with text
+- ANY screens, monitors, laptops, phones, tablets, or devices showing content
+- ANY dashboards, charts, graphs, analytics UIs, or data visualizations
+- ANY browser windows, app interfaces, or software screenshots
+- ANY signs, banners, price tags, or labels
+
+The image is ONLY a visual background/scene. All text and branding will be added as a separate overlay layer afterward. Focus 100% on: composition, lighting, colors, mood, hero element, textures, and intentional clean space for text overlay.`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1500,
     workflow: 'image-prompt-engineering',

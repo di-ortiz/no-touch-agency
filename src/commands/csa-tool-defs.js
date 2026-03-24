@@ -385,6 +385,32 @@ const CSA_TOOLS = [
     description: 'Get daily metrics trend from Google Analytics (GA4). Returns sessions, users, conversions, and page views per day. Great for spotting trends and building projections.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
   },
+  // --- Google Search Console ---
+  {
+    name: 'get_gsc_top_queries',
+    description: 'Get top search queries from Google Search Console. Shows what people search on Google to find the client\'s website — with clicks, impressions, CTR, and average position.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (must have website configured)' }, startDate: { type: 'string', description: 'Start date (YYYY-MM-DD or "30daysAgo")' }, endDate: { type: 'string', description: 'End date (YYYY-MM-DD or "today")' }, limit: { type: 'number', description: 'Max results (default: 25)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_top_pages',
+    description: 'Get top pages from Google Search Console by organic clicks. Shows which pages get the most search traffic, with impressions, CTR, and position.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' }, limit: { type: 'number', description: 'Max results (default: 25)' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_page_queries',
+    description: 'Get search queries for a specific page from Google Search Console. Useful for understanding what keywords drive traffic to a particular landing page.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, pageUrl: { type: 'string', description: 'Full URL of the page to analyze' }, startDate: { type: 'string' }, endDate: { type: 'string' }, limit: { type: 'number' } }, required: ['clientName', 'pageUrl'] },
+  },
+  {
+    name: 'get_gsc_daily_trend',
+    description: 'Get daily organic search performance trend from Google Search Console. Shows clicks, impressions, CTR, and position over time.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
+  {
+    name: 'get_gsc_device_breakdown',
+    description: 'Get search performance by device (desktop, mobile, tablet) from Google Search Console.',
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, startDate: { type: 'string' }, endDate: { type: 'string' } }, required: ['clientName'] },
+  },
   // --- Google Ads Transparency Center ---
   {
     name: 'search_google_ads_transparency',
@@ -501,7 +527,7 @@ const CSA_TOOLS = [
   {
     name: 'generate_ad_creative_with_text',
     description: 'Generate a professional ad creative with REAL readable text. DEFAULT MODE (template-based): Uses beautiful HTML/CSS templates with bold typography, brand colors, gradients, and geometric design. PHOTO MODE: Pass uploadedImageUrl to use the user\'s actual photo as the background with text overlay — ALWAYS use this when the user uploaded a photo. PHOTO-FORWARD MODE: Set style to "photo-forward" for AI-generated background. Returns both Feed (1080x1080) and Stories (1080x1920) formats.',
-    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Target platform' }, product: { type: 'string', description: 'Product or service being advertised' }, goal: { type: 'string', description: 'Campaign goal: awareness, conversion, promotion, leads' }, concept: { type: 'string', description: 'Visual concept (used for photo-forward mode background image)' }, mood: { type: 'string', description: 'Mood/emotion (optional)' }, style: { type: 'string', description: 'Creative style. Default: template-based design. Set to "photo-forward" or "photorealistic" for AI-generated background image.' }, templateStyle: { type: 'string', description: 'Template design to use: bold-gradient, dark-premium, split-diagonal, floating-card, geometric-blocks, minimal-clean, text-hero, neon-glow, corner-accent, gradient-mesh, duotone, outline-bold, stacked-impact, glass-morphism, brutalist, side-stripe. Leave empty for random selection.' }, uploadedImageUrl: { type: 'string', description: 'URL of user-uploaded photo to use as background. ALWAYS pass this when the user sent a photo — it will be composited with text overlay using the template system instead of generating a generic AI image.' } }, required: ['clientName', 'platform'] },
+    input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name (or brand name from website)' }, platform: { type: 'string', enum: ['meta', 'instagram', 'google', 'tiktok'], description: 'Target platform' }, product: { type: 'string', description: 'Product or service being advertised' }, goal: { type: 'string', description: 'Campaign goal: awareness, conversion, promotion, leads' }, concept: { type: 'string', description: 'Visual concept (used for photo-forward mode background image)' }, mood: { type: 'string', description: 'Mood/emotion (optional)' }, style: { type: 'string', description: 'Creative style. Default: template-based design. Set to "photo-forward" or "photorealistic" for AI-generated background image.' }, templateStyle: { type: 'string', description: 'Template design to use: bold-gradient, dark-premium, split-diagonal, floating-card, geometric-blocks, minimal-clean, text-hero, neon-glow, corner-accent, gradient-mesh, duotone, outline-bold, stacked-impact, glass-morphism, brutalist, side-stripe. Leave empty for random selection.' }, uploadedImageUrl: { type: 'string', description: 'URL of user-uploaded photo to use as background. ALWAYS pass this when the user sent a photo.' }, brandColors: { type: 'string', description: 'Comma-separated hex brand colors from website analysis (e.g. "#E63946, #1D3557, #F1FAEE"). Pass these from browse_website or extract_brand_dna results to create on-brand creatives.' }, brandFonts: { type: 'string', description: 'Comma-separated font names detected from website (e.g. "Inter, Montserrat"). Pass these from browse_website or extract_brand_dna results.' }, logoUrl: { type: 'string', description: 'URL of the brand logo detected from website. Pass this to overlay the logo on the ad creative.' }, faviconUrl: { type: 'string', description: 'URL of the brand favicon. Used as logo fallback if no logo URL available.' }, googleFontsUrl: { type: 'string', description: 'Google Fonts CSS URL detected from the website. Pass for exact font matching.' }, industry: { type: 'string', description: 'Brand industry (e.g. "digital marketing", "e-commerce", "SaaS")' } }, required: ['clientName', 'platform'] },
   },
   // --- Diagnostics ---
   {

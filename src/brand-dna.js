@@ -1,6 +1,7 @@
 import logger from './utils/logger.js';
 import { askClaude } from './api/anthropic.js';
 import * as firecrawl from './api/firecrawl.js';
+import * as webScraper from './api/web-scraper.js';
 import { getClient, updateClient } from './services/knowledge-base.js';
 
 const log = logger.child({ workflow: 'brand-dna' });
@@ -16,22 +17,31 @@ const log = logger.child({ workflow: 'brand-dna' });
 export async function extractBrandDNA(websiteUrl, clientId = null) {
   log.info('Extracting Brand DNA from website', { websiteUrl, clientId });
 
-  // Step 1: Scrape the website with Firecrawl
+  // Step 1: Scrape the website — get both markdown (for Claude) and HTML (for visual assets)
   let pageContent;
+  let pageData;
   try {
-    const result = await firecrawl.scrape(websiteUrl, {
-      formats: ['markdown'],
-      onlyMainContent: true,
-      timeout: 30000,
+    // Use web-scraper which already extracts brand assets (logo, favicon, fonts, colors)
+    pageData = await webScraper.fetchWebpage(websiteUrl, {
+      includeImages: true,
+      includeLinks: false,
+      maxLength: 8000,
     });
-    pageContent = result.markdown || '';
+    pageContent = pageData.markdown || pageData.bodyText || '';
 
-    // Truncate to avoid token overload (keep first 8000 chars)
+    // Truncate to avoid token overload
     if (pageContent.length > 8000) {
       pageContent = pageContent.slice(0, 8000);
     }
 
-    log.info('Website scraped for Brand DNA', { url: websiteUrl, contentLength: pageContent.length });
+    log.info('Website scraped for Brand DNA', {
+      url: websiteUrl,
+      contentLength: pageContent.length,
+      hasLogo: !!pageData.logoUrl,
+      hasFavicon: !!pageData.faviconUrl,
+      fonts: pageData.fonts?.length || 0,
+      colors: pageData.brandColors?.length || 0,
+    });
   } catch (e) {
     log.error('Failed to scrape website for Brand DNA', { error: e.message, url: websiteUrl });
     throw new Error(`Não consegui acessar o site ${websiteUrl}. Verifique se o URL está correto.`);
@@ -41,10 +51,37 @@ export async function extractBrandDNA(websiteUrl, clientId = null) {
     throw new Error(`O site ${websiteUrl} retornou pouco conteúdo. Verifique se o URL está correto.`);
   }
 
+  // Build visual assets context for Claude so it knows what was found
+  const visualAssetsContext = [];
+  if (pageData.brandColors?.length) visualAssetsContext.push(`CSS HEX COLORS FOUND ON SITE: ${pageData.brandColors.join(', ')}`);
+  if (pageData.fonts?.length) visualAssetsContext.push(`FONTS DETECTED ON SITE: ${pageData.fonts.join(', ')}`);
+  if (pageData.logoUrl) visualAssetsContext.push(`LOGO URL DETECTED: ${pageData.logoUrl}`);
+  if (pageData.faviconUrl) visualAssetsContext.push(`FAVICON URL: ${pageData.faviconUrl}`);
+  const visualContext = visualAssetsContext.length > 0
+    ? `\n\nVISUAL ASSETS DETECTED FROM HTML:\n${visualAssetsContext.join('\n')}`
+    : '';
+
   // Step 2: Use Claude Haiku to analyze and extract structured Brand DNA
   const response = await askClaude({
-    systemPrompt: 'You are a brand strategist. Analyze the following website content and extract a structured Brand DNA profile in JSON format only. No explanation, no markdown — pure JSON. Fields: business_name, tagline, primary_colors (extract from any color mentions or CSS references if available), tone_of_voice (1 sentence), target_audience (1 sentence), main_products_or_services (array of strings), key_differentiators (array of strings), cta_style (e.g. "urgent", "friendly", "professional"), language, emoji_usage (boolean), formality_level.',
-    userMessage: `Analyze this website content and extract the Brand DNA profile:\n\nURL: ${websiteUrl}\n\nCONTENT:\n${pageContent}`,
+    systemPrompt: `You are a brand strategist and visual identity expert. Analyze the following website content and extract a structured Brand DNA profile in JSON format only. No explanation, no markdown — pure JSON.
+
+Fields:
+- business_name (string)
+- tagline (string — the brand's main tagline or value proposition)
+- primary_colors (array of hex strings — use ACTUAL hex codes from the CSS colors if provided, pick the 2-3 most prominent brand colors, ignore grays/neutrals)
+- secondary_colors (array of hex strings — accent/complementary colors)
+- tone_of_voice (1 sentence)
+- target_audience (1 sentence)
+- main_products_or_services (array of strings)
+- key_differentiators (array of strings)
+- cta_style (e.g. "urgent", "friendly", "professional")
+- language (e.g. "pt-BR", "en-US")
+- emoji_usage (boolean)
+- formality_level (e.g. "formal", "semi-formal", "casual")
+- industry (string — e.g. "digital marketing", "e-commerce", "SaaS")
+
+IMPORTANT: For primary_colors, strongly prefer the actual hex codes found in the site's CSS (provided below) over guessing. Pick the most visually prominent brand colors — skip whites, blacks, and grays.`,
+    userMessage: `Analyze this website content and extract the Brand DNA profile:\n\nURL: ${websiteUrl}${visualContext}\n\nCONTENT:\n${pageContent}`,
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 2048,
     workflow: 'brand-dna-extraction',
@@ -67,6 +104,7 @@ export async function extractBrandDNA(websiteUrl, clientId = null) {
 
   // Ensure required fields have defaults
   brandDNA.primary_colors = brandDNA.primary_colors || [];
+  brandDNA.secondary_colors = brandDNA.secondary_colors || [];
   brandDNA.main_products_or_services = brandDNA.main_products_or_services || [];
   brandDNA.key_differentiators = brandDNA.key_differentiators || [];
   brandDNA.emoji_usage = brandDNA.emoji_usage ?? true;
@@ -74,13 +112,25 @@ export async function extractBrandDNA(websiteUrl, clientId = null) {
   brandDNA.extracted_from = websiteUrl;
   brandDNA.extracted_at = new Date().toISOString();
 
+  // Step 4: Attach visual assets detected from HTML (not AI-guessed — real data)
+  if (pageData.logoUrl) brandDNA.logo_url = pageData.logoUrl;
+  if (pageData.faviconUrl) brandDNA.favicon_url = pageData.faviconUrl;
+  if (pageData.fonts?.length) brandDNA.fonts = pageData.fonts;
+  if (pageData.googleFontsUrl) brandDNA.google_fonts_url = pageData.googleFontsUrl;
+  if (pageData.brandColors?.length && brandDNA.primary_colors.length === 0) {
+    // If Claude couldn't extract colors, use the CSS-scraped ones
+    brandDNA.primary_colors = pageData.brandColors.slice(0, 3);
+  }
+
   log.info('Brand DNA extracted successfully', {
     businessName: brandDNA.business_name,
     colors: brandDNA.primary_colors?.length,
     products: brandDNA.main_products_or_services?.length,
+    hasLogo: !!brandDNA.logo_url,
+    fonts: brandDNA.fonts?.length || 0,
   });
 
-  // Step 4: Auto-save to client if clientId provided
+  // Step 5: Auto-save to client if clientId provided
   if (clientId) {
     saveBrandDNA(clientId, brandDNA);
   }
@@ -177,9 +227,12 @@ export function buildBrandContext(brandDNA) {
 
   const parts = [];
   if (brandDNA.business_name) parts.push(`Brand: ${brandDNA.business_name}`);
+  if (brandDNA.industry) parts.push(`Industry: ${brandDNA.industry}`);
   if (brandDNA.tone_of_voice) parts.push(`Tone: ${brandDNA.tone_of_voice}`);
   if (brandDNA.target_audience) parts.push(`Target audience: ${brandDNA.target_audience}`);
-  if (brandDNA.primary_colors?.length > 0) parts.push(`Brand colors: ${brandDNA.primary_colors.join(', ')}`);
+  if (brandDNA.primary_colors?.length > 0) parts.push(`Primary colors: ${brandDNA.primary_colors.join(', ')}`);
+  if (brandDNA.secondary_colors?.length > 0) parts.push(`Secondary colors: ${brandDNA.secondary_colors.join(', ')}`);
+  if (brandDNA.fonts?.length > 0) parts.push(`Brand fonts: ${brandDNA.fonts.join(', ')}`);
   if (brandDNA.formality_level) parts.push(`Style: ${brandDNA.formality_level}`);
   if (brandDNA.emoji_usage !== undefined) parts.push(brandDNA.emoji_usage ? 'Use emojis' : 'No emojis');
   if (brandDNA.cta_style) parts.push(`CTA style: ${brandDNA.cta_style}`);

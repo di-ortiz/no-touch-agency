@@ -15,7 +15,7 @@ const log = logger.child({ platform: 'image-router' });
  *   then a quality validator picks the best one.
  *
  * Providers:
- *   1. fal.ai      (Flux Schnell + Flux Pro + NanoBanana v2)
+ *   1. fal.ai      (Flux Pro + Nano Banana 2 + Flux 2 Flex)
  *   2. DALL-E 3    (OpenAI)
  *   3. Imagen 3    (Gemini)
  *   4. Kimi 2.5    (Moonshot AI)
@@ -59,21 +59,21 @@ function buildProviderRegistry() {
   return [
     {
       key: 'fal',
-      name: 'Flux (fal.ai)',
+      name: 'Flux Pro (fal.ai)',
       configured: fal.isConfigured(),
       generate: (opts) => fal.generateImage(opts),
     },
     {
-      key: 'fal-fluxpro',
-      name: 'Flux Pro (fal.ai)',
+      key: 'fal-nanobanana2',
+      name: 'Nano Banana 2 (fal.ai)',
       configured: fal.isConfigured(),
-      generate: (opts) => fal.generateImageWithModel('fal-ai/flux-pro/v1.1', opts),
+      generate: (opts) => fal.generateImageWithModel('fal-ai/nano-banana-2', opts),
     },
     {
-      key: 'fal-nanobanana',
-      name: 'NanoBanana v2 (fal.ai)',
+      key: 'fal-flux2flex',
+      name: 'Flux 2 Flex (fal.ai)',
       configured: fal.isConfigured(),
-      generate: (opts) => fal.generateImageWithModel('fal-ai/nanobanana-v2', opts),
+      generate: (opts) => fal.generateImageWithModel('fal-ai/flux-2-flex', opts),
     },
     {
       key: 'dalle',
@@ -379,7 +379,7 @@ export async function generateAdImages(opts = {}) {
 
   const settled = await Promise.allSettled(
     formats.map((format, idx) => {
-      const formatPrompt = `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third of the image.`;
+      const formatPrompt = `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. CRITICAL: No text, no words, no letters, no numbers, no typography, no captions, no screens, no monitors, no dashboards, no charts, no UI elements. Pure visual scene only — clean background with space for text overlay.`;
 
       log.info(`Starting image generation for format: ${format}`, {
         platform: opts.platform,
@@ -438,9 +438,9 @@ export async function generateAdImages(opts = {}) {
 export function getProviderStatus() {
   return {
     dalle:        { configured: !!config.OPENAI_API_KEY, coolingDown: isProviderCoolingDown('dalle') },
-    fal:          { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal') },
-    fluxPro:      { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal-fluxpro') },
-    nanoBananaV2: { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal-nanobanana') },
+    fal:           { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal') },
+    nanoBanana2:   { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal-nanobanana2') },
+    flux2Flex:     { configured: fal.isConfigured(), coolingDown: isProviderCoolingDown('fal-flux2flex') },
     gemini:       { configured: gemini.isConfigured(), coolingDown: isProviderCoolingDown('gemini') },
     kimi:         { configured: kimi.isConfigured(), coolingDown: isProviderCoolingDown('kimi') },
   };

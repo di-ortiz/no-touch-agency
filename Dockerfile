@@ -11,7 +11,13 @@ FROM node:20-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ \
+    chromium \
+    fonts-liberation fonts-noto-color-emoji fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+
+# Puppeteer needs to know where Chromium is
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 WORKDIR /app
 

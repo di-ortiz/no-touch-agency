@@ -114,12 +114,21 @@ WHAT MAKES A GREAT AD VISUAL (follow these principles):
 
 AVOID THESE (they produce bad results):
 - ANY text, words, letters, numbers, headlines, CTAs, buttons, or typography of any kind
+- ANY screens, monitors, laptops, phones, tablets showing content — these ALWAYS produce garbled fake text
+- ANY dashboards, charts, graphs, analytics UIs, data visualizations, or software interfaces
+- ANY browser windows, app mockups, or device screens with visible content
 - Abstract concepts without visual anchors ("growth and success")
 - Stock photo cliches (handshake, lightbulb, puzzle pieces, thumbs up)
 - Busy compositions with no clean space for text overlay
 - Logos or brand marks (these cannot be generated accurately)
+- Signs, banners, price tags, labels, or any surface that would contain text
 
-OUTPUT FORMAT: Return ONLY the image prompt text. Make it detailed (200-400 words). Describe the visual scene, composition, lighting, colors, mood, and style. Explicitly state "no text, no words, no typography" in the prompt.`,
+INSTEAD OF SCREENS/DASHBOARDS, USE:
+- For tech/SaaS: abstract geometric shapes, flowing gradients, connected nodes, light trails, futuristic textures
+- For analytics/marketing: upward visual metaphors (arrows, ascending steps, light beams), professional environments
+- For any industry: product photography, lifestyle scenes, architectural details, nature metaphors, texture close-ups
+
+OUTPUT FORMAT: Return ONLY the image prompt text. Make it detailed (200-400 words). Describe the visual scene, composition, lighting, colors, mood, and style. Explicitly state "no text, no words, no typography, no screens, no dashboards" in the prompt.`,
 
   videoPromptEngineer: `You are an advertising video creative director who writes prompts for AI video generation (Sora 2).
 

@@ -1,3 +1,12 @@
+/**
+ * Google Drive / Supabase Storage hybrid module.
+ *
+ * WRITE operations (upload, create, share) → Supabase Storage
+ * READ operations (list, download, export) → Google Drive (for existing docs)
+ *
+ * This lets us keep reading existing Google Docs/Sheets/Slides while
+ * storing all new media assets in Supabase (no service-account quota issues).
+ */
 import { google } from 'googleapis';
 import axios from 'axios';
 import { Readable } from 'stream';
@@ -5,58 +14,58 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry } from '../utils/retry.js';
-import fs from 'fs';
-import path from 'path';
+import * as supaStorage from './supabase-storage.js';
+import { getGoogleAuth } from './google-auth.js';
 
 const log = logger.child({ platform: 'google-drive' });
 
-let auth;
+// ============================================================
+// Google Drive client (for read operations on existing docs)
+// ============================================================
 let driveClient;
 let docsClient;
 
 function getAuth() {
+  const auth = getGoogleAuth([
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/documents',
+  ]);
   if (!auth) {
-    const credPath = config.GOOGLE_APPLICATION_CREDENTIALS || 'config/google-service-account.json';
-    if (fs.existsSync(credPath)) {
-      auth = new google.auth.GoogleAuth({
-        keyFile: credPath,
-        scopes: [
-          'https://www.googleapis.com/auth/drive',
-          'https://www.googleapis.com/auth/documents',
-        ],
-      });
-    } else {
-      log.error('Google credentials MISSING', { credPath });
-      throw new Error(
-        `Google service account credentials not found. ` +
-        `Expected credentials at "${credPath}" but the file does NOT exist. ` +
-        `To fix: 1) Go to console.cloud.google.com → IAM → Service Accounts, ` +
-        `2) Create a service account with Drive/Docs API access, ` +
-        `3) Download the JSON key and save it to ${credPath}`
-      );
-    }
+    log.warn('Google credentials not found, Drive read operations unavailable');
   }
   return auth;
 }
 
 function getDrive() {
   if (!driveClient) {
-    driveClient = google.drive({ version: 'v3', auth: getAuth() });
+    const a = getAuth();
+    if (!a) return null;
+    driveClient = google.drive({ version: 'v3', auth: a });
   }
   return driveClient;
 }
 
 function getDocs() {
   if (!docsClient) {
-    docsClient = google.docs({ version: 'v1', auth: getAuth() });
+    const a = getAuth();
+    if (!a) return null;
+    docsClient = google.docs({ version: 'v1', auth: a });
   }
   return docsClient;
 }
 
-// --- File Operations ---
+// ============================================================
+// READ operations — still use Google Drive for existing docs
+// ============================================================
 
 export async function listFiles(folderId, opts = {}) {
+  // If folderId looks like a Supabase path (no Google Drive ID format), use Supabase
+  if (folderId && folderId.includes('/')) {
+    return supaStorage.listFiles(folderId, opts);
+  }
+
   const drive = getDrive();
+  if (!drive) return supaStorage.listFiles(folderId, opts);
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -73,6 +82,7 @@ export async function listFiles(folderId, opts = {}) {
 
 export async function getFile(fileId) {
   const drive = getDrive();
+  if (!drive) return null;
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -86,7 +96,13 @@ export async function getFile(fileId) {
 }
 
 export async function downloadFile(fileId) {
+  // If fileId looks like a Supabase path, use Supabase
+  if (fileId && fileId.includes('/')) {
+    return supaStorage.downloadFile(fileId);
+  }
+
   const drive = getDrive();
+  if (!drive) return supaStorage.downloadFile(fileId);
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -101,27 +117,19 @@ export async function downloadFile(fileId) {
 
 export async function exportDocument(fileId, mimeType = 'text/plain') {
   const drive = getDrive();
+  if (!drive) throw new Error('Google Drive not configured for document export');
 
   return rateLimited('google', () =>
     retry(async () => {
-      const res = await drive.files.export({
-        fileId,
-        mimeType,
-      });
+      const res = await drive.files.export({ fileId, mimeType });
       return res.data;
     }, { retries: 3, label: 'Google Drive export' })
   );
 }
 
-/**
- * Export a Google Workspace file (Doc/Slides/Sheet) as a binary Buffer.
- * Use this for PDF/PPTX/XLSX exports that need to be uploaded to WhatsApp/Telegram.
- * @param {string} fileId - The Google Drive file ID
- * @param {string} mimeType - Export MIME type (e.g. 'application/pdf')
- * @returns {Buffer|null} The exported file as a Buffer, or null on failure
- */
 export async function exportDocumentAsBuffer(fileId, mimeType = 'application/pdf') {
   const drive = getDrive();
+  if (!drive) throw new Error('Google Drive not configured for document export');
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -134,34 +142,34 @@ export async function exportDocumentAsBuffer(fileId, mimeType = 'application/pdf
   );
 }
 
-// --- Create & Upload ---
+// ============================================================
+// WRITE operations — route to Supabase Storage
+// ============================================================
 
 export async function createFolder(name, parentId) {
-  const drive = getDrive();
-
-  return rateLimited('google', () =>
-    retry(async () => {
-      const res = await drive.files.create({
-        requestBody: {
-          name,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [parentId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
-        },
-        fields: 'id, name',
-      });
-      log.info(`Created folder: ${name}`, { id: res.data.id });
-      return res.data;
-    }, { retries: 3, label: 'Google Drive create folder' })
-  );
+  // Supabase uses path-based storage, folders are implicit
+  const folderPath = parentId ? `${parentId}/${name.toLowerCase().replace(/\s+/g, '-')}` : `folders/${name.toLowerCase().replace(/\s+/g, '-')}`;
+  log.info(`Created folder (Supabase path): ${name}`, { id: folderPath });
+  return { id: folderPath, name };
 }
 
 export async function createDocument(name, content, folderId) {
+  if (supaStorage.isConfigured()) {
+    const result = await supaStorage.createDocument(name, content, folderId);
+    log.info(`Created document in Supabase: ${name}`, { id: result.id });
+    return result;
+  }
+
+  // Fallback to Google Drive if Supabase not configured
   const drive = getDrive();
   const docs = getDocs();
+  if (!drive || !docs) {
+    log.warn('Neither Supabase nor Google Drive configured for document creation');
+    return { id: null, name, webViewLink: null };
+  }
 
   return rateLimited('google', () =>
     retry(async () => {
-      // Create empty doc
       const res = await drive.files.create({
         requestBody: {
           name,
@@ -170,8 +178,6 @@ export async function createDocument(name, content, folderId) {
         },
         fields: 'id, name, webViewLink',
       });
-
-      // Insert content
       if (content) {
         await docs.documents.batchUpdate({
           documentId: res.data.id,
@@ -180,15 +186,25 @@ export async function createDocument(name, content, folderId) {
           },
         });
       }
-
-      log.info(`Created document: ${name}`, { id: res.data.id });
+      log.info(`Created document in Google Drive: ${name}`, { id: res.data.id });
       return res.data;
     }, { retries: 3, label: 'Google Drive create doc' })
   );
 }
 
 export async function uploadFile(name, content, mimeType, folderId) {
+  if (supaStorage.isConfigured()) {
+    const result = await supaStorage.uploadFile(name, content, mimeType, folderId);
+    log.info(`Uploaded file to Supabase: ${name}`, { path: result.id });
+    return result;
+  }
+
+  // Fallback to Google Drive
   const drive = getDrive();
+  if (!drive) {
+    log.warn('Neither Supabase nor Google Drive configured for file upload');
+    return { id: null, name, webViewLink: null };
+  }
 
   return rateLimited('google', () =>
     retry(async () => {
@@ -197,10 +213,7 @@ export async function uploadFile(name, content, mimeType, folderId) {
           name,
           parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
         },
-        media: {
-          mimeType,
-          body: content,
-        },
+        media: { mimeType, body: content },
         fields: 'id, name, webViewLink',
       });
       return res.data;
@@ -208,19 +221,22 @@ export async function uploadFile(name, content, mimeType, folderId) {
   );
 }
 
-/**
- * Append text to the end of an existing Google Doc.
- */
 export async function appendToDocument(documentId, text) {
+  // If documentId looks like a Supabase path, use Supabase
+  if (documentId && documentId.includes('/')) {
+    return supaStorage.appendToDocument(documentId, text);
+  }
+
   const docs = getDocs();
+  if (!docs) {
+    return supaStorage.appendToDocument(documentId, text);
+  }
 
   return rateLimited('google', () =>
     retry(async () => {
-      // Get current document length
       const doc = await docs.documents.get({ documentId });
       const endIndex = doc.data.body.content
         .reduce((max, el) => Math.max(max, el.endIndex || 0), 0) - 1;
-
       await docs.documents.batchUpdate({
         documentId,
         requestBody: {
@@ -232,44 +248,51 @@ export async function appendToDocument(documentId, text) {
   );
 }
 
-// --- Client Folder Structure ---
+// ============================================================
+// Client Folder Structure — Supabase path-based
+// ============================================================
 
 export async function ensureClientFolders(clientName) {
+  if (supaStorage.isConfigured()) {
+    const folders = supaStorage.ensureClientFolders(clientName);
+    log.info(`Created client folder structure in Supabase for ${clientName}`, { root: folders.root.id });
+    return folders;
+  }
+
+  // Fallback to Google Drive
   const rootFolderId = config.GOOGLE_DRIVE_ROOT_FOLDER_ID;
   if (!rootFolderId) {
-    throw new Error('GOOGLE_DRIVE_ROOT_FOLDER_ID not configured. Set it in environment variables.');
+    throw new Error('Neither Supabase nor GOOGLE_DRIVE_ROOT_FOLDER_ID configured for client folders.');
   }
 
   const clientFolder = await createFolder(clientName, rootFolderId);
-
   const subfolders = ['Brand Assets', 'Reports', 'Strategic Plans', 'Creatives', 'Audits', 'Competitor Research'];
   const folders = { root: clientFolder };
-
   for (const name of subfolders) {
     folders[name.toLowerCase().replace(/\s+/g, '_')] = await createFolder(name, clientFolder.id);
   }
-
   log.info(`Created client folder structure for ${clientName}`, { folderId: clientFolder.id });
   return folders;
 }
 
-// --- Sharing ---
+// ============================================================
+// Sharing — no-ops for Supabase (public bucket), fallback to Drive
+// ============================================================
 
-/**
- * Share a folder (or file) with "anyone with the link" as a writer.
- * This allows clients to upload brand assets via a shared link.
- */
 export async function shareFolderWithAnyone(folderId, role = 'writer') {
+  // If it's a Supabase path, sharing is implicit (public bucket)
+  if (folderId && folderId.includes('/')) {
+    return { folderId, shared: true, role };
+  }
+
   const drive = getDrive();
+  if (!drive) return { folderId, shared: true, role };
 
   return rateLimited('google', () =>
     retry(async () => {
       await drive.permissions.create({
         fileId: folderId,
-        requestBody: {
-          type: 'anyone',
-          role,
-        },
+        requestBody: { type: 'anyone', role },
       });
       log.info(`Shared folder ${folderId} with anyone (${role})`);
       return { folderId, shared: true, role };
@@ -277,21 +300,19 @@ export async function shareFolderWithAnyone(folderId, role = 'writer') {
   );
 }
 
-/**
- * Share a folder with a specific email address.
- */
 export async function shareFolderWithEmail(folderId, email, role = 'writer') {
+  if (folderId && folderId.includes('/')) {
+    return { folderId, email, shared: true, role };
+  }
+
   const drive = getDrive();
+  if (!drive) return { folderId, email, shared: true, role };
 
   return rateLimited('google', () =>
     retry(async () => {
       await drive.permissions.create({
         fileId: folderId,
-        requestBody: {
-          type: 'user',
-          role,
-          emailAddress: email,
-        },
+        requestBody: { type: 'user', role, emailAddress: email },
         sendNotificationEmail: true,
       });
       log.info(`Shared folder ${folderId} with ${email} (${role})`);
@@ -300,21 +321,14 @@ export async function shareFolderWithEmail(folderId, email, role = 'writer') {
   );
 }
 
-/**
- * Download an image from a URL and upload it to Google Drive, returning a public viewable link.
- * Also returns the raw image buffer so callers can upload directly to WhatsApp Media API
- * without a second download.
- *
- * @param {string} imageUrl - The temporary image URL to persist
- * @param {string} fileName - Filename for the uploaded image
- * @param {string} [folderId] - Google Drive folder to upload to
- * @returns {object|null} { id, webViewLink, webContentLink, imageBuffer, mimeType } or null on failure
- */
+// ============================================================
+// Upload Image from URL — Supabase primary, buffer always available
+// ============================================================
+
 export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
-  // Always download the image (needed for both Drive upload and WhatsApp direct send)
+  // Always download the image first (needed for WhatsApp direct send)
   let imageBuffer, mimeType;
   try {
-    // Handle base64 data URIs (e.g. from Gemini Imagen) — no HTTP fetch needed
     if (imageUrl?.startsWith('data:')) {
       const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
       if (!match) throw new Error('Invalid data URI format');
@@ -330,68 +344,22 @@ export async function uploadImageFromUrl(imageUrl, fileName, folderId) {
     return null;
   }
 
-  let drive;
-  try {
-    drive = getDrive();
-  } catch (credError) {
-    // No Google Drive configured — still return the buffer for WhatsApp direct upload
-    log.error('Google Drive not configured, cannot persist image', { error: credError.message });
-    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: credError.message };
+  // Upload to Supabase Storage
+  if (supaStorage.isConfigured()) {
+    try {
+      const filePath = folderId ? `${folderId}/${fileName}` : `media/${fileName}`;
+      const result = await supaStorage.uploadBuffer(filePath, imageBuffer, mimeType);
+      log.info('Image persisted to Supabase Storage', { path: filePath, fileName });
+      return { id: result.path, webViewLink: result.url, webContentLink: result.url, imageBuffer, mimeType };
+    } catch (e) {
+      log.error('Failed to persist image to Supabase Storage', { error: e.message, fileName });
+      return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: e.message };
+    }
   }
 
-  try {
-    // Upload to Drive with a per-attempt timeout to avoid hanging on quota/permission errors
-    const DRIVE_UPLOAD_TIMEOUT_MS = 30000; // 30s per attempt
-    const uploaded = await rateLimited('google', () =>
-      retry(async () => {
-        // Create a fresh stream for each retry attempt (consumed streams can't be reused)
-        const stream = Readable.from(imageBuffer);
-        const res = await Promise.race([
-          drive.files.create({
-            requestBody: {
-              name: fileName,
-              parents: [folderId || config.GOOGLE_DRIVE_ROOT_FOLDER_ID],
-            },
-            media: {
-              mimeType,
-              body: stream,
-            },
-            fields: 'id, name, webViewLink, webContentLink',
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Drive upload timed out')), DRIVE_UPLOAD_TIMEOUT_MS)),
-        ]);
-        return res.data;
-      }, {
-        retries: 1, // Only 1 retry (2 total attempts) to fail faster
-        label: 'Google Drive upload image from URL',
-        // Don't retry quota/permission errors — they won't succeed on retry
-        shouldRetry: (err) => {
-          const msg = err.message || '';
-          if (msg.includes('storage quota') || msg.includes('do not have permission') || msg.includes('caller does not have permission')) return false;
-          return true;
-        },
-      })
-    );
-
-    // Make publicly viewable
-    await rateLimited('google', () =>
-      retry(async () => {
-        await drive.permissions.create({
-          fileId: uploaded.id,
-          requestBody: { type: 'anyone', role: 'reader' },
-        });
-      }, { retries: 2, label: 'Google Drive set image public' })
-    );
-
-    const webContentLink = `https://drive.google.com/uc?export=view&id=${uploaded.id}`;
-
-    log.info('Image persisted to Google Drive', { id: uploaded.id, fileName });
-    return { id: uploaded.id, webViewLink: uploaded.webViewLink, webContentLink, imageBuffer, mimeType };
-  } catch (e) {
-    log.error('FAILED to persist image to Google Drive', { error: e.message, fileName });
-    // Drive upload failed but we still have the buffer for WhatsApp direct upload
-    return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: e.message };
-  }
+  // Fallback: return buffer only (no storage configured)
+  log.warn('No storage backend configured, returning buffer only');
+  return { id: null, webViewLink: null, webContentLink: null, imageBuffer, mimeType, driveError: 'No storage configured' };
 }
 
 export default {

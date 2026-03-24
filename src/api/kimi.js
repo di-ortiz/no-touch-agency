@@ -4,7 +4,7 @@ import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
-import { uploadImageFromUrl } from './google-drive.js';
+import { uploadFromUrl as uploadImageToStorage } from './supabase-storage.js';
 
 const log = logger.child({ platform: 'kimi' });
 
@@ -113,18 +113,18 @@ export async function generateImage(opts = {}) {
 
       let url = image.url;
       if (!url && image.b64_json) {
-        // Upload base64 to Google Drive for a stable HTTPS URL (data: URIs break Kling video + WhatsApp link delivery)
+        // Upload base64 to Supabase Storage for a stable HTTPS URL (data: URIs break Kling video + WhatsApp link delivery)
         const dataUri = `data:image/png;base64,${image.b64_json}`;
         try {
-          const driveResult = await uploadImageFromUrl(dataUri, `kimi-${format}-${Date.now()}.png`);
-          if (driveResult?.webContentLink) {
-            url = driveResult.webContentLink;
-            log.info('Kimi image uploaded to Drive', { url: url.slice(0, 80) });
+          const storageResult = await uploadImageToStorage(dataUri, `kimi-${format}-${Date.now()}.png`, 'creatives');
+          if (storageResult?.url) {
+            url = storageResult.url;
+            log.info('Kimi image uploaded to Supabase', { url: url.slice(0, 80) });
           } else {
             url = dataUri;
           }
         } catch (uploadErr) {
-          log.warn('Failed to upload Kimi image to Drive, using data URI fallback', { error: uploadErr.message });
+          log.warn('Failed to upload Kimi image to storage, using data URI fallback', { error: uploadErr.message });
           url = dataUri;
         }
       }
