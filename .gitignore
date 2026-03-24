@@ -12,3 +12,4 @@ data/templates/
 coverage/
 dist/
 tmp/
+full-codebase.txt
