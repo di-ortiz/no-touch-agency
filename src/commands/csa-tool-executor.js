@@ -2201,14 +2201,24 @@ Return ONLY the JSON array, no other text.`;
     // --- Template Overlay Creative ---
     case 'generate_ad_creative_with_text': {
       const client = getClient(toolInput.clientName);
-      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+      // Allow unregistered users when they uploaded a photo — use ad-hoc brand DNA
+      if (!client && !toolInput.uploadedImageUrl) return { error: `Client "${toolInput.clientName}" not found. If the user uploaded a photo, pass the image URL as uploadedImageUrl to create an ad with their photo.` };
 
-      const clientBrandDNA = brandDNA.loadBrandDNA(client.id);
+      const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
       const platform = toolInput.platform || 'meta';
-      const imgFolderId = client.drive_creatives_folder_id || client.drive_root_folder_id;
+      const imgFolderId = client ? (client.drive_creatives_folder_id || client.drive_root_folder_id) : null;
+
+      // Build fallback brand DNA for unregistered users
+      const effectiveBrandDNA = clientBrandDNA || {
+        business_name: toolInput.clientName || 'Ad Creative',
+        primary_colors: ['#2563EB', '#1E40AF'],
+        secondary_colors: ['#F59E0B'],
+        cta_style: 'direct',
+        main_products_or_services: [toolInput.product || 'Professional Services'],
+      };
 
       // Determine rendering mode: template-first (default) or photo-forward (AI image)
-      const usePhotoForward = toolInput.style === 'photo-forward' || toolInput.style === 'photorealistic';
+      const usePhotoForward = !toolInput.uploadedImageUrl && (toolInput.style === 'photo-forward' || toolInput.style === 'photorealistic');
 
       try {
         let result;
@@ -2222,30 +2232,30 @@ Return ONLY the JSON array, no other text.`;
             concept: toolInput.concept,
             mood: toolInput.mood,
             style: toolInput.style,
-            brandColors: clientBrandDNA?.primary_colors?.join(', ') || client.brand_colors,
-            audience: clientBrandDNA?.target_audience || client.target_audience,
+            brandColors: effectiveBrandDNA?.primary_colors?.join(', ') || client?.brand_colors,
+            audience: effectiveBrandDNA?.target_audience || client?.target_audience,
           });
 
           result = await creativeRenderer.generateFullCreative({
-            brandDNA: clientBrandDNA,
-            product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
+            brandDNA: effectiveBrandDNA,
+            product: toolInput.product || effectiveBrandDNA?.main_products_or_services?.[0],
             goal: toolInput.goal || 'conversion',
             generateImage: (opts) => imageRouter.generateImage({ ...opts, prompt: imgPrompt }),
             imagePrompt: imgPrompt,
             driveFolderId: imgFolderId,
-            clientId: client.id,
+            clientId: client?.id,
           });
         } else {
           // Template-first path: professional HTML/CSS design
           // If user uploaded a photo, use it as background for the template
           result = await creativeRenderer.generateTemplateCreative({
-            brandDNA: clientBrandDNA,
-            product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
+            brandDNA: effectiveBrandDNA,
+            product: toolInput.product || effectiveBrandDNA?.main_products_or_services?.[0],
             goal: toolInput.goal || 'conversion',
             templateStyle: toolInput.templateStyle || (toolInput.uploadedImageUrl ? 'split-diagonal' : null),
             backgroundImageUrl: toolInput.uploadedImageUrl || null,
             driveFolderId: imgFolderId,
-            clientId: client.id,
+            clientId: client?.id,
           });
         }
 
@@ -2263,7 +2273,7 @@ Return ONLY the JSON array, no other text.`;
         }
 
         const response = {
-          clientName: client.name,
+          clientName: client?.name || toolInput.clientName,
           adCopy: result.adCopy,
           templateBased: !!result.templateBased,
           templateName: result.templateName || null,
