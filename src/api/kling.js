@@ -79,21 +79,37 @@ export async function generateVideoFromImage(opts = {}) {
     aspectRatio,
   });
 
-  // Step 1: Create the video generation task
-  const createResponse = await rateLimited('kling', async () => {
-    return axios.post(
-      `${KLING_BASE}/videos/image2video`,
-      {
-        model_name: 'kling-v1',
-        image: imageUrl,
-        prompt,
-        cfg_scale: 0.5,
-        duration: String(duration),
-        aspect_ratio: aspectRatio,
-      },
-      { headers: getHeaders(), timeout: 30000 },
-    );
-  });
+  // Step 1: Create the video generation task (with retry for 429s)
+  let createResponse;
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      createResponse = await rateLimited('kling', async () => {
+        return axios.post(
+          `${KLING_BASE}/videos/image2video`,
+          {
+            model_name: 'kling-v1',
+            image: imageUrl,
+            prompt,
+            cfg_scale: 0.5,
+            duration: String(duration),
+            aspect_ratio: aspectRatio,
+          },
+          { headers: getHeaders(), timeout: 30000 },
+        );
+      });
+      break; // success
+    } catch (e) {
+      const is429 = e.response?.status === 429 || e.message?.includes('429');
+      if (is429 && attempt < MAX_RETRIES) {
+        const backoffMs = attempt * 5000; // 5s, 10s
+        log.warn(`Kling 429 rate limit, retrying in ${backoffMs / 1000}s`, { attempt, maxRetries: MAX_RETRIES });
+        await new Promise(r => setTimeout(r, backoffMs));
+        continue;
+      }
+      throw e;
+    }
+  }
 
   const taskId = createResponse.data?.data?.task_id;
   if (!taskId) {
