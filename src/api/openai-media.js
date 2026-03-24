@@ -235,6 +235,38 @@ export async function generateVideo(opts = {}) {
         throw new Error(`Sora 2 video generation timed out after ${maxWaitMs / 60000} minutes. The video may still be generating. Job ID: ${response.id}. You can try again with a different prompt.`);
       }
 
+      // Sora 2 returns video as a file reference — download the actual video content
+      let videoUrl;
+      const fileId = videoResult.file_id || videoResult.result?.file_id;
+      if (fileId) {
+        try {
+          const fileResponse = await openai.files.content(fileId);
+          const chunks = [];
+          for await (const chunk of fileResponse.body) {
+            chunks.push(chunk);
+          }
+          const videoBuffer = Buffer.concat(chunks);
+          // Upload to Google Drive for a stable HTTPS URL
+          const { uploadFile } = await import('./google-drive.js');
+          const { Readable } = await import('stream');
+          const driveResult = await uploadFile(
+            `sora2-${Date.now()}.mp4`,
+            Readable.from(videoBuffer),
+            'video/mp4',
+          );
+          if (driveResult?.id) {
+            videoUrl = `https://drive.google.com/uc?export=view&id=${driveResult.id}`;
+            log.info('Sora 2 video uploaded to Drive', { driveId: driveResult.id });
+          }
+        } catch (dlErr) {
+          log.warn('Failed to download/upload Sora 2 video file', { error: dlErr.message, fileId });
+        }
+      }
+      // Fallback to direct URL if available (future API changes)
+      if (!videoUrl) {
+        videoUrl = videoResult.url || null;
+      }
+
       // Track cost (Sora 2 Standard: $0.10/sec = 10 cents/sec)
       const costPerSecond = model === 'sora-2-pro' ? 30 : 10;
       const costCents = duration * costPerSecond;
@@ -247,9 +279,9 @@ export async function generateVideo(opts = {}) {
         metadata: { duration, resolution: opts.resolution || '720p' },
       });
 
-      log.info('Sora 2 video generated', { duration, id: response.id });
+      log.info('Sora 2 video generated', { duration, id: response.id, hasUrl: !!videoUrl });
       return {
-        videoUrl: videoResult.url,
+        videoUrl,
         id: response.id,
         status: 'completed',
         duration,

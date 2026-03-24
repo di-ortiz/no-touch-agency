@@ -4,6 +4,7 @@ import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
+import { uploadImageFromUrl } from './google-drive.js';
 
 const log = logger.child({ platform: 'gemini' });
 
@@ -91,11 +92,21 @@ export async function generateImage(opts = {}) {
         throw new Error('No image returned from Imagen 3');
       }
 
-      // Convert base64 to a data URI (Sofia delivers via URL, but we'll upload to temporary hosting)
-      // For now, return as base64 data URI — the image router will handle upload if needed
       const base64 = predictions[0].bytesBase64Encoded;
       const mimeType = predictions[0].mimeType || 'image/png';
       const dataUri = `data:${mimeType};base64,${base64}`;
+
+      // Upload base64 to Google Drive for a stable HTTPS URL (data: URIs break Kling video + WhatsApp link delivery)
+      let hostedUrl = dataUri;
+      try {
+        const driveResult = await uploadImageFromUrl(dataUri, `imagen3-${format}-${Date.now()}.png`);
+        if (driveResult?.webContentLink) {
+          hostedUrl = driveResult.webContentLink;
+          log.info('Imagen 3 image uploaded to Drive', { url: hostedUrl.slice(0, 80) });
+        }
+      } catch (uploadErr) {
+        log.warn('Failed to upload Imagen 3 image to Drive, using data URI fallback', { error: uploadErr.message });
+      }
 
       const dims = ASPECT_DIMENSIONS[aspectRatio] || ASPECT_DIMENSIONS['1:1'];
 
@@ -111,7 +122,7 @@ export async function generateImage(opts = {}) {
 
       log.info('Imagen 3 image generated', { format });
       return {
-        url: dataUri,
+        url: hostedUrl,
         base64,
         mimeType,
         format,

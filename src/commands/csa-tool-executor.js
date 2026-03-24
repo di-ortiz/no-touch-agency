@@ -770,6 +770,7 @@ Return ONLY the JSON array, no other text.`;
           if (driveResult.webContentLink) {
             mapped.driveUrl = driveResult.webContentLink;
             mapped.driveId = driveResult.id;
+            mapped.deliveryUrl = driveResult.webContentLink;
           }
           imgBuffer = { buffer: driveResult.imageBuffer, mimeType: driveResult.mimeType };
         }

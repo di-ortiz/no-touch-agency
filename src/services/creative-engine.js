@@ -254,6 +254,7 @@ export async function generateCreativePackage(opts = {}) {
   const client = typeof opts.clientName === 'string' ? getClient(opts.clientName) : null;
   const platform = opts.platform || 'meta';
   const specs = PLATFORM_SPECS[platform] || PLATFORM_SPECS.meta;
+  const brandDNA = client ? loadBrandDNA(client.id) : null;
 
   log.info(`Generating full creative package for ${opts.clientName}`, { platform, objective: opts.objective });
 
