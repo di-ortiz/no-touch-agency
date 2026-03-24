@@ -49,7 +49,7 @@ export function getPublicUrl() {
 // --- Tool Execution Config ---
 export const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000;
-export const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page']);
+export const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page', 'generate_video_from_image', 'generate_ad_creative_with_text', 'extract_brand_dna', 'update_brand_dna']);
 
 export const TOOL_PROGRESS_MESSAGES = {
   generate_ad_images: 'Generating your ad images... This might take a minute.',

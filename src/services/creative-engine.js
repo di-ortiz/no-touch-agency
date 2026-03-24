@@ -5,6 +5,7 @@ import * as imageRouter from '../api/image-router.js';
 import * as googleSlides from '../api/google-slides.js';
 import { getClient, buildClientContext, getTopCreatives } from './knowledge-base.js';
 import { auditLog } from './cost-tracker.js';
+import { loadBrandDNA, buildBrandContext } from '../brand-dna.js';
 import config from '../config.js';
 
 const log = logger.child({ workflow: 'creative-engine' });
@@ -76,15 +77,20 @@ export async function generateTextAds(opts = {}) {
     ? topCreatives.map(c => `- "${c.headline}" (CTR: ${(c.ctr * 100).toFixed(2)}%)`).join('\n')
     : 'No past performance data.';
 
+  // Load Brand DNA for richer context
+  const brandDNA = client ? loadBrandDNA(client.id) : null;
+  const brandContext = brandDNA ? buildBrandContext(brandDNA) : '';
+
   const prompt = `Generate ${variations} ad copy variations for ${opts.clientName || 'the brand'}.
 
 PLATFORM: ${platform.toUpperCase()}
 OBJECTIVE: ${opts.objective || 'conversions'}
-TARGET AUDIENCE: ${opts.audience || client?.target_audience || 'Not specified'}
+TARGET AUDIENCE: ${opts.audience || client?.target_audience || brandDNA?.target_audience || 'Not specified'}
 OFFER: ${opts.offer || 'None'}
 ${opts.angle ? `CREATIVE ANGLE: ${opts.angle}` : ''}
 ${client?.brand_voice ? `BRAND VOICE: ${client.brand_voice}` : ''}
 ${client?.industry ? `INDUSTRY: ${client.industry}` : ''}
+${brandContext ? `\nBRAND DNA: ${brandContext}` : ''}
 
 CHARACTER LIMITS (STRICT — do not exceed):
 ${Object.entries(specs).filter(([k, v]) => v.max).map(([k, v]) => `- ${v.label}: ${v.max} characters max`).join('\n')}
@@ -171,15 +177,22 @@ export async function generateImagePrompt(opts = {}) {
 
   const { SYSTEM_PROMPTS } = await import('../prompts/templates.js');
 
+  // Load Brand DNA for richer image context
+  const brandDNA = client ? loadBrandDNA(client.id) : null;
+
   const briefSections = [
     `CLIENT: ${opts.clientName || 'Brand'}`,
     `PLATFORM: ${opts.platform || 'social media'} ad creative`,
   ];
 
   if (client?.industry || opts.industry) briefSections.push(`INDUSTRY: ${client?.industry || opts.industry}`);
-  if (opts.brandColors || client?.brand_colors) briefSections.push(`BRAND COLORS: ${opts.brandColors || client?.brand_colors}`);
+  if (opts.brandColors || client?.brand_colors || brandDNA?.primary_colors?.length) {
+    briefSections.push(`BRAND COLORS: ${opts.brandColors || client?.brand_colors || brandDNA.primary_colors.join(', ')}`);
+  }
   if (opts.product || opts.offer) briefSections.push(`PRODUCT/SERVICE: ${opts.product || opts.offer}`);
-  if (opts.audience || client?.target_audience) briefSections.push(`TARGET AUDIENCE: ${opts.audience || client?.target_audience}`);
+  if (opts.audience || client?.target_audience || brandDNA?.target_audience) {
+    briefSections.push(`TARGET AUDIENCE: ${opts.audience || client?.target_audience || brandDNA.target_audience}`);
+  }
   if (opts.concept) briefSections.push(`CREATIVE CONCEPT: ${opts.concept}`);
   if (opts.mood) briefSections.push(`MOOD/EMOTION: ${opts.mood}`);
   if (opts.style) briefSections.push(`CREATIVE STYLE: ${opts.style}`);
@@ -187,6 +200,7 @@ export async function generateImagePrompt(opts = {}) {
   if (opts.websiteInsights) briefSections.push(`INSIGHTS FROM CLIENT WEBSITE:\n${opts.websiteInsights}`);
   if (opts.competitorInsights) briefSections.push(`COMPETITOR AD LANDSCAPE:\n${opts.competitorInsights}`);
   if (client?.brand_voice) briefSections.push(`BRAND VOICE: ${client.brand_voice}`);
+  if (brandDNA) briefSections.push(`BRAND DNA: ${buildBrandContext(brandDNA)}`);
 
   // Add platform-specific guidance
   const platformGuide = {

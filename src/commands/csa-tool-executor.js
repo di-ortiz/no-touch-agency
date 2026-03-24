@@ -39,6 +39,9 @@ import * as reportBuilder from '../services/report-builder.js';
 import * as chartBuilderService from '../services/chart-builder.js';
 import * as campaignRecord from '../services/campaign-record.js';
 import * as agencyAnalytics from '../api/agency-analytics.js';
+import * as brandDNA from '../brand-dna.js';
+import * as klingApi from '../api/kling.js';
+import * as creativeRenderer from '../creative-renderer.js';
 import { pendingApprovals, landingPageStore, getPublicUrl, SLOW_TOOLS, SLOW_TOOL_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_MS } from './helpers.js';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -2027,6 +2030,146 @@ Return ONLY the JSON array, no other text.`;
         };
       } catch (e) {
         return { error: `AgencyAnalytics API error: ${e.message}` };
+      }
+    }
+
+    // --- Brand DNA ---
+    case 'extract_brand_dna': {
+      const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
+      try {
+        const result = await brandDNA.extractBrandDNA(toolInput.websiteUrl, client?.id);
+        return {
+          status: 'success',
+          brandDNA: result,
+          savedToClient: !!client,
+          clientName: client?.name || null,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }
+
+    case 'update_brand_dna': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+      if (!client.website) return { error: `Client "${client.name}" has no website URL on file. Please provide one.` };
+      try {
+        const result = await brandDNA.extractBrandDNA(client.website, client.id);
+        return {
+          status: 'updated',
+          clientName: client.name,
+          brandDNA: result,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }
+
+    case 'get_brand_dna': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+      const dna = brandDNA.loadBrandDNA(client.id);
+      if (!dna) return { error: `No Brand DNA found for "${client.name}". Use extract_brand_dna with their website URL to create one.` };
+      return {
+        clientName: client.name,
+        brandDNA: dna,
+      };
+    }
+
+    // --- Kling AI Video ---
+    case 'generate_video_from_image': {
+      if (!klingApi.isConfigured()) return { error: 'KLING_API_KEY not configured. Set it in Railway environment variables to enable video generation.' };
+
+      const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
+      const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
+
+      try {
+        const result = await klingApi.generateBrandedVideo({
+          imageUrl: toolInput.imageUrl,
+          brandDNA: clientBrandDNA,
+          userInstruction: toolInput.prompt || '',
+          aspectRatio: toolInput.aspectRatio || '9:16',
+          clientId: client?.id,
+        });
+
+        return {
+          clientName: client?.name || null,
+          videoUrl: result.videoUrl,
+          duration: result.duration,
+          aspectRatio: result.aspectRatio,
+          status: result.status,
+          taskId: result.id,
+        };
+      } catch (e) {
+        return { error: `Video generation failed: ${e.message}` };
+      }
+    }
+
+    // --- Template Overlay Creative ---
+    case 'generate_ad_creative_with_text': {
+      const client = getClient(toolInput.clientName);
+      if (!client) return { error: `Client "${toolInput.clientName}" not found` };
+
+      const clientBrandDNA = brandDNA.loadBrandDNA(client.id);
+      const platform = toolInput.platform || 'meta';
+
+      try {
+        // Step 1: Generate image prompt (background only, no text)
+        const imgPrompt = await creativeEngine.generateImagePrompt({
+          clientName: toolInput.clientName,
+          platform,
+          product: toolInput.product,
+          concept: toolInput.concept,
+          mood: toolInput.mood,
+          style: toolInput.style,
+          brandColors: clientBrandDNA?.primary_colors?.join(', ') || client.brand_colors,
+          audience: clientBrandDNA?.target_audience || client.target_audience,
+        });
+
+        // Step 2 & 3: Generate background + ad copy in parallel, then render overlay
+        const imgFolderId = client.drive_creatives_folder_id || client.drive_root_folder_id;
+
+        const result = await creativeRenderer.generateFullCreative({
+          brandDNA: clientBrandDNA,
+          product: toolInput.product || clientBrandDNA?.main_products_or_services?.[0],
+          goal: toolInput.goal || 'conversion',
+          generateImage: (opts) => imageRouter.generateImage({ ...opts, prompt: imgPrompt }),
+          imagePrompt: imgPrompt,
+          driveFolderId: imgFolderId,
+          clientId: client.id,
+        });
+
+        // Build response with image buffers for delivery
+        const images = [];
+        const _imageBuffers = [];
+
+        if (result.feed && !result.feed.error) {
+          images.push({ format: 'feed', label: 'Feed (1080x1080)', url: result.feed.url || '', driveId: result.feed.driveId });
+          _imageBuffers.push(result.feed._buffer ? { buffer: result.feed._buffer, mimeType: 'image/png' } : null);
+        }
+        if (result.story && !result.story.error) {
+          images.push({ format: 'story', label: 'Stories (1080x1920)', url: result.story.url || '', driveId: result.story.driveId });
+          _imageBuffers.push(result.story._buffer ? { buffer: result.story._buffer, mimeType: 'image/png' } : null);
+        }
+
+        const response = {
+          clientName: client.name,
+          adCopy: result.adCopy,
+          backgroundUrl: result.backgroundUrl,
+          images,
+          totalGenerated: images.length,
+          fallback: result.fallback,
+        };
+
+        // If Puppeteer failed, include the raw background + text as fallback
+        if (result.fallback) {
+          response.fallbackNote = 'Puppeteer render failed. Background image and ad copy delivered separately.';
+        }
+
+        response._imageBuffers = _imageBuffers;
+        return response;
+      } catch (e) {
+        return { error: `Creative generation failed: ${e.message}` };
       }
     }
 

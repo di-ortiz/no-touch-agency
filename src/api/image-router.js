@@ -211,7 +211,7 @@ export async function generateAdImages(opts = {}) {
       return Promise.race([
         generateImage({
           ...opts,
-          prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. Polished ad design with bold headline text and CTA elements clearly visible.`,
+          prompt: `${opts.prompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. No text, no words, no letters, no typography, no captions. Clean background visual only. Space for text overlay at the bottom third of the image.`,
           format,
         }),
         new Promise((_, reject) =>
