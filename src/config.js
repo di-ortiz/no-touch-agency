@@ -93,6 +93,9 @@ const envSchema = z.object({
   // fal.ai (Flux image generation)
   FAL_API_KEY: z.string().optional().default(''),
 
+  // Kimi 2.5 (Moonshot AI — image generation)
+  KIMI_API_KEY: z.string().optional().default(''),
+
   // Kling AI (image-to-video generation) — requires both Access Key + Secret Key for JWT auth
   KLING_ACCESS_KEY: z.string().optional().default(''),
   KLING_SECRET_KEY: z.string().optional().default(''),

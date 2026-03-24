@@ -49,6 +49,13 @@ const FORMAT_LABELS = {
   general:         'General (1024x1024)',
 };
 
+// Model cost map (cents per image)
+const MODEL_COSTS = {
+  'fal-ai/flux/schnell':    0.3,   // ~$0.003
+  'fal-ai/flux-pro/v1.1':   4.0,   // ~$0.04
+  'fal-ai/nanobanana-v2':    2.0,   // ~$0.02 (estimated)
+};
+
 /**
  * Call a single fal.ai model. Used internally by generateImage for racing.
  */
@@ -56,24 +63,29 @@ async function callFalModel(model, prompt, imageSize, format, opts) {
   return rateLimited('fal', async () => {
     log.info('Generating fal.ai image', { model, format, prompt: prompt?.slice(0, 100) });
 
+    // NanoBanana v2 may use different payload shape
+    const isNanoBanana = model.includes('nanobanana');
+    const payload = {
+      prompt,
+      image_size: imageSize,
+      num_images: 1,
+      enable_safety_checker: true,
+      output_format: 'jpeg',
+      ...(isNanoBanana
+        ? { guidance_scale: 5.0, num_inference_steps: 30 }
+        : { guidance_scale: model.includes('schnell') ? undefined : 3.5 }),
+    };
+
     const response = await axios.post(
       `${FAL_BASE}/${model}`,
-      {
-        prompt,
-        image_size: imageSize,
-        num_images: 1,
-        enable_safety_checker: true,
-        output_format: 'jpeg',
-        guidance_scale: model.includes('schnell') ? undefined : 3.5,
-      },
-      { headers: getHeaders(), timeout: 60000 },
+      payload,
+      { headers: getHeaders(), timeout: 90000 },
     );
 
     const image = response.data?.images?.[0];
     if (!image?.url) throw new Error(`No image URL returned from fal.ai (${model})`);
 
-    // Schnell ~$0.003, Pro ~$0.04
-    const cost = model.includes('schnell') ? 0.3 : 4.0;
+    const cost = MODEL_COSTS[model] || 4.0;
     recordCost({
       platform: 'fal',
       model,
@@ -118,15 +130,15 @@ export async function generateImage(opts = {}) {
     return callFalModel(opts.model, opts.prompt, imageSize, format, opts);
   }
 
-  // Race Flux Schnell (fast, ~5s) vs Flux Pro (quality, ~15-30s)
+  // Race Flux Schnell (fast, ~5s) vs Flux Pro (quality, ~15-30s) vs NanoBanana v2
   // Promise.any returns the FIRST to resolve — true racing
-  const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1'];
+  const models = ['fal-ai/flux/schnell', 'fal-ai/flux-pro/v1.1', 'fal-ai/nanobanana-v2'];
   try {
     return await Promise.any(
       models.map(model => callFalModel(model, opts.prompt, imageSize, format, opts))
     );
   } catch (aggError) {
-    // AggregateError — both models failed
+    // AggregateError — all models failed
     const firstError = aggError.errors?.[0];
     throw firstError || new Error('All fal.ai models failed');
   }
@@ -166,4 +178,24 @@ export async function generateAdImages(opts = {}) {
   return results;
 }
 
-export default { generateImage, generateAdImages, isConfigured };
+/**
+ * Generate an image using a specific fal.ai model (no racing).
+ * Used by the multi-candidate router to get distinct candidates from different models.
+ */
+export async function generateImageWithModel(model, opts = {}) {
+  if (!isConfigured()) throw new Error('FAL_API_KEY not configured');
+  const format = opts.format || 'general';
+  const imageSize = FORMAT_SIZE_MAP[format] || FORMAT_SIZE_MAP.general;
+  return callFalModel(model, opts.prompt, imageSize, format, opts);
+}
+
+/**
+ * List available fal.ai model keys for multi-candidate generation.
+ */
+export const FAL_MODELS = {
+  fluxSchnell:  'fal-ai/flux/schnell',
+  fluxPro:      'fal-ai/flux-pro/v1.1',
+  nanoBananaV2: 'fal-ai/nanobanana-v2',
+};
+
+export default { generateImage, generateImageWithModel, generateAdImages, isConfigured, FAL_MODELS };
