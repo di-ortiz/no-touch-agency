@@ -1,4 +1,5 @@
 import axios from 'axios';
+import jwt from 'jsonwebtoken';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
@@ -8,18 +9,38 @@ const log = logger.child({ platform: 'kling' });
 
 const KLING_BASE = 'https://api.klingai.com/v1';
 
+/**
+ * Generate a JWT token for Kling AI API authentication.
+ * Uses Access Key as issuer, signed with Secret Key via HMAC-SHA256.
+ * Token is valid for 30 minutes.
+ */
+function generateToken() {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: config.KLING_ACCESS_KEY,
+    exp: now + 1800, // 30 minutes
+    iat: now,
+    nbf: now - 5, // small clock skew tolerance
+  };
+
+  return jwt.sign(payload, config.KLING_SECRET_KEY, {
+    algorithm: 'HS256',
+    header: { alg: 'HS256', typ: 'JWT' },
+  });
+}
+
 function getHeaders() {
   return {
-    Authorization: `Bearer ${config.KLING_API_KEY}`,
+    Authorization: `Bearer ${generateToken()}`,
     'Content-Type': 'application/json',
   };
 }
 
 /**
- * Check if Kling AI is configured.
+ * Check if Kling AI is configured with both Access Key and Secret Key.
  */
 export function isConfigured() {
-  return !!config.KLING_API_KEY;
+  return !!(config.KLING_ACCESS_KEY && config.KLING_SECRET_KEY);
 }
 
 /**
@@ -36,7 +57,7 @@ export function isConfigured() {
  * @returns {object} { videoUrl, id, status, duration, aspectRatio }
  */
 export async function generateVideoFromImage(opts = {}) {
-  if (!isConfigured()) throw new Error('KLING_API_KEY not configured. Set it in Railway environment variables.');
+  if (!isConfigured()) throw new Error('Kling AI not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway environment variables.');
 
   const {
     imageUrl,

@@ -2078,7 +2078,7 @@ Return ONLY the JSON array, no other text.`;
 
     // --- Kling AI Video ---
     case 'generate_video_from_image': {
-      if (!klingApi.isConfigured()) return { error: 'KLING_API_KEY not configured. Set it in Railway environment variables to enable video generation.' };
+      if (!klingApi.isConfigured()) return { error: 'Kling AI not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway environment variables to enable video generation.' };
 
       const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
       const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;

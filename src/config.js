@@ -93,8 +93,9 @@ const envSchema = z.object({
   // fal.ai (Flux image generation)
   FAL_API_KEY: z.string().optional().default(''),
 
-  // Kling AI (image-to-video generation)
-  KLING_API_KEY: z.string().optional().default(''),
+  // Kling AI (image-to-video generation) — requires both Access Key + Secret Key for JWT auth
+  KLING_ACCESS_KEY: z.string().optional().default(''),
+  KLING_SECRET_KEY: z.string().optional().default(''),
 
   // App
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
