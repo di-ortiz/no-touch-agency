@@ -4,7 +4,7 @@ import logger from '../utils/logger.js';
 import { recordCost } from '../services/cost-tracker.js';
 import { rateLimited } from '../utils/rate-limiter.js';
 import { retry, isRetryableHttpError } from '../utils/retry.js';
-import { uploadImageFromUrl } from './google-drive.js';
+import { uploadFromUrl as uploadImageToStorage } from './supabase-storage.js';
 
 const log = logger.child({ platform: 'gemini' });
 
@@ -96,16 +96,16 @@ export async function generateImage(opts = {}) {
       const mimeType = predictions[0].mimeType || 'image/png';
       const dataUri = `data:${mimeType};base64,${base64}`;
 
-      // Upload base64 to Google Drive for a stable HTTPS URL (data: URIs break Kling video + WhatsApp link delivery)
+      // Upload base64 to Supabase Storage for a stable HTTPS URL (data: URIs break Kling video + WhatsApp link delivery)
       let hostedUrl = dataUri;
       try {
-        const driveResult = await uploadImageFromUrl(dataUri, `imagen3-${format}-${Date.now()}.png`);
-        if (driveResult?.webContentLink) {
-          hostedUrl = driveResult.webContentLink;
-          log.info('Imagen 3 image uploaded to Drive', { url: hostedUrl.slice(0, 80) });
+        const storageResult = await uploadImageToStorage(dataUri, `imagen3-${format}-${Date.now()}.png`, 'creatives');
+        if (storageResult?.url) {
+          hostedUrl = storageResult.url;
+          log.info('Imagen 3 image uploaded to Supabase', { url: hostedUrl.slice(0, 80) });
         }
       } catch (uploadErr) {
-        log.warn('Failed to upload Imagen 3 image to Drive, using data URI fallback', { error: uploadErr.message });
+        log.warn('Failed to upload Imagen 3 image to storage, using data URI fallback', { error: uploadErr.message });
       }
 
       const dims = ASPECT_DIMENSIONS[aspectRatio] || ASPECT_DIMENSIONS['1:1'];

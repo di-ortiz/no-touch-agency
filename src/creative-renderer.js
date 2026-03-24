@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import logger from './utils/logger.js';
-import * as googleDrive from './api/google-drive.js';
+import * as supaStorage from './api/supabase-storage.js';
 import { renderTemplateHtml, selectTemplate, getTemplateNames } from './services/template-engine.js';
 
 const log = logger.child({ workflow: 'creative-renderer' });
@@ -84,13 +84,15 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
     // Try puppeteer (bundled browser) first, then puppeteer-core with system chromium
     let puppeteer;
+    let isPuppeteerCore = false;
     try {
       puppeteer = await import('puppeteer');
     } catch {
       puppeteer = await import('puppeteer-core');
+      isPuppeteerCore = true;
     }
 
-    // Find system chromium path for puppeteer-core
+    // Find system chromium path
     const chromePaths = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
       '/usr/bin/chromium-browser',
@@ -104,18 +106,22 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
       headless: 'new',
     };
 
-    // If using puppeteer-core, we need to specify executablePath
     for (const chromePath of chromePaths) {
-      try {
-        const { existsSync } = await import('fs');
-        if (existsSync(chromePath)) {
-          launchOpts.executablePath = chromePath;
-          break;
-        }
-      } catch { /* continue */ }
+      if (fs.existsSync(chromePath)) {
+        launchOpts.executablePath = chromePath;
+        break;
+      }
     }
 
-    browser = await puppeteer.default.launch(launchOpts);
+    // puppeteer-core requires an explicit executablePath — fail clearly if missing
+    if (isPuppeteerCore && !launchOpts.executablePath) {
+      throw new Error(
+        'No Chromium browser found. Set PUPPETEER_EXECUTABLE_PATH or install chromium in the container. ' +
+        'Template rendering requires a browser to capture screenshots.'
+      );
+    }
+
+    browser = await (puppeteer.default || puppeteer).launch(launchOpts);
 
     const page = await browser.newPage();
     await page.setViewport({ width, height });
@@ -137,25 +143,21 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
     log.info('Puppeteer screenshot captured', { format, size: screenshotBuffer.length });
 
-    // Upload to Google Drive
+    // Upload to Supabase Storage
     let result = { format, width, height };
 
-    if (opts.driveFolderId) {
+    if (opts.driveFolderId && supaStorage.isConfigured()) {
       try {
         const fileName = `ad-creative-${format}-${timestamp}.png`;
-        const driveFile = await googleDrive.uploadFile({
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: screenshotBuffer,
-          folderId: opts.driveFolderId,
-        });
+        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
 
-        if (driveFile?.webContentLink) {
-          result.url = driveFile.webContentLink;
-          result.driveId = driveFile.id;
+        if (uploaded?.url) {
+          result.url = uploaded.url;
+          result.driveId = uploaded.path;
         }
       } catch (e) {
-        log.warn('Drive upload failed for rendered creative', { error: e.message });
+        log.warn('Supabase upload failed for rendered creative', { error: e.message });
       }
     }
 
@@ -314,10 +316,12 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
     fs.writeFileSync(tmpPath, html, 'utf-8');
 
     let puppeteer;
+    let isPuppeteerCore = false;
     try {
       puppeteer = await import('puppeteer');
     } catch {
       puppeteer = await import('puppeteer-core');
+      isPuppeteerCore = true;
     }
 
     const chromePaths = [
@@ -334,15 +338,20 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
     };
 
     for (const chromePath of chromePaths) {
-      try {
-        if (fs.existsSync(chromePath)) {
-          launchOpts.executablePath = chromePath;
-          break;
-        }
-      } catch { /* continue */ }
+      if (fs.existsSync(chromePath)) {
+        launchOpts.executablePath = chromePath;
+        break;
+      }
     }
 
-    browser = await puppeteer.default.launch(launchOpts);
+    if (isPuppeteerCore && !launchOpts.executablePath) {
+      throw new Error(
+        'No Chromium browser found. Set PUPPETEER_EXECUTABLE_PATH or install chromium in the container. ' +
+        'Template rendering requires a browser to capture screenshots.'
+      );
+    }
+
+    browser = await (puppeteer.default || puppeteer).launch(launchOpts);
     const page = await browser.newPage();
     await page.setViewport({ width, height });
     await page.goto(`file://${tmpPath}`, { waitUntil: 'networkidle0', timeout: 30000 });
@@ -362,21 +371,17 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
 
     let result = { format, width, height, templateName: resolvedName };
 
-    if (opts.driveFolderId) {
+    if (opts.driveFolderId && supaStorage.isConfigured()) {
       try {
         const fileName = `template-${resolvedName}-${format}-${timestamp}.png`;
-        const driveFile = await googleDrive.uploadFile({
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: screenshotBuffer,
-          folderId: opts.driveFolderId,
-        });
-        if (driveFile?.webContentLink) {
-          result.url = driveFile.webContentLink;
-          result.driveId = driveFile.id;
+        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
+        if (uploaded?.url) {
+          result.url = uploaded.url;
+          result.driveId = uploaded.path;
         }
       } catch (e) {
-        log.warn('Drive upload failed for template creative', { error: e.message });
+        log.warn('Supabase upload failed for template creative', { error: e.message });
       }
     }
 

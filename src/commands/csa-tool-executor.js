@@ -690,7 +690,8 @@ Return ONLY the JSON array, no other text.`;
           industry: client?.industry || brandDNA?.industry,
         };
 
-        const targetFormats = formats || (creativeEngine.PLATFORM_SPECS[toolInput.platform]?.imageFormats) || ['general'];
+        const platformSpecs = creativeEngine.default?.PLATFORM_SPECS || creativeEngine.PLATFORM_SPECS || {};
+        const targetFormats = formats || (platformSpecs[toolInput.platform]?.imageFormats) || ['general'];
         const qualityResults = await Promise.allSettled(
           targetFormats.map(format =>
             generateAndValidate({
