@@ -194,7 +194,7 @@ const CSA_TOOLS = [
   },
   {
     name: 'generate_ad_video',
-    description: 'Generate a short ad video using Sora 2 AI. Creates a professional advertising video clip (4-12 seconds) in the right aspect ratio for the platform.',
+    description: 'Generate a short ad video using Sora 2 AI (auto-falls back to Kling AI if Sora is rate-limited). Creates a professional advertising video clip (4-12 seconds). IMPORTANT: If the user sends a photo/image and wants a video from it, prefer generate_video_from_image instead — it uses Kling AI image-to-video which is more reliable and actually uses the photo.',
     input_schema: { type: 'object', properties: { clientName: { type: 'string', description: 'Client name' }, concept: { type: 'string', description: 'Video concept — what should happen in the video' }, platform: { type: 'string', enum: ['meta_feed', 'meta_story', 'instagram_feed', 'instagram_story', 'tiktok', 'youtube', 'google_display'], description: 'Platform/format for aspect ratio' }, duration: { type: 'number', description: 'Duration in seconds (4, 8, or 12)' }, offer: { type: 'string', description: 'Product/offer to feature (optional)' } }, required: ['clientName', 'concept'] },
   },
   {
