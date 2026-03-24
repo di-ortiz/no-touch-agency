@@ -41,6 +41,7 @@ import * as campaignRecord from '../services/campaign-record.js';
 import * as agencyAnalytics from '../api/agency-analytics.js';
 import * as brandDNA from '../brand-dna.js';
 import * as klingApi from '../api/kling.js';
+import * as falApi from '../api/fal.js';
 import * as creativeRenderer from '../creative-renderer.js';
 import { pendingApprovals, landingPageStore, getPublicUrl, SLOW_TOOLS, SLOW_TOOL_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_MS } from './helpers.js';
 import crypto from 'crypto';
@@ -2163,39 +2164,106 @@ Return ONLY the JSON array, no other text.`;
       };
     }
 
-    // --- Kling AI Video ---
+    // --- Image-to-Video (fal.ai Kling → direct Kling → Sora fallback) ---
     case 'generate_video_from_image': {
-      if (!klingApi.isConfigured()) return { error: 'Kling AI not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway environment variables to enable video generation.' };
       if (!toolInput.imageUrl) return { error: 'imageUrl is required. When the user uploads a photo, the image URL is provided in a [SYSTEM: ...] tag in the message. Look for it and pass it as imageUrl.' };
-
-      log.info('Kling video generation starting', { imageUrl: (toolInput.imageUrl || '').slice(0, 80), clientName: toolInput.clientName });
 
       const client = toolInput.clientName ? getClient(toolInput.clientName) : null;
       const clientBrandDNA = client ? brandDNA.loadBrandDNA(client.id) : null;
+      const brandName = clientBrandDNA?.business_name || toolInput.clientName || 'the brand';
+      const motionPrompt = toolInput.prompt
+        ? `${toolInput.prompt}. Smooth, professional motion. Keep movement natural.`
+        : `Animate this image naturally for a professional ad for ${brandName}. Smooth camera movement, attractive motion.`;
+      const ar = toolInput.aspectRatio || '9:16';
+      const dur = toolInput.duration || 5;
 
-      try {
-        const result = await klingApi.generateBrandedVideo({
-          imageUrl: toolInput.imageUrl,
-          brandDNA: clientBrandDNA,
-          userInstruction: toolInput.prompt || '',
-          aspectRatio: toolInput.aspectRatio || '9:16',
-          clientId: client?.id,
-        });
+      log.info('Video from image starting', { imageUrl: (toolInput.imageUrl || '').slice(0, 80), clientName: toolInput.clientName });
 
-        log.info('Kling video generation completed', { videoUrl: result.videoUrl?.slice(0, 80), taskId: result.id });
+      // Provider 1: fal.ai Kling (most reliable, has credits)
+      if (falApi.isConfigured()) {
+        try {
+          log.info('Trying fal.ai Kling for video generation');
+          const result = await falApi.generateVideoFromImage({
+            imageUrl: toolInput.imageUrl,
+            prompt: motionPrompt,
+            duration: dur,
+            aspectRatio: ar,
+            workflow: 'branded-video-generation',
+            clientId: client?.id,
+          });
 
-        return {
-          clientName: client?.name || null,
-          videoUrl: result.videoUrl,
-          duration: result.duration,
-          aspectRatio: result.aspectRatio,
-          status: result.status,
-          taskId: result.id,
-        };
-      } catch (e) {
-        log.error('Kling video generation failed', { error: e.message, imageUrl: (toolInput.imageUrl || '').slice(0, 80) });
-        return { error: `Video generation failed: ${e.message}` };
+          log.info('fal.ai Kling video completed', { videoUrl: result.videoUrl?.slice(0, 80), id: result.id });
+          return {
+            clientName: client?.name || toolInput.clientName || null,
+            videoUrl: result.videoUrl,
+            duration: result.duration,
+            aspectRatio: result.aspectRatio,
+            status: result.status,
+            taskId: result.id,
+            provider: 'fal-kling',
+          };
+        } catch (e) {
+          log.warn('fal.ai Kling video failed, trying next provider', { error: e.message });
+        }
       }
+
+      // Provider 2: Direct Kling API
+      if (klingApi.isConfigured()) {
+        try {
+          log.info('Trying direct Kling API for video generation');
+          const result = await klingApi.generateBrandedVideo({
+            imageUrl: toolInput.imageUrl,
+            brandDNA: clientBrandDNA,
+            userInstruction: toolInput.prompt || '',
+            aspectRatio: ar,
+            clientId: client?.id,
+          });
+
+          log.info('Direct Kling video completed', { videoUrl: result.videoUrl?.slice(0, 80), taskId: result.id });
+          return {
+            clientName: client?.name || toolInput.clientName || null,
+            videoUrl: result.videoUrl,
+            duration: result.duration,
+            aspectRatio: result.aspectRatio,
+            status: result.status,
+            taskId: result.id,
+            provider: 'kling-direct',
+          };
+        } catch (e) {
+          log.warn('Direct Kling video failed', { error: e.message });
+        }
+      }
+
+      // Provider 3: Sora 2 (text-to-video, cannot use user's photo directly)
+      if (config.OPENAI_API_KEY) {
+        try {
+          log.info('Trying Sora 2 for video generation (text-to-video fallback)');
+          const { generateVideo } = await import('../api/openai-media.js');
+          const result = await generateVideo({
+            prompt: `${motionPrompt} The video shows a person presenting a professional offer directly to camera.`,
+            duration: Math.min(dur, 8),
+            aspectRatio: ar,
+            workflow: 'branded-video-sora-fallback',
+            clientId: client?.id,
+          });
+
+          log.info('Sora 2 video completed', { videoUrl: result.videoUrl?.slice(0, 80), id: result.id });
+          return {
+            clientName: client?.name || toolInput.clientName || null,
+            videoUrl: result.videoUrl,
+            duration: result.duration,
+            aspectRatio: result.aspectRatio || ar,
+            status: result.status,
+            taskId: result.id,
+            provider: 'sora-2',
+            note: 'Generated via Sora 2 (image-to-video providers were unavailable). The video may not use the exact uploaded photo.',
+          };
+        } catch (e) {
+          log.warn('Sora 2 video also failed', { error: e.message });
+        }
+      }
+
+      return { error: 'All video providers failed (fal.ai Kling, direct Kling, Sora 2). Please try again in a few minutes or check API credits.' };
     }
 
     // --- Template Overlay Creative ---

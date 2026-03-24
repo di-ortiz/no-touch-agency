@@ -494,7 +494,7 @@ const CSA_TOOLS = [
   // --- Kling AI Video Generation ---
   {
     name: 'generate_video_from_image',
-    description: 'Generate a short animated video from a static image using Kling AI. Transforms product photos or ad visuals into eye-catching video ads. Takes 30-60 seconds. Default format is Stories/Reels (9:16). Use when the user sends a photo and asks to "fazer vídeo", "animar foto", "criar vídeo do produto", or "transforma em vídeo".',
+    description: 'Generate a short animated video from a static image. Tries fal.ai Kling → direct Kling → Sora 2 fallback. Transforms user photos into eye-catching video ads. Takes 30-90 seconds. Default format is Stories/Reels (9:16). Use when the user sends a photo and asks to "fazer vídeo", "animar foto", "criar vídeo do produto", "transforma em vídeo", or "video of me".',
     input_schema: { type: 'object', properties: { imageUrl: { type: 'string', description: 'URL of the source image to animate' }, prompt: { type: 'string', description: 'Motion prompt describing desired animation (e.g. "Camera slowly zooms in, product rotates gently")' }, clientName: { type: 'string', description: 'Client name (for brand-aware motion prompt)' }, aspectRatio: { type: 'string', enum: ['9:16', '16:9', '1:1'], description: 'Aspect ratio: 9:16 (Stories/Reels), 16:9 (Feed/Landscape), 1:1 (Square). Default: 9:16' }, duration: { type: 'number', description: 'Duration in seconds (5 or 10). Default: 5' } }, required: ['imageUrl'] },
   },
   // --- Template Overlay Creative ---

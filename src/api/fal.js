@@ -198,4 +198,137 @@ export const FAL_MODELS = {
   nanoBananaV2: 'fal-ai/nanobanana-v2',
 };
 
-export default { generateImage, generateImageWithModel, generateAdImages, isConfigured, FAL_MODELS };
+// ============================================================
+// Kling Video Generation via fal.ai (image-to-video)
+// ============================================================
+
+const KLING_VIDEO_MODEL = 'fal-ai/kling-video/v2/master/image-to-video';
+const KLING_VIDEO_COST_CENTS = 20; // ~$0.20 per video via fal.ai
+
+/**
+ * Generate a video from a static image using Kling AI via fal.ai.
+ * Uses the queue API for long-running video generation.
+ *
+ * @param {object} opts
+ * @param {string} opts.imageUrl - URL of the source image
+ * @param {string} opts.prompt - Motion/animation prompt
+ * @param {number} opts.duration - Duration in seconds (5 or 10, default: 5)
+ * @param {string} opts.aspectRatio - '9:16', '16:9', '1:1' (default: '9:16')
+ * @param {string} opts.workflow - Workflow name for cost tracking
+ * @param {string} opts.clientId - Client ID for cost tracking
+ * @returns {object} { videoUrl, id, status, duration, aspectRatio }
+ */
+export async function generateVideoFromImage(opts = {}) {
+  if (!isConfigured()) throw new Error('FAL_API_KEY not configured');
+
+  const {
+    imageUrl,
+    prompt,
+    duration = 5,
+    aspectRatio = '9:16',
+    workflow = 'video-generation',
+    clientId,
+  } = opts;
+
+  if (!imageUrl) throw new Error('imageUrl is required');
+  if (!prompt) throw new Error('prompt is required');
+
+  log.info('Starting Kling video via fal.ai', {
+    model: KLING_VIDEO_MODEL,
+    imageUrl: imageUrl.slice(0, 80),
+    prompt: prompt.slice(0, 100),
+    duration,
+    aspectRatio,
+  });
+
+  // Step 1: Submit to fal.ai queue
+  const submitResponse = await rateLimited('fal', async () => {
+    return axios.post(
+      `${FAL_QUEUE}/${KLING_VIDEO_MODEL}`,
+      {
+        image_url: imageUrl,
+        prompt,
+        duration: String(duration),
+        aspect_ratio: aspectRatio,
+      },
+      { headers: getHeaders(), timeout: 30000 },
+    );
+  });
+
+  const requestId = submitResponse.data?.request_id;
+  if (!requestId) {
+    log.error('fal.ai Kling did not return request_id', { response: JSON.stringify(submitResponse.data).slice(0, 300) });
+    throw new Error('fal.ai Kling did not return a request ID');
+  }
+
+  log.info('fal.ai Kling video queued', { requestId });
+
+  // Step 2: Poll for completion
+  const POLL_INTERVAL_MS = 5000;
+  const MAX_WAIT_MS = 180000; // 3 minutes
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < MAX_WAIT_MS) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+
+    try {
+      const statusResponse = await axios.get(
+        `${FAL_QUEUE}/${KLING_VIDEO_MODEL}/requests/${requestId}/status`,
+        { headers: getHeaders(), timeout: 15000 },
+      );
+
+      const status = statusResponse.data?.status;
+      log.info('fal.ai Kling polling', { requestId, status, elapsed: `${elapsed}s` });
+
+      if (status === 'COMPLETED') {
+        // Fetch result
+        const resultResponse = await axios.get(
+          `${FAL_QUEUE}/${KLING_VIDEO_MODEL}/requests/${requestId}`,
+          { headers: getHeaders(), timeout: 15000 },
+        );
+
+        const videoUrl = resultResponse.data?.video?.url;
+        if (!videoUrl) {
+          throw new Error('fal.ai Kling completed but no video URL returned');
+        }
+
+        recordCost({
+          platform: 'fal',
+          model: KLING_VIDEO_MODEL,
+          workflow,
+          clientId,
+          costCentsOverride: KLING_VIDEO_COST_CENTS,
+          metadata: { duration, aspectRatio, requestId },
+        });
+
+        log.info('fal.ai Kling video generated', { requestId, videoUrl: videoUrl.slice(0, 80), elapsed: `${elapsed}s` });
+
+        return {
+          videoUrl,
+          id: requestId,
+          status: 'completed',
+          duration,
+          aspectRatio,
+          provider: 'fal-kling',
+        };
+      }
+
+      if (status === 'FAILED') {
+        const errorMsg = statusResponse.data?.error || 'Unknown error';
+        log.error('fal.ai Kling video failed', { requestId, error: errorMsg });
+        throw new Error(`fal.ai Kling video generation failed: ${errorMsg}`);
+      }
+
+      // IN_QUEUE or IN_PROGRESS — keep polling
+    } catch (e) {
+      if (e.message.includes('failed') || e.message.includes('FAILED')) throw e;
+      log.warn('fal.ai Kling poll error, retrying', { error: e.message, elapsed: `${elapsed}s` });
+    }
+  }
+
+  throw new Error(`fal.ai Kling video generation timed out after ${MAX_WAIT_MS / 1000}s`);
+}
+
+export default { generateImage, generateImageWithModel, generateAdImages, generateVideoFromImage, isConfigured, FAL_MODELS };
