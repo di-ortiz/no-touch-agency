@@ -172,9 +172,9 @@ export async function generateVideo(opts = {}) {
         model: 'gpt-image-1',
         prompt: opts.prompt,
         n: 1,
-        size: opts.aspectRatio === '9:16' ? '1024x1792'
+        size: opts.aspectRatio === '9:16' ? '1024x1536'
           : opts.aspectRatio === '1:1' ? '1024x1024'
-          : '1792x1024',
+          : '1536x1024',
         quality: 'high',
       });
 
