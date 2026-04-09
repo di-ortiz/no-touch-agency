@@ -23,6 +23,7 @@ const limiters = {
   fal: new PQueue({ concurrency: 6, interval: 1000, intervalCap: 6 }),
   kimi: new PQueue({ concurrency: 3, interval: 1000, intervalCap: 3 }),
   kling: new PQueue({ concurrency: 2, interval: 1000, intervalCap: 2 }),
+  supabase: new PQueue({ concurrency: 5, interval: 1000, intervalCap: 5 }),
 };
 
 /**
