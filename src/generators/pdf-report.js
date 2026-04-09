@@ -46,6 +46,7 @@ DESIGN RULES:
 - Use colored section headers with the brand primary color
 - Add a footer on each page with the brand name and date
 - Page size: A4 portrait
+- CRITICAL IMAGE RULE: ONLY use <img> tags with URLs that are explicitly provided in the IMAGE ASSETS section below. NEVER invent, guess, or hallucinate image URLs. If no image URL is provided for a post/section, use a colored placeholder div with an icon emoji instead (e.g., a branded colored box with 📸 or 🎨). Do NOT use src="Carousel" or src="Reel" or any non-URL value.
 - DO NOT use JavaScript — only HTML + CSS
 
 Return ONLY the complete HTML document starting with <!DOCTYPE html>. No markdown, no explanation.`,
