@@ -205,16 +205,16 @@ export async function generateImagePrompt(opts = {}) {
 
   // Add platform-specific guidance
   const platformGuide = {
-    meta: 'Design a scroll-stopping Meta Feed ad visual — landscape/square with a powerful hero image, bold brand colors, and clean space for text overlay. Must look like a professional paid social ad, not a stock photo.',
-    instagram: 'Design a visually stunning Instagram ad visual — square or vertical format with striking composition, strong brand colors, and intentional copy space. Should look like a polished brand visual from a top company.',
-    google: 'Design a Google Display ad visual — bold, simple composition with high contrast and strong visual hierarchy. Needs to work at small sizes. Leave clean space for text overlay.',
-    tiktok: 'Design a TikTok ad visual — vertical format, energetic, authentic feel with bold colors and dynamic composition. Leave space for text overlay.',
+    meta: 'Design a scroll-stopping Meta Feed ad visual — landscape/square with a powerful hero image and clean space for text overlay at the bottom. Use brand colors prominently in the composition. ABSOLUTELY NO text, words, headlines, buttons, screens, or UI elements.',
+    instagram: 'Design a visually stunning Instagram ad visual — square format with striking composition and intentional copy space. Feature brand colors as accents and dominant elements. ABSOLUTELY NO text, words, headlines, buttons, screens, or UI elements.',
+    google: 'Design a Google Display ad visual — bold, simple composition with high contrast. Needs to work at small sizes. Leave clean space for text overlay. ABSOLUTELY NO text, words, headlines, buttons, screens, or UI elements.',
+    tiktok: 'Design a TikTok ad visual — vertical format, energetic, authentic feel with bold brand colors. Leave space for text overlay. ABSOLUTELY NO text, words, headlines, buttons, screens, or UI elements.',
   };
   if (platformGuide[opts.platform]) briefSections.push(`PLATFORM GUIDANCE: ${platformGuide[opts.platform]}`);
 
   // Fallback defaults if minimal info provided
   if (!opts.concept && !opts.style && !opts.mood) {
-    briefSections.push(`CREATIVE DIRECTION: Create a scroll-stopping, professional ad visual with a compelling hero element and strong brand feel. This must look like a real paid social media ad — not a stock photo. Choose an appropriate style based on the industry and brand. Leave clean space for text overlay.`);
+    briefSections.push(`CREATIVE DIRECTION: Create a visually compelling hero-driven background scene. Use brand colors prominently — they should be integrated into accents, backgrounds, or key elements. For tech/SaaS: use abstract geometric shapes, flowing gradients, light trails, professional environments. For physical products: use lifestyle photography with the product as hero. Leave clean space at the bottom third for text overlay. ABSOLUTELY NO text, no logos, no words of any kind.`);
   }
 
   const response = await askClaude({
