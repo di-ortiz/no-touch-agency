@@ -201,6 +201,8 @@ export async function generateImage(opts = {}) {
           result = await fal.generateImage({
             prompt: opts.prompt,
             format: opts.format || 'general',
+            mode: opts.mode || 'standard',
+            seed: opts.seed,
             workflow: opts.workflow,
             clientId: opts.clientId,
           });

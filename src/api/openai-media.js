@@ -124,7 +124,7 @@ export async function generateAdImages(opts = {}) {
     try {
       const dims = AD_DIMENSIONS[format] || AD_DIMENSIONS.general;
       // Adapt prompt for the specific format
-      const formatPrompt = `${opts.prompt}. This is a ${dims.label} ad creative. The image should be perfectly composed for ${dims.width}x${dims.height} pixels. Professional advertising quality, polished design with bold headline text and CTA elements clearly visible.`;
+      const formatPrompt = `${opts.prompt}. This is a ${dims.label} ad creative composed for ${dims.width}x${dims.height} pixels. Professional advertising quality, clean composition. CRITICAL: No text, no words, no letters, no logos, no UI elements. Pure visual scene with clean space for text overlay.`;
 
       const image = await generateImage({
         ...opts,

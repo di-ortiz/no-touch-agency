@@ -35,8 +35,10 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
   const cta = escapeHtml(adCopy?.cta || '');
   const ctaColor = brandDNA?.primary_colors?.[0] || '#FF4500';
 
-  // Use brand font if available, fallback to safe system fonts
-  const brandFont = brandDNA?.fonts?.[0] || 'Inter';
+  // Use brand font if available — validate it's likely a Google Font
+  const KNOWN_GOOGLE_FONTS = ['Inter', 'Montserrat', 'Poppins', 'Roboto', 'Open Sans', 'Lato', 'Raleway', 'Nunito', 'Playfair Display', 'Oswald', 'Source Sans Pro', 'Merriweather', 'Ubuntu', 'Rubik', 'Work Sans', 'Barlow', 'DM Sans', 'Manrope', 'Space Grotesk', 'Plus Jakarta Sans', 'Outfit', 'Sora', 'Lexend', 'Figtree'];
+  const rawBrandFont = brandDNA?.fonts?.[0];
+  const brandFont = (rawBrandFont && KNOWN_GOOGLE_FONTS.some(f => f.toLowerCase() === rawBrandFont.toLowerCase())) ? rawBrandFont : 'Inter';
   const fontFamily = `'${brandFont}', Arial, Helvetica, sans-serif`;
 
   // Build Google Fonts link for brand font
@@ -44,15 +46,18 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
     ? `<link href="${brandDNA.google_fonts_url}" rel="stylesheet">`
     : `<link href="https://fonts.googleapis.com/css2?family=${encodeURIComponent(brandFont)}:wght@400;600;700;800;900&display=swap" rel="stylesheet">`;
 
-  // Logo overlay
+  // Logo overlay with error logging
   const logoUrl = brandDNA?.logo_url || brandDNA?.favicon_url;
   const logoHtml = logoUrl
-    ? `<img src="${escapeHtml(logoUrl)}" style="position:absolute;top:40px;left:50px;max-height:50px;max-width:160px;object-fit:contain;z-index:10;" onerror="this.style.display='none'" />`
+    ? `<img src="${escapeHtml(logoUrl)}" style="position:absolute;top:40px;left:50px;max-height:50px;max-width:160px;object-fit:contain;z-index:10;" onerror="console.error('Logo failed:', this.src); this.style.display='none'" />`
     : '';
 
-  // Adjust text positioning for story format (vertical center-bottom)
+  // Responsive text sizing — shrink for long text
+  const headlineLen = headline.length;
   const textBottom = isStory ? '200px' : '60px';
-  const headlineSize = isStory ? '54px' : '48px';
+  const headlineSize = isStory
+    ? (headlineLen > 40 ? '44px' : headlineLen > 25 ? '48px' : '54px')
+    : (headlineLen > 40 ? '36px' : headlineLen > 25 ? '42px' : '48px');
   const subtextSize = isStory ? '32px' : '28px';
   const gradientHeight = isStory ? '50%' : '45%';
 

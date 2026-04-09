@@ -223,12 +223,13 @@ async function submitAndPoll(model, payload, opts = {}) {
  * Build the correct payload per model.
  * Each model has slightly different param names/shapes.
  */
-function buildImagePayload(model, prompt, imageSize) {
+function buildImagePayload(model, prompt, imageSize, opts = {}) {
   const base = {
     prompt,
     num_images: 1,
     enable_safety_checker: true,
     output_format: 'jpeg',
+    ...(opts.seed != null && { seed: opts.seed }),
   };
 
   switch (model) {
@@ -243,7 +244,7 @@ function buildImagePayload(model, prompt, imageSize) {
       return {
         ...base,
         image_size: imageSize,
-        guidance_scale: 3.5,
+        guidance_scale: 7.5,
         num_inference_steps: 28,
         safety_tolerance: '2',
       };
@@ -252,23 +253,25 @@ function buildImagePayload(model, prompt, imageSize) {
       return {
         ...base,
         image_size: imageSize,
-        guidance_scale: 5.0,
-        num_inference_steps: 20,  // nano-banana is optimised for speed at 20 steps
+        guidance_scale: 7.5,
+        num_inference_steps: 20,
+        safety_tolerance: '2',
       };
 
     case 'fal-ai/flux-2-flex':
       return {
         ...base,
         image_size: imageSize,
-        guidance_scale: 3.5,
+        guidance_scale: 8.5,       // highest guidance for best text rendering
         num_inference_steps: 28,
+        safety_tolerance: '2',
       };
 
     default:
       return {
         ...base,
         image_size: imageSize,
-        guidance_scale: 3.5,
+        guidance_scale: 7.5,
         num_inference_steps: 28,
       };
   }
@@ -281,7 +284,7 @@ async function callFalModel(model, prompt, imageSize, format, opts) {
   return rateLimited('fal', async () => {
     log.info('Generating fal.ai image', { model, format, prompt: prompt?.slice(0, 100) });
 
-    const payload = buildImagePayload(model, prompt, imageSize);
+    const payload = buildImagePayload(model, prompt, imageSize, opts);
 
     const response = await axios.post(
       `${FAL_BASE}/${model}`,

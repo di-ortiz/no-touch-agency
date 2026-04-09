@@ -306,21 +306,36 @@ Return ONLY a JSON object with this structure:
 }
 
 /**
- * Fallback scoring when Claude Vision fails — return first candidate with neutral score.
+ * Fallback scoring when Claude Vision fails — differentiate by provider quality tier.
  */
 function fallbackScoring(candidates) {
-  const scored = candidates.map((c, i) => ({
-    ...c,
-    qualityScore: 50,
-    qualityBreakdown: { composition: 12, brandFit: 12, scrollStopping: 13, textOverlayReady: 13 },
-    reasoning: 'Quality validation unavailable — default score assigned',
-    improvementHint: null,
-  }));
+  const providerScores = {
+    'dalle': 65,
+    'fal': 60,
+    'gemini': 58,
+    'kimi': 55,
+  };
+
+  const scored = candidates.map((c) => {
+    const providerKey = (c.providerKey || c.provider || '').toLowerCase();
+    const baseScore = providerScores[providerKey] || 55;
+    return {
+      ...c,
+      qualityScore: baseScore,
+      qualityBreakdown: { composition: Math.round(baseScore / 4), brandFit: Math.round(baseScore / 4), scrollStopping: Math.round(baseScore / 4), textOverlayReady: Math.round(baseScore / 4) },
+      reasoning: 'Quality validation unavailable — provider-tier score assigned',
+      improvementHint: null,
+    };
+  });
+
+  scored.sort((a, b) => b.qualityScore - a.qualityScore);
+
+  const avgScore = scored.length > 0 ? Math.round(scored.reduce((sum, s) => sum + s.qualityScore, 0) / scored.length) : 0;
 
   return {
     scored,
     best: scored[0] || null,
-    avgScore: 50,
+    avgScore,
     competitorBenchmarkScore: 0,
   };
 }
@@ -347,7 +362,7 @@ function fallbackScoring(candidates) {
  * @returns {object} Best image with quality scores attached
  */
 export async function generateAndValidate(opts = {}) {
-  const { qualityThreshold = 60, maxRetries = 1 } = opts;
+  const { qualityThreshold = 70, maxRetries = 1 } = opts;
   const { generateMultiCandidateImage } = await import('../api/image-router.js');
 
   let currentPrompt = opts.prompt;
@@ -397,12 +412,21 @@ export async function generateAndValidate(opts = {}) {
 
     // Step 3: Check if best candidate meets quality threshold
     if (scoreResult.best && scoreResult.best.qualityScore >= qualityThreshold) {
-      log.info('Quality threshold met', {
-        score: scoreResult.best.qualityScore,
-        threshold: qualityThreshold,
-        provider: scoreResult.best.providerName || scoreResult.best.provider,
-        attempt,
-      });
+      const isMarginal = scoreResult.best.qualityScore < qualityThreshold + 10;
+      if (isMarginal) {
+        log.warn('Quality threshold met but marginal', {
+          score: scoreResult.best.qualityScore,
+          threshold: qualityThreshold,
+          provider: scoreResult.best.providerName || scoreResult.best.provider,
+        });
+      } else {
+        log.info('Quality threshold met', {
+          score: scoreResult.best.qualityScore,
+          threshold: qualityThreshold,
+          provider: scoreResult.best.providerName || scoreResult.best.provider,
+          attempt,
+        });
+      }
       return {
         ...scoreResult.best,
         wasRegenerated: attempt > 1,

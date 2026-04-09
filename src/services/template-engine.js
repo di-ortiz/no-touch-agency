@@ -441,14 +441,27 @@ function parseColors(brandDNA) {
 /**
  * Choose a font: prefer brand's actual font from DNA, fallback to tone-based selection.
  */
+// Common Google Fonts — used to validate brand fonts before constructing CSS links
+const KNOWN_GOOGLE_FONTS = ['Inter', 'Montserrat', 'Poppins', 'Roboto', 'Open Sans', 'Lato', 'Raleway', 'Nunito', 'Playfair Display', 'Oswald', 'Source Sans Pro', 'Merriweather', 'Ubuntu', 'Rubik', 'Work Sans', 'Barlow', 'DM Sans', 'Manrope', 'Space Grotesk', 'Plus Jakarta Sans', 'Outfit', 'Sora', 'Lexend', 'Figtree', 'Noto Sans', 'PT Sans', 'Quicksand', 'Mulish', 'Kanit', 'Exo 2'];
+
+function isKnownGoogleFont(fontName) {
+  return KNOWN_GOOGLE_FONTS.some(f => f.toLowerCase() === fontName.toLowerCase());
+}
+
+/**
+ * Choose a font: prefer brand's actual font if it's a valid Google Font, fallback to tone-based.
+ */
 function chooseFont(brandDNA) {
-  // If brand DNA has actual detected fonts from the website, use the first one
   if (brandDNA?.fonts?.length > 0) {
-    return brandDNA.fonts[0];
+    const brandFont = brandDNA.fonts[0];
+    if (isKnownGoogleFont(brandFont)) return brandFont;
+    log.warn('Brand font not in Google Fonts whitelist, using fallback', { font: brandFont });
   }
   const tone = (brandDNA?.tone_of_voice || '').toLowerCase();
-  if (tone.includes('premium') || tone.includes('luxury') || tone.includes('elegant')) return 'Montserrat';
-  if (tone.includes('friendly') || tone.includes('casual') || tone.includes('warm')) return 'Poppins';
+  if (/premium|luxury|elegant|sophisticated|high.?end/.test(tone)) return 'Montserrat';
+  if (/friendly|casual|warm|approachable|fun/.test(tone)) return 'Poppins';
+  if (/bold|strong|impact|powerful|direct/.test(tone)) return 'Oswald';
+  if (/modern|clean|minimal|sleek|tech/.test(tone)) return 'DM Sans';
   return 'Inter';
 }
 
@@ -460,11 +473,11 @@ function buildFontsLink(brandDNA) {
   const extraFontsLink = brandDNA?.google_fonts_url
     ? `<link href="${brandDNA.google_fonts_url}" rel="stylesheet">`
     : '';
-  // Also load brand fonts by name if they're known Google Fonts families
-  const brandFonts = brandDNA?.fonts || [];
+  // Also load brand fonts by name — only if they're valid Google Fonts
+  const brandFonts = (brandDNA?.fonts || []).filter(isKnownGoogleFont);
   const brandFontFamilies = brandFonts
-    .filter(f => !['Inter', 'Montserrat', 'Poppins'].includes(f)) // skip already loaded
-    .map(f => `family=${encodeURIComponent(f)}:wght@400;600;700;800;900`)
+    .filter(f => !['Inter', 'Montserrat', 'Poppins'].includes(f))
+    .map(f => `family=${encodeURIComponent(f)}:wght@400;700;900`)
     .join('&');
   const brandFontsLink = brandFontFamilies
     ? `<link href="https://fonts.googleapis.com/css2?${brandFontFamilies}&display=swap" rel="stylesheet">`

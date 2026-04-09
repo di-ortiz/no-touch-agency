@@ -112,23 +112,18 @@ WHAT MAKES A GREAT AD VISUAL (follow these principles):
 8. STYLE REFERENCE: "Like a Nike campaign photo", "Apple product shot style", "editorial lifestyle photography"
 9. DEPTH & DETAIL: Specify foreground/background elements, depth of field, textures, and materials for photorealism.
 
-AVOID THESE (they produce bad results):
-- ANY text, words, letters, numbers, headlines, CTAs, buttons, or typography of any kind
-- ANY screens, monitors, laptops, phones, tablets showing content — these ALWAYS produce garbled fake text
-- ANY dashboards, charts, graphs, analytics UIs, data visualizations, or software interfaces
-- ANY browser windows, app mockups, or device screens with visible content
-- Abstract concepts without visual anchors ("growth and success")
-- Stock photo cliches (handshake, lightbulb, puzzle pieces, thumbs up)
-- Busy compositions with no clean space for text overlay
-- Logos or brand marks (these cannot be generated accurately)
-- Signs, banners, price tags, labels, or any surface that would contain text
+AVOID → INSTEAD (what to use when tempted by bad patterns):
+- Text/words/headlines/CTAs → INSTEAD: Leave clean negative space where text will be overlaid later by the ad platform
+- Screens/monitors/laptops/phones → INSTEAD: Abstract geometric shapes, flowing light trails, glass/metallic surfaces, futuristic textures
+- Dashboards/charts/graphs/analytics → INSTEAD: Upward-moving visual metaphors (ascending steps, rising light beams, expanding circles), professional workspace environments
+- Software interfaces/browser windows → INSTEAD: Clean architectural interiors, modern office environments, abstract data-flow visualizations (particles, waves, gradients — NOT actual charts)
+- Abstract concepts without visuals → INSTEAD: Concrete hero elements — a person, product, place, or striking object that anchors the composition
+- Stock photo cliches (handshake, lightbulb, puzzle pieces) → INSTEAD: Authentic lifestyle moments, candid professional settings, dynamic action shots, macro textures
+- Busy compositions → INSTEAD: Rule of thirds with one clear focal point, intentional negative space at bottom third for text overlay
+- Logos/brand marks → INSTEAD: Use brand colors as dominant design elements (colored backgrounds, accent lighting, tinted atmospheres)
+- Signs/banners/price tags → INSTEAD: Clean surfaces, minimalist backgrounds, editorial-style environmental design
 
-INSTEAD OF SCREENS/DASHBOARDS, USE:
-- For tech/SaaS: abstract geometric shapes, flowing gradients, connected nodes, light trails, futuristic textures
-- For analytics/marketing: upward visual metaphors (arrows, ascending steps, light beams), professional environments
-- For any industry: product photography, lifestyle scenes, architectural details, nature metaphors, texture close-ups
-
-OUTPUT FORMAT: Return ONLY the image prompt text. Make it detailed (200-400 words). Describe the visual scene, composition, lighting, colors, mood, and style. Explicitly state "no text, no words, no typography, no screens, no dashboards" in the prompt.`,
+OUTPUT FORMAT: Return ONLY the image prompt text. Make it detailed (200-400 words). Describe the visual scene, composition, lighting, colors, mood, and style. End the prompt with: "No text, no words, no typography, no screens, no dashboards, no UI elements."`,
 
   videoPromptEngineer: `You are an advertising video creative director who writes prompts for AI video generation (Sora 2).
 
