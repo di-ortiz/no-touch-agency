@@ -423,8 +423,8 @@ export async function deliverMediaInline(toolName, result, channel, chatId) {
       }
     }
 
-    // Generated ad images
-    if (toolName === 'generate_ad_images' && result.images) {
+    // Generated ad images (both generate_ad_images and generate_ad_creative_with_text)
+    if ((toolName === 'generate_ad_images' || toolName === 'generate_ad_creative_with_text') && result.images) {
       const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
       const deliverableImages = result.images.filter((img, idx) => {
         if (img.error) return false;
