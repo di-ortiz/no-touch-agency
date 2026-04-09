@@ -193,10 +193,29 @@ app.post('/webhook/whatsapp', async (req, res) => {
           }
         }
 
+        // Upload to Supabase for a permanent URL (temp URLs expire on container restart)
+        let permanentImageUrl = tempImageUrl;
+        if (imageBuffer) {
+          try {
+            const { uploadBuffer } = await import('../api/supabase-storage.js');
+            const stored = await uploadBuffer(
+              `uploads/whatsapp-${Date.now()}.${mimeType === 'image/png' ? 'png' : 'jpg'}`,
+              imageBuffer,
+              mimeType || 'image/jpeg',
+            );
+            if (stored?.url) {
+              permanentImageUrl = stored.url;
+              log.info('Uploaded user photo to Supabase', { url: permanentImageUrl.slice(0, 80) });
+            }
+          } catch (e) {
+            log.warn('Supabase upload failed, using temp URL', { error: e.message });
+          }
+        }
+
         // Append image URL context so Sofia can pass it to generate_video_from_image
         let textPart = caption || 'The user sent this image. Describe what you see and ask how you can help with it.';
-        if (tempImageUrl) {
-          textPart += `\n\n[SYSTEM: The uploaded image is available at this URL for tool use: ${tempImageUrl} — use this URL as imageUrl with generate_video_from_image for video, OR as uploadedImageUrl with generate_ad_creative_with_text for static creatives with the user's photo]`;
+        if (permanentImageUrl) {
+          textPart += `\n\n[SYSTEM: The uploaded image is available at this URL for tool use: ${permanentImageUrl} — use this URL as imageUrl with generate_video_from_image for video, OR as uploadedImageUrl with generate_ad_creative_with_text for static creatives with the user's photo]`;
         }
 
         const normalizePhone = (p) => p?.replace(/[^0-9]/g, '');
