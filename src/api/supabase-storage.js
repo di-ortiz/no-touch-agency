@@ -71,7 +71,8 @@ async function ensureBucket() {
   } catch (e) {
     // 409 = bucket already exists, which is fine
     if (e.response?.status !== 409) {
-      log.warn('Bucket creation check', { status: e.response?.status, message: e.message });
+      const detail = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+      log.warn('Bucket creation failed', { status: e.response?.status, detail });
     }
   }
   bucketChecked = true;
