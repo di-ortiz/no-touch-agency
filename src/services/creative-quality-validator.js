@@ -363,7 +363,7 @@ function fallbackScoring(candidates) {
  */
 export async function generateAndValidate(opts = {}) {
   const { qualityThreshold = 70, maxRetries = 1 } = opts;
-  const { generateMultiCandidateImage } = await import('../api/image-router.js');
+  const { generateTieredImage } = await import('../api/image-router.js');
 
   let currentPrompt = opts.prompt;
   let attempt = 0;
@@ -382,24 +382,9 @@ export async function generateAndValidate(opts = {}) {
     log.warn('Competitor benchmark fetch failed — proceeding without benchmarks', { error: e.message });
   }
 
-  while (attempt <= maxRetries) {
-    attempt++;
-    log.info(`Quality-gated generation attempt ${attempt}/${maxRetries + 1}`, { format: opts.format });
-
-    // Step 1: Generate candidates from all providers
-    const { candidates, errors } = await generateMultiCandidateImage({
-      ...opts,
-      prompt: currentPrompt,
-    });
-
-    if (candidates.length === 0) {
-      log.error('All providers failed — no candidates to score', { errors });
-      if (attempt <= maxRetries) continue;
-      throw new Error(`All image providers failed after ${attempt} attempts: ${errors.map(e => e.error).join('; ')}`);
-    }
-
-    // Step 2: Score candidates against quality criteria + competitors
-    const scoreResult = await scoreImageCandidates({
+  // Build a scoring function that the tiered generator calls after each tier
+  const scoreFn = async (candidates) => {
+    const result = await scoreImageCandidates({
       candidates,
       brandGuidelines: opts.brandGuidelines || {},
       competitorVisuals,
@@ -407,52 +392,78 @@ export async function generateAndValidate(opts = {}) {
       clientId: opts.clientId,
       workflow: opts.workflow,
     });
+    return result;
+  };
 
-    bestResult = scoreResult;
+  while (attempt <= maxRetries) {
+    attempt++;
+    log.info(`Quality-gated tiered generation attempt ${attempt}/${maxRetries + 1}`, { format: opts.format });
 
-    // Step 3: Check if best candidate meets quality threshold
-    if (scoreResult.best && scoreResult.best.qualityScore >= qualityThreshold) {
-      const isMarginal = scoreResult.best.qualityScore < qualityThreshold + 10;
-      if (isMarginal) {
-        log.warn('Quality threshold met but marginal', {
-          score: scoreResult.best.qualityScore,
-          threshold: qualityThreshold,
-          provider: scoreResult.best.providerName || scoreResult.best.provider,
-        });
-      } else {
-        log.info('Quality threshold met', {
-          score: scoreResult.best.qualityScore,
-          threshold: qualityThreshold,
-          provider: scoreResult.best.providerName || scoreResult.best.provider,
-          attempt,
-        });
+    // Step 1: Tiered generation with early exit
+    const tieredResult = await generateTieredImage({
+      ...opts,
+      prompt: currentPrompt,
+      scoreFunction: scoreFn,
+    });
+
+    if (tieredResult.candidates.length === 0) {
+      log.error('All providers failed — no candidates', { errors: tieredResult.errors });
+      if (attempt <= maxRetries) continue;
+      throw new Error(`All image providers failed after ${attempt} attempts: ${tieredResult.errors.map(e => e.error).join('; ')}`);
+    }
+
+    const best = tieredResult.best;
+    if (!best) {
+      if (attempt <= maxRetries) continue;
+      throw new Error('Tiered generation produced candidates but no best result');
+    }
+
+    bestResult = { best, scored: tieredResult.candidates, competitorBenchmarkScore: 0 };
+
+    // Step 2: Check quality threshold
+    if (best.qualityScore >= qualityThreshold) {
+      log.info('Quality threshold met via tiered generation', {
+        score: best.qualityScore,
+        threshold: qualityThreshold,
+        provider: best.providerName,
+        tiersUsed: tieredResult.tiersUsed,
+        totalCandidates: tieredResult.candidates.length,
+      });
+
+      // Step 3: Final verification — reject images with garbled text or screens
+      const verified = await verifyBeforeDelivery(best);
+      if (!verified.pass && attempt <= maxRetries) {
+        log.warn('Verification rejected image, regenerating with stricter prompt', { reason: verified.reason });
+        currentPrompt = `${opts.prompt}. CRITICAL FIX: ${verified.reason}. Absolutely NO text, screens, dashboards, or UI elements.`;
+        continue;
       }
+
       return {
-        ...scoreResult.best,
+        ...best,
         wasRegenerated: attempt > 1,
-        totalCandidatesEvaluated: candidates.length,
-        competitorBenchmarkScore: scoreResult.competitorBenchmarkScore,
-        allScores: scoreResult.scored.map(s => ({
-          provider: s.providerName || s.provider,
-          score: s.qualityScore,
-        })),
+        totalCandidatesEvaluated: tieredResult.candidates.length,
+        tiersUsed: tieredResult.tiersUsed,
+        verified: verified.pass,
+        allScores: tieredResult.candidates
+          .filter(c => c.qualityScore)
+          .map(c => ({ provider: c.providerName || c.provider, score: c.qualityScore })),
       };
     }
 
-    // Step 4: Below threshold — refine prompt and retry
-    if (attempt <= maxRetries && scoreResult.best?.improvementHint) {
-      log.info('Quality below threshold, regenerating with refined prompt', {
-        bestScore: scoreResult.best.qualityScore,
+    // Step 4: Below threshold — refine and retry
+    if (attempt <= maxRetries && best.improvementHint) {
+      log.info('Below threshold, refining prompt', {
+        bestScore: best.qualityScore,
         threshold: qualityThreshold,
-        hint: scoreResult.best.improvementHint,
+        hint: best.improvementHint,
       });
-      currentPrompt = `${opts.prompt}. IMPORTANT IMPROVEMENT: ${scoreResult.best.improvementHint}`;
+      currentPrompt = `${opts.prompt}. IMPORTANT IMPROVEMENT: ${best.improvementHint}`;
     }
   }
 
-  // Return best we have even if below threshold
+  // Return best even if below threshold
   if (bestResult?.best) {
-    log.warn('Returning best candidate despite being below quality threshold', {
+    log.warn('Returning best despite below threshold', {
       score: bestResult.best.qualityScore,
       threshold: qualityThreshold,
     });
@@ -461,19 +472,72 @@ export async function generateAndValidate(opts = {}) {
       belowThreshold: true,
       wasRegenerated: attempt > 1,
       totalCandidatesEvaluated: bestResult.scored.length,
-      competitorBenchmarkScore: bestResult.competitorBenchmarkScore,
-      allScores: bestResult.scored.map(s => ({
-        provider: s.providerName || s.provider,
-        score: s.qualityScore,
-      })),
+      allScores: bestResult.scored
+        .filter(c => c.qualityScore)
+        .map(c => ({ provider: c.providerName || c.provider, score: c.qualityScore })),
     };
   }
 
   throw new Error('Quality-gated generation failed — no candidates produced');
 }
 
+// ============================================================
+// Pre-Delivery Verification
+// ============================================================
+
+/**
+ * Final check before delivering an image to the user.
+ * Uses Claude Vision to detect garbled text, screens, or off-brand content.
+ * Runs on a SINGLE image (~1¢) — not all candidates.
+ *
+ * @param {object} image - Image candidate with url property
+ * @returns {object} { pass: boolean, reason?: string }
+ */
+async function verifyBeforeDelivery(image) {
+  if (!image?.url) return { pass: true };
+
+  try {
+    const b64 = await imageToBase64(image);
+    if (!b64) return { pass: true }; // Can't verify — pass through
+
+    const response = await askClaude({
+      systemPrompt: 'You are a quality control inspector for ad images. Check the image for defects. Return ONLY valid JSON: {"pass": true} or {"pass": false, "reason": "brief explanation"}',
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Check this ad image for these defects:\n1. Garbled/illegible text (AI-generated gibberish letters)\n2. Screens, monitors, laptops, or devices showing content\n3. Dashboards, charts with fake data, or software UIs\n4. Any visible text, words, numbers, or typography\n\nIf ANY defect is found, return pass:false with the reason. If the image is a clean visual with no text/screens, return pass:true.',
+          },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: detectMediaType(image), data: b64 },
+          },
+        ],
+      }],
+      model: 'claude-haiku-4-5-20251001',
+      maxTokens: 256,
+      workflow: 'image-verification',
+    });
+
+    const jsonMatch = response.text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      if (!result.pass) {
+        log.warn('Image failed verification', { reason: result.reason, provider: image.providerName });
+      }
+      return result;
+    }
+    return { pass: true };
+  } catch (e) {
+    log.warn('Verification check failed, passing through', { error: e.message });
+    return { pass: true }; // Don't block on verification errors
+  }
+}
+
 export default {
   fetchCompetitorBenchmark,
   scoreImageCandidates,
   generateAndValidate,
+  verifyBeforeDelivery,
 };
