@@ -574,6 +574,30 @@ Return ONLY the JSON array, no other text.`;
 
       return { clientName: toolInput.clientName, month, totalPosts: posts.length, platforms, posts, spreadsheetUrl, spreadsheetId, ...((!spreadsheetUrl) && { note: 'Calendar data generated successfully. Google Sheets export was unavailable — present the calendar data directly to the user in a formatted message.' }) };
     }
+    // --- PDF Report Generator ---
+    case 'generate_pdf_report': {
+      const { generatePdfReport } = await import('../generators/pdf-report.js');
+      const client = getClient(toolInput.clientName);
+
+      // Parse data — accept both JSON string and plain text
+      let reportData = toolInput.data;
+      try {
+        reportData = JSON.parse(toolInput.data);
+      } catch {
+        // Not JSON — pass as string, Claude will handle it
+      }
+
+      const result = await generatePdfReport({
+        type: toolInput.type,
+        data: reportData,
+        clientName: toolInput.clientName,
+        customPrompt: toolInput.customPrompt,
+        clientId: client?.id,
+      });
+
+      return result;
+    }
+
     // --- Report Export ---
     case 'export_report_to_sheet': {
       const client = getClient(toolInput.clientName);
