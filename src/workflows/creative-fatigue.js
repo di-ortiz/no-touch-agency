@@ -91,11 +91,17 @@ async function checkClientCreatives(client) {
     for (const campaign of (campaigns.data || []).slice(0, 10)) {
       const adSets = await metaAds.getAdSets(campaign.id);
 
+      const campaignImageUrls = [];
+
       for (const adSet of (adSets.data || []).slice(0, 5)) {
         const ads = await metaAds.getAds(adSet.id);
 
         for (const ad of (ads.data || []).slice(0, 10)) {
           if (ad.status !== 'ACTIVE') continue;
+
+          // Track image URL for diversity check
+          const adImageUrl = ad.creative?.image_url || ad.creative?.thumbnail_url || '';
+          if (adImageUrl) campaignImageUrls.push(adImageUrl);
 
           // Get recent performance
           const recentInsights = await metaAds.getInsights(ad.id, {
@@ -207,6 +213,7 @@ async function checkClientCreatives(client) {
               campaignId: campaign.id,
               creativeType: 'ad',
               headline: ad.creative?.title || ad.name,
+              imageUrl: adImageUrl,
               status: 'fatigued',
               impressions: recentMetrics.impressions,
               clicks: recentMetrics.clicks,
@@ -214,6 +221,18 @@ async function checkClientCreatives(client) {
               daysRunning: startDate ? Math.floor((Date.now() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) : 0,
             });
           }
+        }
+      }
+
+      // Check image diversity across active ads in this campaign
+      if (campaignImageUrls.length >= 3) {
+        const uniqueImages = new Set(campaignImageUrls);
+        if (uniqueImages.size <= Math.ceil(campaignImageUrls.length / 3)) {
+          warnings.push({
+            client: client.name,
+            adName: `Campaign: ${campaign.name || campaign.id}`,
+            reason: `Low creative diversity: ${uniqueImages.size} unique image(s) across ${campaignImageUrls.length} active ads — recommend generating fresh creatives`,
+          });
         }
       }
     }

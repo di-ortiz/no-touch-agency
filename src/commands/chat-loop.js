@@ -17,6 +17,24 @@ import logger from '../utils/logger.js';
 const log = logger.child({ module: 'chat-loop' });
 
 /**
+ * Scan conversation messages (newest first) for the most recent uploaded image URL.
+ * Returns the URL if found, or null.
+ */
+function extractLastUploadedImageUrl(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const content = typeof msg.content === 'string'
+      ? msg.content
+      : Array.isArray(msg.content)
+        ? msg.content.filter(c => c.type === 'text').map(c => c.text).join(' ')
+        : '';
+    const match = content.match(/\[SYSTEM: The uploaded image is available at this URL for tool use: (\S+)/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/**
  * Run a conversational tool-use loop with Claude.
  *
  * @param {Object} options
@@ -85,6 +103,15 @@ export async function runChatLoop({
         // Auto-inject clientName for client-facing tools
         if (clientContext?.clientId && tool.input) {
           tool.input.clientName = tool.input.clientName || clientContext.clientName || contactName;
+        }
+
+        // Auto-inject uploadedImageUrl for creative tools when user uploaded a photo
+        if (tool.name === 'generate_ad_creative_with_text' && tool.input && !tool.input.uploadedImageUrl) {
+          const lastImageUrl = extractLastUploadedImageUrl(messages);
+          if (lastImageUrl) {
+            tool.input.uploadedImageUrl = lastImageUrl;
+            log.info('Auto-injected uploadedImageUrl from conversation history', { url: lastImageUrl.slice(0, 80) });
+          }
         }
 
         const result = await executeCSAToolWithTimeout(tool.name, tool.input);

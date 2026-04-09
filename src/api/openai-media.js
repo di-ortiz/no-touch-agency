@@ -228,12 +228,13 @@ export async function generateVideo(opts = {}) {
       return {
         videoUrl: resultUrl,
         id: null,
-        status: 'completed',
+        status: 'still_image_fallback',
+        isStillImage: true,
         duration,
         prompt: opts.prompt,
         resolution: opts.resolution || '720p',
         aspectRatio: opts.aspectRatio || '16:9',
-        note: 'Generated as a still image via gpt-image-1 (Sora video API not available). Use fal.ai to animate.',
+        note: 'Generated as a still image via gpt-image-1 (Sora video API not available). Use Kling AI or fal.ai to animate.',
       };
     }, { retries: 1, label: 'OpenAI image (video fallback)', shouldRetry: isRetryableHttpError })
   );

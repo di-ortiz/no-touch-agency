@@ -50,6 +50,19 @@ export const PLATFORM_SPECS = {
   },
 };
 
+// Format-specific composition hints to ensure visual diversity across ad formats
+export const FORMAT_COMPOSITION_HINTS = {
+  meta_feed:       'Wide establishing shot, landscape composition, environmental context, scene-setting perspective',
+  meta_square:     'Centered close-up, symmetrical composition, product or subject detail, intimate framing',
+  meta_story:      'Vertical hero shot, dramatic low or high angle, bold perspective, immersive depth',
+  instagram_feed:  'Eye-level lifestyle shot, square framing, balanced negative space, warm natural feel',
+  instagram_story: 'Vertical portrait orientation, dynamic diagonal lines, immersive full-bleed feel',
+  google_display:  'Clean horizontal layout, high-contrast subject against simple background, crisp edges',
+  google_square:   'Bold centered icon or hero element, minimal surroundings, punchy contrast',
+  tiktok:          'Vertical action shot, vibrant saturated colors, energetic movement feel, youth-forward',
+  general:         'Balanced composition, clear focal point, professional studio quality',
+};
+
 // ============================================================
 // Text Ad Generation
 // ============================================================
@@ -328,7 +341,7 @@ export async function generateCreativePackage(opts = {}) {
         const qualityResults = await Promise.allSettled(
           imageFormats.map(format =>
             generateAndValidate({
-              prompt: imagePrompt,
+              prompt: `${imagePrompt}. COMPOSITION DIRECTION: ${FORMAT_COMPOSITION_HINTS[format] || FORMAT_COMPOSITION_HINTS.general}`,
               format,
               clientId: client?.id,
               brandGuidelines,
@@ -468,4 +481,5 @@ export default {
   generateImagePrompt,
   generateCreativePackage,
   PLATFORM_SPECS,
+  FORMAT_COMPOSITION_HINTS,
 };
