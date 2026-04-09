@@ -76,7 +76,7 @@ export async function generateImage(opts = {}) {
       log.info('Generating Imagen 3 image', { format, aspectRatio, prompt: opts.prompt?.slice(0, 100) });
 
       const response = await axios.post(
-        `${GEMINI_BASE}/models/imagen-3.0-generate-002:predict?key=${config.GEMINI_API_KEY}`,
+        `${GEMINI_BASE}/models/imagen-3.0-generate-001:predict?key=${config.GEMINI_API_KEY}`,
         {
           instances: [{ prompt: opts.prompt }],
           parameters: {
@@ -113,7 +113,7 @@ export async function generateImage(opts = {}) {
       // Imagen 3: ~$0.04 per image (standard)
       recordCost({
         platform: 'gemini',
-        model: 'imagen-3.0-generate-002',
+        model: 'imagen-3.0-generate-001',
         workflow: opts.workflow || 'creative-generation',
         clientId: opts.clientId,
         costCentsOverride: 4.0,
