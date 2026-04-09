@@ -114,6 +114,15 @@ export async function runChatLoop({
           }
         }
 
+        // Auto-inject imageUrl for edit_image when user uploaded a photo
+        if (tool.name === 'edit_image' && tool.input && !tool.input.imageUrl) {
+          const lastImageUrl = extractLastUploadedImageUrl(messages);
+          if (lastImageUrl) {
+            tool.input.imageUrl = lastImageUrl;
+            log.info('Auto-injected imageUrl for edit_image', { url: lastImageUrl.slice(0, 80) });
+          }
+        }
+
         const result = await executeCSAToolWithTimeout(tool.name, tool.input);
         const resultJson = truncateToolResult(JSON.stringify(result, stripBinaryBuffers));
         toolResults.push({ type: 'tool_result', tool_use_id: tool.id, content: resultJson });

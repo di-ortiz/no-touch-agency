@@ -2383,6 +2383,51 @@ Return ONLY the JSON array, no other text.`;
       return { error: 'All video providers failed (fal.ai Kling, direct Kling, Sora 2). Please try again in a few minutes or check API credits.' };
     }
 
+    // --- Image Editing (Flux Kontext) ---
+    case 'edit_image': {
+      const falApi = await import('../api/fal.js');
+      if (!falApi.isConfigured()) return { error: 'FAL_API_KEY not configured. Image editing requires fal.ai.' };
+
+      const client = getClient(toolInput.clientName);
+      try {
+        log.info('Starting image edit', { model: toolInput.model || 'flux-kontext', prompt: toolInput.prompt?.slice(0, 100) });
+        const result = await falApi.editImage({
+          imageUrl: toolInput.imageUrl,
+          prompt: toolInput.prompt,
+          model: toolInput.model || 'flux-kontext',
+          format: toolInput.format || 'general',
+          workflow: 'image-editing',
+          clientId: client?.id,
+        });
+
+        // Upload edited image to Supabase for permanent URL
+        let permanentUrl = result.url;
+        try {
+          const { uploadFromUrl } = await import('../api/supabase-storage.js');
+          const stored = await uploadFromUrl(result.url, `edited-${Date.now()}.jpg`, 'edits');
+          if (stored?.url) {
+            permanentUrl = stored.url;
+            log.info('Edited image uploaded to Supabase', { url: permanentUrl.slice(0, 80) });
+          }
+        } catch (uploadErr) {
+          log.warn('Supabase upload for edited image failed', { error: uploadErr.message });
+        }
+
+        return {
+          imageUrl: permanentUrl,
+          model: result.model,
+          provider: result.provider,
+          format: result.format,
+          editPrompt: toolInput.prompt,
+          images: [{ format: result.format || 'general', label: 'Edited image', url: permanentUrl }],
+          _imageBuffers: [null],
+        };
+      } catch (e) {
+        log.error('Image editing failed', { error: e.message });
+        return { error: `Image editing failed: ${e.message}. Try a simpler edit instruction, or use generate_ad_creative_with_text with uploadedImageUrl for template-based ads.` };
+      }
+    }
+
     // --- Template Overlay Creative ---
     case 'generate_ad_creative_with_text': {
       const client = getClient(toolInput.clientName);
@@ -2453,7 +2498,7 @@ Return ONLY the JSON array, no other text.`;
             brandDNA: effectiveBrandDNA,
             product: toolInput.product || effectiveBrandDNA?.main_products_or_services?.[0],
             goal: toolInput.goal || 'conversion',
-            templateStyle: toolInput.templateStyle || (toolInput.uploadedImageUrl ? 'split-diagonal' : null),
+            templateStyle: toolInput.templateStyle || (toolInput.uploadedImageUrl ? 'person-hero' : null),
             backgroundImageUrl: toolInput.uploadedImageUrl || null,
             driveFolderId: imgFolderId,
             clientId: client?.id,
