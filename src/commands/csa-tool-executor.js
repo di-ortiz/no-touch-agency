@@ -2282,9 +2282,23 @@ Return ONLY the JSON array, no other text.`;
           });
 
           log.info('fal.ai Kling video completed', { videoUrl: result.videoUrl?.slice(0, 80), id: result.id });
+
+          // Upload to Supabase for permanent URL (Kling CDN URLs expire)
+          let permanentUrl = result.videoUrl;
+          try {
+            const { uploadFromUrl } = await import('../api/supabase-storage.js');
+            const stored = await uploadFromUrl(result.videoUrl, `video-${Date.now()}.mp4`, 'videos');
+            if (stored?.url) {
+              permanentUrl = stored.url;
+              log.info('Kling video uploaded to Supabase', { url: permanentUrl.slice(0, 80) });
+            }
+          } catch (uploadErr) {
+            log.warn('Failed to upload Kling video to Supabase, using CDN URL', { error: uploadErr.message });
+          }
+
           return {
             clientName: client?.name || toolInput.clientName || null,
-            videoUrl: result.videoUrl,
+            videoUrl: permanentUrl,
             duration: result.duration,
             aspectRatio: result.aspectRatio,
             status: result.status,
@@ -2309,9 +2323,23 @@ Return ONLY the JSON array, no other text.`;
           });
 
           log.info('Direct Kling video completed', { videoUrl: result.videoUrl?.slice(0, 80), taskId: result.id });
+
+          // Upload to Supabase for permanent URL (Kling CDN URLs expire)
+          let permanentUrl = result.videoUrl;
+          try {
+            const { uploadFromUrl } = await import('../api/supabase-storage.js');
+            const stored = await uploadFromUrl(result.videoUrl, `video-${Date.now()}.mp4`, 'videos');
+            if (stored?.url) {
+              permanentUrl = stored.url;
+              log.info('Kling video uploaded to Supabase', { url: permanentUrl.slice(0, 80) });
+            }
+          } catch (uploadErr) {
+            log.warn('Failed to upload Kling video to Supabase, using CDN URL', { error: uploadErr.message });
+          }
+
           return {
             clientName: client?.name || toolInput.clientName || null,
-            videoUrl: result.videoUrl,
+            videoUrl: permanentUrl,
             duration: result.duration,
             aspectRatio: result.aspectRatio,
             status: result.status,
