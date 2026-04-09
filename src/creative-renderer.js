@@ -170,13 +170,14 @@ export async function renderAdCreative(backgroundImageUrl, adCopy, brandDNA, opt
 
     log.info('Puppeteer screenshot captured', { format, size: screenshotBuffer.length });
 
-    // Upload to Supabase Storage
+    // Upload to Supabase Storage — always upload when configured for public URLs
     let result = { format, width, height };
 
-    if (opts.driveFolderId && supaStorage.isConfigured()) {
+    if (supaStorage.isConfigured()) {
       try {
         const fileName = `ad-creative-${format}-${timestamp}.png`;
-        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const folder = opts.driveFolderId || 'creatives';
+        const filePath = `${folder}/${fileName}`;
         const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
 
         if (uploaded?.url) {
@@ -398,10 +399,11 @@ export async function renderFromTemplate(templateName, adCopy, brandDNA, opts = 
 
     let result = { format, width, height, templateName: resolvedName };
 
-    if (opts.driveFolderId && supaStorage.isConfigured()) {
+    if (supaStorage.isConfigured()) {
       try {
         const fileName = `template-${resolvedName}-${format}-${timestamp}.png`;
-        const filePath = `${opts.driveFolderId}/${fileName}`;
+        const folder = opts.driveFolderId || 'creatives';
+        const filePath = `${folder}/${fileName}`;
         const uploaded = await supaStorage.uploadBuffer(filePath, screenshotBuffer, 'image/png');
         if (uploaded?.url) {
           result.url = uploaded.url;
