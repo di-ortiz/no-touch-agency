@@ -478,6 +478,11 @@ export async function deliverMediaInline(toolName, result, channel, chatId) {
       await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
     }
 
+    // Generated video from image (Kling / fal.ai)
+    if (toolName === 'generate_video_from_image' && result.videoUrl) {
+      await safeSendMedia(sendVideo, result.videoUrl, `${result.duration || ''}s ${result.aspectRatio || ''} video`.trim(), toolName);
+    }
+
     // Creative package
     if (toolName === 'generate_creative_package' && result.imageUrls) {
       for (let i = 0; i < result.imageUrls.length; i++) {
