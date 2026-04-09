@@ -733,7 +733,7 @@ Return ONLY the JSON array, no other text.`;
         const qualityResults = await Promise.allSettled(
           targetFormats.map(format =>
             generateAndValidate({
-              prompt: `${imagePrompt}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. CRITICAL: No text, no words, no letters, no numbers, no typography, no captions, no screens, no monitors, no dashboards, no charts, no UI elements. Pure visual scene only — clean background with space for text overlay.`,
+              prompt: `${imagePrompt}. COMPOSITION DIRECTION: ${creativeEngine.FORMAT_COMPOSITION_HINTS?.[format] || creativeEngine.FORMAT_COMPOSITION_HINTS?.general || ''}. Professional advertising quality for ${format.replace(/_/g, ' ')} format. CRITICAL: No text, no words, no letters, no numbers, no typography, no captions, no screens, no monitors, no dashboards, no charts, no UI elements. Pure visual scene only — clean background with space for text overlay.`,
               format,
               clientId: client?.id,
               brandGuidelines,
@@ -895,11 +895,54 @@ Return ONLY the JSON array, no other text.`;
       return result;
     }
     case 'generate_ad_video': {
-      if (!config.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured. Set it in .env to enable video generation.' };
       const client = getClient(toolInput.clientName);
-
       const videoPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting.`;
+      const aspectRatio = toolInput.platform === 'meta_stories' || toolInput.platform === 'tiktok' ? '9:16' : '16:9';
 
+      // 1. Try Kling AI FIRST if configured (real video generation)
+      if (klingApi.isConfigured()) {
+        try {
+          // Generate a reference image if none provided
+          let referenceImageUrl = toolInput.referenceImageUrl || toolInput.imageUrl;
+          if (!referenceImageUrl && config.OPENAI_API_KEY) {
+            log.info('Generating reference image for Kling video', { client: toolInput.clientName });
+            const refImage = await openaiMedia.generateAdVideo({
+              prompt: videoPrompt,
+              format: toolInput.platform || 'meta_feed',
+              duration: toolInput.duration || 8,
+              workflow: 'ad-video-reference-image',
+              clientId: client?.id,
+            });
+            referenceImageUrl = refImage.videoUrl;
+          }
+
+          if (referenceImageUrl) {
+            const klingResult = await klingApi.generateVideoFromImage({
+              imageUrl: referenceImageUrl,
+              prompt: videoPrompt,
+              duration: Math.min(toolInput.duration || 5, 10),
+              aspectRatio,
+              workflow: 'ad-video-generation',
+              clientId: client?.id,
+            });
+
+            return {
+              clientName: toolInput.clientName,
+              concept: toolInput.concept,
+              videoUrl: klingResult.videoUrl,
+              duration: klingResult.duration,
+              aspectRatio: klingResult.aspectRatio,
+              status: klingResult.status,
+              provider: 'kling',
+            };
+          }
+        } catch (klingError) {
+          log.warn('Kling AI video generation failed, falling back to still image', { error: klingError.message, client: toolInput.clientName });
+        }
+      }
+
+      // 2. Fallback: OpenAI still image
+      if (!config.OPENAI_API_KEY) return { error: 'No video generation provider configured. Set OPENAI_API_KEY or KLING_ACCESS_KEY/KLING_SECRET_KEY.' };
       try {
         const video = await openaiMedia.generateAdVideo({
           prompt: videoPrompt,
@@ -917,54 +960,14 @@ Return ONLY the JSON array, no other text.`;
           resolution: video.resolution,
           aspectRatio: video.aspectRatio,
           status: video.status,
+          provider: 'openai',
+          note: video.note || 'Generated as still image — animate with Kling AI or fal.ai',
         };
       } catch (videoError) {
-        log.error('Sora video generation failed', { error: videoError.message, stack: videoError.stack, client: toolInput.clientName });
-        const errMsg = videoError.message || 'Unknown error';
-        const isRateLimit = errMsg.includes('429') || errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota');
-        const isContentPolicy = errMsg.includes('policy') || errMsg.includes('safety') || errMsg.includes('content');
-
-        // Auto-fallback to Kling AI when Sora fails (rate limit, quota, or other transient errors)
-        if (!isContentPolicy && klingApi.isConfigured()) {
-          log.info('Falling back to Kling AI for video generation', { reason: errMsg.slice(0, 100), client: toolInput.clientName });
-          try {
-            const klingPrompt = `Professional advertising video for ${toolInput.clientName}. ${toolInput.concept}. ${toolInput.offer ? `Featuring: ${toolInput.offer}.` : ''} High production quality, smooth camera movement, cinematic lighting.`;
-            const klingResult = await klingApi.generateVideoFromImage({
-              imageUrl: toolInput.referenceImageUrl || toolInput.imageUrl,
-              prompt: klingPrompt,
-              duration: Math.min(toolInput.duration || 5, 10),
-              aspectRatio: toolInput.platform === 'meta_stories' || toolInput.platform === 'tiktok' ? '9:16' : '16:9',
-              workflow: 'ad-video-generation-kling-fallback',
-              clientId: client?.id,
-            });
-
-            return {
-              clientName: toolInput.clientName,
-              concept: toolInput.concept,
-              videoUrl: klingResult.videoUrl,
-              duration: klingResult.duration,
-              aspectRatio: klingResult.aspectRatio,
-              status: klingResult.status,
-              provider: 'kling',
-              note: 'Generated via Kling AI (Sora was unavailable)',
-            };
-          } catch (klingError) {
-            log.error('Kling AI fallback also failed', { error: klingError.message });
-            // Fall through to return the original error with both providers mentioned
-          }
-        }
-
-        let userMessage;
-        if (isRateLimit) {
-          userMessage = `Video generation failed — both Sora 2 and Kling AI were unavailable. Error: ${errMsg}`;
-        } else if (isContentPolicy) {
-          userMessage = `Video generation was blocked by content policy. Try a different concept. Error: ${errMsg}`;
-        } else {
-          userMessage = `Video generation failed: ${errMsg}. Try again with a simpler concept, or I can generate static images instead.`;
-        }
+        log.error('Video generation failed', { error: videoError.message, client: toolInput.clientName });
         return {
-          error: userMessage,
-          suggestion: 'Try generate_ad_images as an alternative, or generate_video_from_image with a reference image and Kling AI',
+          error: `Video generation failed: ${videoError.message}. Try generate_ad_images as an alternative.`,
+          suggestion: 'Try generate_ad_images for static creatives, or provide a referenceImageUrl for Kling AI video',
         };
       }
     }
