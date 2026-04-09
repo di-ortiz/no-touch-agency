@@ -380,6 +380,98 @@ const TEMPLATES = {
       </div>`;
     },
   },
+
+  // --- Agency-Quality Templates ---
+
+  'person-hero': {
+    label: 'Person Hero',
+    description: 'Dark cinematic background with large person photo on left and bold text on right. Professional agency look like Suno Consultoria ads.',
+    render: ({ headline, subtext, cta, colors, font, width, height, backgroundImageUrl, logoUrl }) => {
+      const isStory = height > width;
+      const imgSection = backgroundImageUrl
+        ? `<img src="${backgroundImageUrl}" style="width:${isStory ? '100%' : '48%'};height:${isStory ? '45%' : '100%'};object-fit:cover;object-position:center top;display:block;" crossorigin="anonymous">`
+        : `<div style="width:${isStory ? '100%' : '48%'};height:${isStory ? '45%' : '100%'};background:linear-gradient(135deg,${colors.primary}40,#111);"></div>`;
+
+      return `<div style="width:${width}px;height:${height}px;font-family:'${font}',sans-serif;display:flex;${isStory ? 'flex-direction:column' : 'flex-direction:row'};background:#0a0a0a;overflow:hidden;position:relative;">
+        ${imgSection}
+        <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:${isStory ? '40px 48px' : '60px 56px'};box-sizing:border-box;position:relative;">
+          ${logoUrl ? `<img src="${logoUrl}" style="max-height:40px;max-width:160px;margin-bottom:24px;object-fit:contain;" crossorigin="anonymous" onerror="this.style.display='none'">` : ''}
+          <h1 style="color:#ffffff;font-size:${fontSize(width, isStory ? 48 : 44)};font-weight:800;margin:0 0 20px 0;line-height:1.15;letter-spacing:-0.5px;">
+            ${headline}
+          </h1>
+          <p style="color:#b0b0b0;font-size:${fontSize(width, isStory ? 24 : 22)};font-weight:400;margin:0 0 36px 0;line-height:1.5;">
+            ${subtext}
+          </p>
+          ${ctaButton(cta, { bg: colors.primary, color: 'white', fontSize: fontSize(width, 22) })}
+        </div>
+        <div style="position:absolute;bottom:0;left:0;right:0;height:6px;background:${colors.primary};"></div>
+      </div>`;
+    },
+  },
+
+  'product-showcase': {
+    label: 'Product Showcase',
+    description: 'Gradient background with product screenshot or reference image centered. Logo and headline at top, CTA below. Great for SaaS, apps, and product ads.',
+    render: ({ headline, subtext, cta, colors, font, width, height, backgroundImageUrl, logoUrl }) => {
+      const isStory = height > width;
+      const imgBlock = backgroundImageUrl
+        ? `<div style="flex:1;display:flex;align-items:center;justify-content:center;padding:20px;">
+            <img src="${backgroundImageUrl}" style="max-width:85%;max-height:${isStory ? '350px' : '320px'};border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,0.3);object-fit:contain;" crossorigin="anonymous">
+          </div>`
+        : `<div style="flex:1;display:flex;align-items:center;justify-content:center;">
+            <div style="width:70%;height:${isStory ? '280px' : '250px'};background:rgba(255,255,255,0.08);border-radius:16px;border:1px solid rgba(255,255,255,0.15);"></div>
+          </div>`;
+
+      return `<div style="width:${width}px;height:${height}px;font-family:'${font}',sans-serif;background:linear-gradient(160deg,${colors.primary},${colors.secondary || '#1a1a2e'});display:flex;flex-direction:column;overflow:hidden;position:relative;">
+        <div style="padding:${isStory ? '50px 48px 20px' : '48px 56px 16px'};text-align:center;">
+          ${logoUrl ? `<img src="${logoUrl}" style="max-height:44px;max-width:180px;margin-bottom:20px;object-fit:contain;" crossorigin="anonymous" onerror="this.style.display='none'">` : ''}
+          <h1 style="color:#ffffff;font-size:${fontSize(width, isStory ? 46 : 42)};font-weight:800;margin:0 0 12px 0;line-height:1.15;letter-spacing:-0.5px;">
+            ${headline}
+          </h1>
+          <p style="color:rgba(255,255,255,0.8);font-size:${fontSize(width, 22)};font-weight:400;margin:0;line-height:1.4;">
+            ${subtext}
+          </p>
+        </div>
+        ${imgBlock}
+        <div style="padding:${isStory ? '20px 48px 50px' : '16px 56px 48px'};text-align:center;">
+          ${ctaButton(cta, { bg: '#ffffff', color: colors.primary, fontSize: fontSize(width, 22) })}
+        </div>
+      </div>`;
+    },
+  },
+
+  'lifestyle-blend': {
+    label: 'Lifestyle Blend',
+    description: 'Person or lifestyle photo blended with gradient background and geometric accent shapes. Feature highlights with icons area. Modern agency look.',
+    render: ({ headline, subtext, cta, colors, font, width, height, backgroundImageUrl, logoUrl }) => {
+      const isStory = height > width;
+
+      return `<div style="width:${width}px;height:${height}px;font-family:'${font}',sans-serif;background:linear-gradient(145deg,${colors.secondary || '#e8f4f8'},${colors.primary}22,#ffffff);display:flex;flex-direction:column;overflow:hidden;position:relative;">
+        <!-- Geometric accent shapes -->
+        <div style="position:absolute;top:${isStory ? '-80px' : '-60px'};right:${isStory ? '-60px' : '-40px'};width:${isStory ? '300px' : '260px'};height:${isStory ? '300px' : '260px'};border-radius:50%;background:${colors.primary}18;"></div>
+        <div style="position:absolute;bottom:${isStory ? '30%' : '20%'};left:-40px;width:200px;height:200px;border-radius:50%;background:${colors.primary}12;"></div>
+
+        <!-- Top section: logo + text -->
+        <div style="padding:${isStory ? '50px 48px 24px' : '44px 52px 20px'};position:relative;z-index:1;">
+          ${logoUrl ? `<img src="${logoUrl}" style="max-height:36px;max-width:150px;margin-bottom:20px;object-fit:contain;" crossorigin="anonymous" onerror="this.style.display='none'">` : ''}
+          <h1 style="color:#1a1a1a;font-size:${fontSize(width, isStory ? 44 : 40)};font-weight:800;margin:0 0 12px 0;line-height:1.15;">
+            ${headline}
+          </h1>
+          <p style="color:#555;font-size:${fontSize(width, 21)};font-weight:400;margin:0 0 24px 0;line-height:1.45;max-width:${isStory ? '90%' : '70%'};">
+            ${subtext}
+          </p>
+          ${ctaButton(cta, { bg: colors.primary, color: 'white', fontSize: fontSize(width, 20) })}
+        </div>
+
+        <!-- Bottom section: person/product image -->
+        ${backgroundImageUrl
+          ? `<div style="flex:1;display:flex;align-items:flex-end;justify-content:center;position:relative;z-index:1;">
+              <img src="${backgroundImageUrl}" style="max-height:${isStory ? '55%' : '65%'};max-width:90%;object-fit:contain;object-position:bottom;" crossorigin="anonymous">
+            </div>`
+          : `<div style="flex:1;"></div>`}
+      </div>`;
+    },
+  },
 };
 
 // --- Helpers ---

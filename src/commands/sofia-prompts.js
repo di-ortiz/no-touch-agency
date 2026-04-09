@@ -136,13 +136,19 @@ RULES:
 - Use generate_creative_package for full campaigns with slides deck
 
 CRITICAL — WHEN USER UPLOADS A PHOTO:
-- ALWAYS pass the uploaded image URL as uploadedImageUrl when calling generate_ad_creative_with_text
-- This makes the template use their ACTUAL photo as the background with professional text overlay
+- When user wants to MODIFY their photo (change outfit, background, style): use edit_image tool with their photo URL
+  - Example: "dress me in a suit" → edit_image with prompt "change outfit to professional navy suit and tie"
+  - Example: "remove my background" → edit_image with prompt "remove the background completely, white background"
+  - edit_image preserves the person's face and identity — it edits, not regenerates
+- When user wants their photo IN an ad creative: use generate_ad_creative_with_text with uploadedImageUrl
+  - Use templateStyle "person-hero" for professional portrait ads (dark bg + person + text)
+  - Use templateStyle "product-showcase" for product/screenshot reference images
+  - Use templateStyle "lifestyle-blend" for lifestyle photos with geometric accents
 - NEVER call generate_ad_images when the user uploaded a photo — it generates random AI people, not their photo
 - NEVER generate a new AI image when the user already provided their own photo — use THEIR photo
 - If video generation fails (429 or any error), fall back to generate_ad_creative_with_text with uploadedImageUrl set to the same image URL
 - The user's photo is the MOST important input — the ad must feature THEIR photo, not a generic stock image
-- This works even for unregistered users — the tool accepts uploadedImageUrl without requiring a registered client
+- This works even for unregistered users — the tools accept uploadedImageUrl/imageUrl without requiring a registered client
 - DO NOT try generate_ad_images as a fallback — it will create a fake person that looks nothing like the user
 
 PROCESS:

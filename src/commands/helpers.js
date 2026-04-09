@@ -89,7 +89,7 @@ setInterval(() => {
 // --- Tool Execution Config ---
 export const SLOW_TOOL_TIMEOUT_MS = 8 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 2 * 60 * 1000;
-export const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page', 'generate_video_from_image', 'generate_ad_creative_with_text', 'extract_brand_dna', 'update_brand_dna', 'generate_pdf_report']);
+export const SLOW_TOOLS = new Set(['generate_ad_images', 'generate_ad_video', 'generate_creative_package', 'create_presentation', 'generate_weekly_report', 'preview_landing_page', 'generate_video_from_image', 'generate_ad_creative_with_text', 'extract_brand_dna', 'update_brand_dna', 'generate_pdf_report', 'edit_image']);
 
 export const TOOL_PROGRESS_MESSAGES = {
   generate_pdf_report: 'Generating your PDF report... This might take a minute.',
@@ -423,8 +423,8 @@ export async function deliverMediaInline(toolName, result, channel, chatId) {
       }
     }
 
-    // Generated ad images (both generate_ad_images and generate_ad_creative_with_text)
-    if ((toolName === 'generate_ad_images' || toolName === 'generate_ad_creative_with_text') && result.images) {
+    // Generated ad images (both generate_ad_images, generate_ad_creative_with_text, edit_image)
+    if ((toolName === 'generate_ad_images' || toolName === 'generate_ad_creative_with_text' || toolName === 'edit_image') && result.images) {
       const hasBuffers = result._imageBuffers?.some(b => b?.buffer);
       const deliverableImages = result.images.filter((img, idx) => {
         if (img.error) return false;
@@ -432,13 +432,25 @@ export async function deliverMediaInline(toolName, result, channel, chatId) {
         if (img.url || img.deliveryUrl) return true;
         return false;
       });
-      log.info('Delivering ad images inline', { total: result.images.length, deliverable: deliverableImages.length, hasBuffers, channel });
+      log.info('Delivering ad images inline', { total: result.images.length, deliverable: deliverableImages.length, hasBuffers, channel, toolName });
 
       let deliveredCount = 0;
       for (let i = 0; i < result.images.length; i++) {
         const img = result.images[i];
-        const bufferObj = result._imageBuffers?.[i];
+        let bufferObj = result._imageBuffers?.[i];
         if (img.error) continue;
+
+        // Defensive fallback: if buffer missing but URL exists, download buffer
+        if (!bufferObj?.buffer && img.url && !img.url.startsWith('data:')) {
+          try {
+            const resp = await axios.get(img.url, { responseType: 'arraybuffer', timeout: 15000 });
+            bufferObj = { buffer: Buffer.from(resp.data), mimeType: resp.headers['content-type'] || 'image/png' };
+            log.info('Downloaded image buffer from URL as delivery fallback', { format: img.format, size: bufferObj.buffer.length });
+          } catch (dlErr) {
+            log.warn('Image buffer download fallback failed', { error: dlErr.message, format: img.format });
+          }
+        }
+
         if (!bufferObj?.buffer && !img.url && !img.deliveryUrl) continue;
         const caption = img.label || img.format || 'Ad image';
         const deliveryUrl = img.deliveryUrl || img.url;
