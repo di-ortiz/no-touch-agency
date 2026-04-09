@@ -557,15 +557,22 @@ Return ONLY the JSON array, no other text.`;
         return { error: 'Failed to generate calendar content. Please try again.' };
       }
 
-      const result = await googleSheets.createContentCalendar({
-        clientName: toolInput.clientName,
-        month,
-        posts,
-        folderId,
-      });
+      let spreadsheetUrl = null;
+      let spreadsheetId = null;
+      try {
+        const result = await googleSheets.createContentCalendar({
+          clientName: toolInput.clientName,
+          month,
+          posts,
+          folderId,
+        });
+        spreadsheetUrl = result.url;
+        spreadsheetId = result.spreadsheetId;
+      } catch (sheetErr) {
+        log.warn('Google Sheets calendar creation failed, returning data inline', { error: sheetErr.message });
+      }
 
-      // Google Sheets now throws on errors instead of returning null
-      return { clientName: toolInput.clientName, month, totalPosts: posts.length, platforms, spreadsheetUrl: result.url, spreadsheetId: result.spreadsheetId };
+      return { clientName: toolInput.clientName, month, totalPosts: posts.length, platforms, posts, spreadsheetUrl, spreadsheetId, ...((!spreadsheetUrl) && { note: 'Calendar data generated successfully. Google Sheets export was unavailable — present the calendar data directly to the user in a formatted message.' }) };
     }
     // --- Report Export ---
     case 'export_report_to_sheet': {
