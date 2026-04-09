@@ -587,10 +587,16 @@ Return ONLY the JSON array, no other text.`;
         // Not JSON — pass as string, Claude will handle it
       }
 
+      // Parse imageUrls — accept comma-separated string or array
+      const imageUrls = toolInput.imageUrls
+        ? (typeof toolInput.imageUrls === 'string' ? toolInput.imageUrls.split(',').map(u => u.trim()).filter(Boolean) : toolInput.imageUrls)
+        : [];
+
       const result = await generatePdfReport({
         type: toolInput.type,
         data: reportData,
         clientName: toolInput.clientName,
+        imageUrls,
         customPrompt: toolInput.customPrompt,
         clientId: client?.id,
       });

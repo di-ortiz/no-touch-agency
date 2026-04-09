@@ -119,14 +119,15 @@ Return ONLY the complete HTML document. No markdown.`,
  * @param {string} opts.type - Report type: 'social_strategy' | 'content_calendar' | 'competitor_analysis' | 'monthly_report' | 'custom'
  * @param {object} opts.data - Report data (passed to Claude as context)
  * @param {string} opts.clientName - Client/brand name
+ * @param {string[]} [opts.imageUrls] - Image URLs to embed in the report (creative previews, screenshots, etc.)
  * @param {string} [opts.customPrompt] - Custom instructions for 'custom' type
  * @param {string} [opts.clientId] - Client ID for cost tracking
  * @returns {object} { url, _pdfBuffer, fileName, message }
  */
 export async function generatePdfReport(opts = {}) {
-  const { type = 'custom', data = {}, clientName = 'Report', customPrompt, clientId } = opts;
+  const { type = 'custom', data = {}, clientName = 'Report', imageUrls = [], customPrompt, clientId } = opts;
 
-  log.info('Starting PDF report generation', { type, clientName });
+  log.info('Starting PDF report generation', { type, clientName, imageCount: imageUrls.length });
 
   // Step 1: Generate HTML with Claude
   const systemPrompt = SYSTEM_PROMPTS[type]
@@ -135,9 +136,14 @@ export async function generatePdfReport(opts = {}) {
 
   const dataContext = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 
+  // Build image embedding instructions if URLs provided
+  const imageInstructions = imageUrls.length > 0
+    ? `\n\nIMAGE ASSETS TO EMBED:\nThe following image URLs should be embedded in the report using <img> tags. Place them alongside their corresponding content (e.g., next to the post they represent in a calendar, or in an "Approved Creatives" section).\n${imageUrls.map((url, i) => `Image ${i + 1}: ${url}`).join('\n')}\n\nIMPORTANT: Use <img src="URL" style="max-width:100%; height:auto; border-radius:8px; margin:12px 0;"> for each image. If this is a content calendar, show the image thumbnail next to each post entry.`
+    : '';
+
   const userMessage = type === 'custom' && customPrompt
-    ? `Create a professional PDF report for "${clientName}".\n\nInstructions: ${customPrompt}\n\nData:\n${dataContext}`
-    : `Create a professional ${type.replace(/_/g, ' ')} report for "${clientName}".\n\nData:\n${dataContext}`;
+    ? `Create a professional PDF report for "${clientName}".\n\nInstructions: ${customPrompt}\n\nData:\n${dataContext}${imageInstructions}`
+    : `Create a professional ${type.replace(/_/g, ' ')} report for "${clientName}".\n\nData:\n${dataContext}${imageInstructions}`;
 
   const response = await askClaude({
     systemPrompt,
